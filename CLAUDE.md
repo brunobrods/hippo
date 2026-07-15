@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+See @WORKFLOW.md for process rules (when to ask clarifying questions, when to spawn verification sub-agents).
+
 ## Project
 
 Async Python toolkit for the Coinbase Advanced Trade REST API. Python 3.11+.

@@ -1,3 +1,6 @@
 aiohttp>=3.9
 PyJWT[crypto]>=2.8
 pandas>=2.2
+PyYAML>=6.0
+pytest>=8.0
+pytest-asyncio>=0.23

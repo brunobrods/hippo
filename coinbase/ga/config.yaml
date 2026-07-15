@@ -1,0 +1,21 @@
+# GA crypto trading module — configuration.
+# Product IDs and granularities follow Coinbase Advanced Trade's own format
+# (e.g. "BTC-USDC", "ONE_HOUR") rather than generic "BTC/USDT" / "1h" strings,
+# since CoinbaseAdapter is called directly with these values.
+
+data:
+  pair: "BTC-USDC"
+  granularity: "ONE_HOUR"   # ONE_MINUTE | FIVE_MINUTE | FIFTEEN_MINUTE | THIRTY_MINUTE | ONE_HOUR | TWO_HOUR | SIX_HOUR | ONE_DAY
+  start_date: "2024-01-01"
+  end_date: "2026-07-01"
+  test_split: 0.2           # fraction of the window held out for testing
+
+strategy:
+  indicators:
+    sma_short_period: 9
+    sma_long_period: 20
+    sma_extra_period: 50
+    rsi_period: 14
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
