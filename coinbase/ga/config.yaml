@@ -11,6 +11,10 @@ data:
   test_split: 0.2           # fraction of the window held out for testing
 
 strategy:
+  position_size_pct: 0.10  # fraction of quote-currency balance risked per trade
+  buy_threshold: 0.6       # signal_score above this opens a position
+  sell_threshold: 0.4      # signal_score below this closes an open position
+  starting_balance: 10000.0  # quote-currency balance at the start of a backtest
   indicators:
     sma_short_period: 9
     sma_long_period: 20
@@ -19,3 +23,13 @@ strategy:
     macd_fast: 12
     macd_slow: 26
     macd_signal: 9
+
+genetic_algorithm:
+  population_size: 100
+  generations: 50
+  mutation_rate: 0.1        # per-gene probability of mutation
+  crossover_rate: 0.8       # probability a child comes from crossover rather than a cloned parent
+  tournament_size: 5
+  elitism_count: 5
+  mutation_sigma: 0.1       # stddev of Gaussian noise added to a mutated weight
+  seed: null                # set an int for reproducible runs (e.g. in tests)
