@@ -182,6 +182,24 @@ def test_evolve_drives_weight_toward_what_fitness_rewards():
     assert best.weight("rsi") > 1.0 / len(WEIGHT_KEYS)  # better than the uniform-random baseline
 
 
+def test_evolve_invokes_on_generation_once_per_generation_with_plausible_stats():
+    config = GaConfig(
+        population_size=10,
+        generations=4,
+        mutation_rate=0.2,
+        crossover_rate=0.8,
+        tournament_size=3,
+        elitism_count=2,
+        seed=7,
+    )
+    calls: list[tuple[int, float, float]] = []
+    GeneticAlgorithm(config).evolve(_WeightSumFitness("rsi"), on_generation=lambda g, b, a: calls.append((g, b, a)))
+
+    assert [generation for generation, _, _ in calls] == [1, 2, 3, 4]
+    for _, best, average in calls:
+        assert best >= average  # best-of-population can never be below the population average
+
+
 def test_evolve_is_reproducible_with_a_fixed_seed():
     config = GaConfig(
         population_size=10,

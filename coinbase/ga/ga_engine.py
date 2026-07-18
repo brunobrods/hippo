@@ -1,6 +1,6 @@
 import random
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 from coinbase.ga.market_data_processor import NORMALIZED_COLUMNS
 
@@ -174,6 +174,17 @@ class Elitism:
         return sorted(self._population, key=lambda genome: genome.fitness(), reverse=True)[: self._count]
 
 
+class GenerationStats:
+    def __init__(self, population: list[Genome]) -> None:
+        self._population = population
+
+    def best_fitness(self) -> float:
+        return max(genome.fitness() for genome in self._population)
+
+    def average_fitness(self) -> float:
+        return sum(genome.fitness() for genome in self._population) / len(self._population)
+
+
 # ── Engine ─────────────────────────────────────────────────────────────
 
 class GeneticAlgorithm:
@@ -185,10 +196,17 @@ class GeneticAlgorithm:
     def initial_population(self) -> list[Genome]:
         return RandomPopulation(self._config.population_size, self._keys, self._random).genomes()
 
-    def evolve(self, fitness_function: FitnessFunction) -> Genome:
+    def evolve(
+        self,
+        fitness_function: FitnessFunction,
+        on_generation: Optional[Callable[[int, float, float], None]] = None,
+    ) -> Genome:
         population = FitnessEvaluation(self.initial_population(), fitness_function).scored()
-        for _ in range(self._config.generations):
+        for generation in range(1, self._config.generations + 1):
             population = self._next_generation(population, fitness_function)
+            if on_generation is not None:
+                stats = GenerationStats(population)
+                on_generation(generation, stats.best_fitness(), stats.average_fitness())
         return Elitism(population, 1).survivors()[0]
 
     def _next_generation(self, population: list[Genome], fitness_function: FitnessFunction) -> list[Genome]:

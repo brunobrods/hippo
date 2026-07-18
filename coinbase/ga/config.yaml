@@ -33,3 +33,7 @@ genetic_algorithm:
   elitism_count: 5
   mutation_sigma: 0.1       # stddev of Gaussian noise added to a mutated weight
   seed: null                # set an int for reproducible runs (e.g. in tests)
+
+output:
+  strategy_filepath: "./best_strategy.json"
+  log_filepath: "./ga_run_log.txt"
