@@ -33,6 +33,9 @@ class StrategyConfigFile:
 
 # ── GA-driven strategy ───────────────────────────────────────────────────
 
+POSITION_PNL_KEY = "position_pnl"
+
+
 class GaStrategy:
     def __init__(self, genome: Genome, config: StrategyConfig, keys: tuple[str, ...] = WEIGHT_KEYS) -> None:
         self._genome = genome
@@ -40,7 +43,7 @@ class GaStrategy:
         self._keys   = keys
 
     def decide(self, row: dict[str, float], position: Optional[Position], balance: float) -> Decision:
-        score = self._signal_score(row)
+        score = self._signal_score(row, position)
         if position is None and score > self._config.buy_threshold:
             size = (balance * self._config.position_size_pct) / row["close"]
             return Decision(Action.BUY, size)
@@ -48,8 +51,19 @@ class GaStrategy:
             return Decision(Action.SELL)
         return Decision(Action.HOLD)
 
-    def _signal_score(self, row: dict[str, float]) -> float:
-        return sum(self._genome.weight(key) * row[f"norm_{key}"] for key in self._keys)
+    def _signal_score(self, row: dict[str, float], position: Optional[Position]) -> float:
+        total = sum(
+            self._genome.weight(key) * row[f"norm_{key}"]
+            for key in self._keys if key != POSITION_PNL_KEY
+        )
+        if POSITION_PNL_KEY in self._keys:
+            total += self._genome.weight(POSITION_PNL_KEY) * self._unrealized_return(row, position)
+        return total
+
+    def _unrealized_return(self, row: dict[str, float], position: Optional[Position]) -> float:
+        if position is None:
+            return 0.0
+        return (row["close"] - position.entry_price()) / position.entry_price()
 
 
 # ── Yield ────────────────────────────────────────────────────────────────

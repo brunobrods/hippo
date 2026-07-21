@@ -5,13 +5,13 @@
 
 data:
   pair: "FET-USDC"
-  granularity: "TWO_HOUR"   # ONE_MINUTE | FIVE_MINUTE | FIFTEEN_MINUTE | THIRTY_MINUTE | ONE_HOUR | TWO_HOUR | SIX_HOUR | ONE_DAY
-  start_date: "2025-01-01"
+  granularity: "SIX_HOUR"   # ONE_MINUTE | FIVE_MINUTE | FIFTEEN_MINUTE | THIRTY_MINUTE | ONE_HOUR | TWO_HOUR | SIX_HOUR | ONE_DAY
+  start_date: "2025-06-01"
   end_date: "2026-07-01"
   test_split: 0.5        # fraction of the window held out for testing
 
 strategy:
-  position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
+  position_size_pct: 0.50  # fraction of quote-currency balance risked per trade
   buy_threshold: 0.75       # signal_score above this opens a position
   sell_threshold: 0.25      # signal_score below this closes an open position
   starting_balance: 10000.0  # quote-currency balance at the start of a backtest

@@ -4,9 +4,9 @@ from typing import Any
 
 from coinbase.coinbase_adapter import CoinbaseAdapter
 from coinbase.ga.config import ConfigFile
-from coinbase.ga.ga_engine import GaConfigFile, GeneticAlgorithm, Genome
+from coinbase.ga.ga_engine import GaConfigFile, GeneticAlgorithm, Genome, WEIGHT_KEYS
 from coinbase.ga.market_data_processor import HistoricalMarketData, MarketDataConfig, TrainTestSplit
-from coinbase.ga.strategy_evaluator import StrategyConfigFile, StrategyEvaluator
+from coinbase.ga.strategy_evaluator import POSITION_PNL_KEY, StrategyConfigFile, StrategyEvaluator
 from coinbase.ga.strategy_output import (
     GaRunLog,
     OutputConfigFile,
@@ -70,12 +70,13 @@ class TrainingRun:
             self._adapter, window.pair, window.granularity, window.start, window.end, market_config.periods(),
         ).dataframe()
         split = TrainTestSplit(frame, window.test_split)
+        keys  = WEIGHT_KEYS + (POSITION_PNL_KEY,)
 
-        train_evaluator = StrategyEvaluator(split.train(), strategy_config)
-        test_evaluator  = StrategyEvaluator(split.test(), strategy_config)
+        train_evaluator = StrategyEvaluator(split.train(), strategy_config, keys)
+        test_evaluator  = StrategyEvaluator(split.test(), strategy_config, keys)
 
         console_log = ConsoleGenerationLog(GaRunLog(output_config.log_filepath))
-        best_genome = GeneticAlgorithm(ga_config).evolve(train_evaluator, on_generation=console_log.append)
+        best_genome = GeneticAlgorithm(ga_config, keys).evolve(train_evaluator, on_generation=console_log.append)
 
         data     = self._raw_config["data"]
         metadata = StrategyMetadata(

@@ -3,6 +3,7 @@ import pytest
 
 from coinbase.ga.ga_engine import Genome
 from coinbase.ga.strategy_evaluator import (
+    POSITION_PNL_KEY,
     AnnualizedYield,
     GaStrategy,
     StrategyConfig,
@@ -95,6 +96,45 @@ def test_ga_strategy_holds_position_when_score_between_thresholds():
     strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
     decision = strategy.decide(_row(close=100.0, sma_short=0.5), position=Position(90.0, 1.0), balance=1000.0)
     assert decision.action is Action.HOLD
+
+
+# ── GaStrategy + position_pnl ─────────────────────────────────────────
+
+def _all_weight_on_position_pnl() -> Genome:
+    return Genome({"sma_short": 0.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0, POSITION_PNL_KEY: 1.0})
+
+
+def test_ga_strategy_position_pnl_is_zero_while_flat():
+    keys     = _KEYS + (POSITION_PNL_KEY,)
+    strategy = GaStrategy(_all_weight_on_position_pnl(), _config(), keys)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.0), position=None, balance=1000.0)
+    assert decision.action is Action.HOLD  # score is 0.0, not above buy_threshold
+
+
+def test_ga_strategy_position_pnl_pulls_score_down_on_a_loss_and_triggers_sell():
+    keys     = _KEYS + (POSITION_PNL_KEY,)
+    strategy = GaStrategy(_all_weight_on_position_pnl(), _config(), keys)
+    position = Position(entry_price=100.0, size=1.0)
+    decision = strategy.decide(_row(close=70.0, sma_short=0.0), position=position, balance=1000.0)
+    # unrealized_return = (70-100)/100 = -0.3, weight 1.0 -> score -0.3 < sell_threshold 0.4
+    assert decision.action is Action.SELL
+
+
+def test_ga_strategy_position_pnl_holds_a_winning_position():
+    keys     = _KEYS + (POSITION_PNL_KEY,)
+    strategy = GaStrategy(_all_weight_on_position_pnl(), _config(), keys)
+    position = Position(entry_price=100.0, size=1.0)
+    decision = strategy.decide(_row(close=150.0, sma_short=0.0), position=position, balance=1000.0)
+    # unrealized_return = (150-100)/100 = 0.5, not below sell_threshold 0.4 -> stays in
+    assert decision.action is Action.HOLD
+
+
+def test_ga_strategy_ignores_position_pnl_when_key_not_in_use():
+    # confirms no behavior change for callers that don't opt into POSITION_PNL_KEY
+    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    position = Position(entry_price=100.0, size=1.0)
+    decision = strategy.decide(_row(close=1.0, sma_short=0.5), position=position, balance=1000.0)
+    assert decision.action is Action.HOLD  # a huge unrealized loss on close=1.0 has zero effect
 
 
 # ── AnnualizedYield ──────────────────────────────────────────────────
