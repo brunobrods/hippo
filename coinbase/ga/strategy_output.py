@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from coinbase.ga.ga_engine import GaConfig, Genome
-from coinbase.ga.strategy_evaluator import BacktestResult, StrategyConfig
+from coinbase.ga.strategy_evaluator import StrategyConfig
+from coinbase.trading_strategy import BacktestResult
 
 
 # ── Config ─────────────────────────────────────────────────────────────
@@ -106,12 +107,14 @@ class MaxDrawdown:
 
 
 class PerformanceReport:
-    def __init__(self, result: BacktestResult) -> None:
-        self._result = result
+    def __init__(self, result: BacktestResult, annualized_yield: float) -> None:
+        self._result           = result
+        self._annualized_yield = annualized_yield
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "gross_profit":         self._result.gross_profit(),
+            "annualized_yield":     self._annualized_yield,
             "total_trades":         self._total_trades(),
             "win_rate":             self._win_rate(),
             "max_drawdown":         MaxDrawdown(self._result.equity_curve()).fraction(),

@@ -14,6 +14,7 @@ from coinbase.market_scanner import GRANULARITY_SECONDS
 MAX_CANDLES_PER_REQUEST = 300
 
 NORMALIZED_COLUMNS = ("sma_short", "sma_long", "sma_extra", "rsi", "macd")
+DELTA_COLUMNS      = ("delta_1", "delta_3", "delta_5", "delta_10")
 
 
 # ── Config data ────────────────────────────────────────────────────────
@@ -128,6 +129,16 @@ class Macd:
         return self._closes.ewm(span=span, adjust=False).mean()
 
 
+class Delta:
+    def __init__(self, closes: pd.Series, period: int) -> None:
+        self._closes = closes
+        self._period = period
+
+    @functools.cached_property
+    def series(self) -> pd.Series:
+        return self._closes.pct_change(periods=self._period)
+
+
 class MinMaxColumn:
     def __init__(self, series: pd.Series) -> None:
         self._series = series
@@ -170,12 +181,16 @@ class IndicatorFrame:
             "macd":           macd.line,
             "macd_signal":    macd.signal_line,
             "macd_histogram": macd.histogram,
+            "delta_1":        Delta(closes, 1).series,
+            "delta_3":        Delta(closes, 3).series,
+            "delta_5":        Delta(closes, 5).series,
+            "delta_10":       Delta(closes, 10).series,
         })
         return frame.dropna().reset_index(drop=True)
 
 
 class NormalizedIndicators:
-    def __init__(self, frame: pd.DataFrame, columns: tuple[str, ...] = NORMALIZED_COLUMNS) -> None:
+    def __init__(self, frame: pd.DataFrame, columns: tuple[str, ...] = NORMALIZED_COLUMNS + DELTA_COLUMNS) -> None:
         self._frame   = frame
         self._columns = columns
 

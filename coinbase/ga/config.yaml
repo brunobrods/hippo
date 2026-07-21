@@ -4,16 +4,16 @@
 # since CoinbaseAdapter is called directly with these values.
 
 data:
-  pair: "BTC-USDC"
-  granularity: "ONE_HOUR"   # ONE_MINUTE | FIVE_MINUTE | FIFTEEN_MINUTE | THIRTY_MINUTE | ONE_HOUR | TWO_HOUR | SIX_HOUR | ONE_DAY
-  start_date: "2024-01-01"
+  pair: "FET-USDC"
+  granularity: "TWO_HOUR"   # ONE_MINUTE | FIVE_MINUTE | FIFTEEN_MINUTE | THIRTY_MINUTE | ONE_HOUR | TWO_HOUR | SIX_HOUR | ONE_DAY
+  start_date: "2025-01-01"
   end_date: "2026-07-01"
-  test_split: 0.2           # fraction of the window held out for testing
+  test_split: 0.5        # fraction of the window held out for testing
 
 strategy:
-  position_size_pct: 0.10  # fraction of quote-currency balance risked per trade
-  buy_threshold: 0.6       # signal_score above this opens a position
-  sell_threshold: 0.4      # signal_score below this closes an open position
+  position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
+  buy_threshold: 0.75       # signal_score above this opens a position
+  sell_threshold: 0.25      # signal_score below this closes an open position
   starting_balance: 10000.0  # quote-currency balance at the start of a backtest
   indicators:
     sma_short_period: 9
@@ -32,7 +32,7 @@ genetic_algorithm:
   tournament_size: 5
   elitism_count: 5
   mutation_sigma: 0.1       # stddev of Gaussian noise added to a mutated weight
-  seed: null                # set an int for reproducible runs (e.g. in tests)
+  seed: 1                # set an int for reproducible runs (e.g. in tests)
 
 output:
   strategy_filepath: "./best_strategy.json"

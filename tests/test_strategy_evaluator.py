@@ -3,14 +3,20 @@ import pytest
 
 from coinbase.ga.ga_engine import Genome
 from coinbase.ga.strategy_evaluator import (
-    Backtest,
-    OpenPosition,
-    SignalScores,
+    AnnualizedYield,
+    GaStrategy,
     StrategyConfig,
     StrategyConfigFile,
     StrategyEvaluator,
-    Trade,
 )
+from coinbase.trading_strategy import Action, Position
+
+SECONDS_PER_YEAR = 365.25 * 24 * 3600
+
+# Explicit rather than relying on WEIGHT_KEYS' default — these tests exercise
+# GaStrategy/StrategyEvaluator's own logic, independent of whatever indicator
+# set the GA is currently configured to weigh.
+_KEYS = ("sma_short", "sma_long", "sma_extra", "rsi", "macd")
 
 
 def _config(**overrides) -> StrategyConfig:
@@ -22,6 +28,21 @@ def _config(**overrides) -> StrategyConfig:
     )
     defaults.update(overrides)
     return StrategyConfig(**defaults)
+
+
+def _row(close: float, sma_short: float) -> dict[str, float]:
+    return {
+        "close": close,
+        "norm_sma_short": sma_short,
+        "norm_sma_long": 0.0,
+        "norm_sma_extra": 0.0,
+        "norm_rsi": 0.0,
+        "norm_macd": 0.0,
+    }
+
+
+def _all_weight_on_sma_short() -> Genome:
+    return Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
 
 
 # ── StrategyConfigFile ───────────────────────────────────────────────
@@ -43,107 +64,66 @@ def test_strategy_config_file_reads_section():
     assert config.starting_balance == 500.0
 
 
-# ── SignalScores ─────────────────────────────────────────────────────
+# ── GaStrategy ────────────────────────────────────────────────────────
 
-def test_signal_scores_computes_weighted_sum():
-    frame = pd.DataFrame({
-        "norm_sma_short": [1.0, 0.0],
-        "norm_sma_long":  [0.0, 1.0],
-        "norm_sma_extra": [0.0, 0.0],
-        "norm_rsi":       [0.0, 0.0],
-        "norm_macd":      [0.0, 0.0],
-    })
-    genome = Genome({
-        "sma_short": 0.5, "sma_long": 0.5, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0,
-    })
-    scores = SignalScores(frame, genome).series
-    assert scores.tolist() == pytest.approx([0.5, 0.5])
+def test_ga_strategy_buys_when_flat_and_score_above_buy_threshold():
+    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.8), position=None, balance=1000.0)
+    assert decision.action is Action.BUY
+    assert decision.size == pytest.approx(1.0)  # 10% of 1000 / 100
 
 
-# ── Trade / OpenPosition ─────────────────────────────────────────────
-
-def test_trade_profit_is_gross_no_fees():
-    trade = Trade(entry_price=100.0, exit_price=110.0, size=2.0)
-    assert trade.profit() == pytest.approx(20.0)
-
-
-def test_open_position_closed_and_unrealized_agree_at_same_price():
-    position = OpenPosition(entry_price=50.0, size=4.0)
-    assert position.unrealized(60.0) == pytest.approx(position.closed(60.0).profit())
+def test_ga_strategy_holds_when_flat_and_score_between_thresholds():
+    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.5), position=None, balance=1000.0)
+    assert decision.action is Action.HOLD
 
 
-# ── Backtest ─────────────────────────────────────────────────────────
-
-def _frame(closes: list[float]) -> pd.DataFrame:
-    return pd.DataFrame({"close": closes})
-
-
-def test_backtest_opens_and_closes_a_single_position_on_threshold_crossing():
-    frame  = _frame([100.0, 100.0, 120.0, 120.0])
-    scores = pd.Series([0.5, 0.7, 0.7, 0.3])  # flat, buy, hold, sell
-    result = Backtest(frame, scores, _config()).run()
-    trades = result.trades()
-    assert len(trades) == 1
-    assert trades[0].profit() == pytest.approx((120.0 - 100.0) / 100.0 * 100.0)  # 10% of 1000 @100 -> 1 unit
+def test_ga_strategy_never_re_buys_while_already_positioned():
+    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.9), position=Position(90.0, 1.0), balance=1000.0)
+    assert decision.action is Action.HOLD
 
 
-def test_backtest_never_opens_a_second_overlapping_position():
-    frame  = _frame([100.0, 100.0, 100.0, 100.0])
-    scores = pd.Series([0.7, 0.7, 0.7, 0.7])  # stays above buy_threshold throughout
-    result = Backtest(frame, scores, _config()).run()
-    assert len(result.trades()) == 1  # never re-buys; only trade is the forced close at the end
+def test_ga_strategy_sells_when_positioned_and_score_below_sell_threshold():
+    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.2), position=Position(90.0, 1.0), balance=1000.0)
+    assert decision.action is Action.SELL
 
 
-def test_backtest_force_closes_an_open_position_at_the_final_close():
-    frame  = _frame([100.0, 110.0])
-    scores = pd.Series([0.7, 0.7])  # buys and never sells
-    result = Backtest(frame, scores, _config()).run()
-    trades = result.trades()
-    assert len(trades) == 1
-    assert trades[0].profit() == pytest.approx((110.0 - 100.0) / 100.0 * 100.0)
+def test_ga_strategy_holds_position_when_score_between_thresholds():
+    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.5), position=Position(90.0, 1.0), balance=1000.0)
+    assert decision.action is Action.HOLD
 
 
-def test_backtest_holds_position_between_thresholds_without_selling():
-    frame  = _frame([100.0, 100.0, 100.0])
-    scores = pd.Series([0.7, 0.5, 0.5])  # buy, then sits in the hold band
-    result = Backtest(frame, scores, _config()).run()
-    assert len(result.trades()) == 1  # only force-closed at the end, not sold mid-run
+# ── AnnualizedYield ──────────────────────────────────────────────────
+
+def test_annualized_yield_compounds_a_short_window_up_to_a_year():
+    value = AnnualizedYield(gross_profit=100.0, starting_balance=1000.0, duration_seconds=30 * 86400).value()
+    assert value == pytest.approx((1.10) ** (SECONDS_PER_YEAR / (30 * 86400)) - 1.0)
 
 
-def test_backtest_position_size_compounds_on_current_balance():
-    # trade 1: buy 1000*0.10/100 = 1.0 unit @100, sell @200 -> +100 profit, balance 1000 -> 1100
-    # trade 2 must size off the *updated* 1100 balance (0.55 units @200), not the original 1000 (which
-    # would size 0.5 units) -> the two hypotheses diverge to 55.0 vs 50.0 profit on the @300 exit
-    frame  = _frame([100.0, 200.0, 200.0, 300.0])
-    scores = pd.Series([0.7, 0.3, 0.7, 0.3])
-    result = Backtest(frame, scores, _config()).run()
-    trades = result.trades()
-    assert len(trades) == 2
-    assert trades[0].profit() == pytest.approx(100.0)
-    assert trades[1].profit() == pytest.approx(55.0)
+def test_annualized_yield_matches_simple_return_over_exactly_one_year():
+    value = AnnualizedYield(gross_profit=100.0, starting_balance=1000.0, duration_seconds=SECONDS_PER_YEAR).value()
+    assert value == pytest.approx(0.10)
 
 
-def test_backtest_equity_curve_tracks_unrealized_gains_while_in_position():
-    frame  = _frame([100.0, 150.0])
-    scores = pd.Series([0.7, 0.7])
-    result = Backtest(frame, scores, _config()).run()
-    curve = result.equity_curve()
-    assert curve[0] == pytest.approx(1000.0)  # just bought, no move yet
-    assert curve[1] == pytest.approx(1000.0 + (150.0 - 100.0) / 100.0 * 100.0)
+def test_annualized_yield_handles_losses():
+    value = AnnualizedYield(gross_profit=-50.0, starting_balance=1000.0, duration_seconds=10 * 86400).value()
+    assert value < 0.0
 
 
-def test_backtest_empty_when_signal_never_crosses_buy_threshold():
-    frame  = _frame([100.0, 100.0, 100.0])
-    scores = pd.Series([0.5, 0.5, 0.5])
-    result = Backtest(frame, scores, _config()).run()
-    assert result.trades() == []
-    assert result.gross_profit() == 0.0
+def test_annualized_yield_falls_back_to_simple_return_when_duration_is_zero():
+    value = AnnualizedYield(gross_profit=100.0, starting_balance=1000.0, duration_seconds=0.0).value()
+    assert value == pytest.approx(0.10)
 
 
 # ── StrategyEvaluator ────────────────────────────────────────────────
 
-def test_strategy_evaluator_fitness_matches_backtest_gross_profit():
-    frame = pd.DataFrame({
+def _frame_with_timestamps(timestamps: list[int]) -> pd.DataFrame:
+    return pd.DataFrame({
+        "timestamp":      timestamps,
         "close":          [100.0, 100.0, 120.0, 120.0],
         "norm_sma_short": [0.0, 1.0, 1.0, 0.0],
         "norm_sma_long":  [0.0, 0.0, 0.0, 0.0],
@@ -151,7 +131,22 @@ def test_strategy_evaluator_fitness_matches_backtest_gross_profit():
         "norm_rsi":       [0.0, 0.0, 0.0, 0.0],
         "norm_macd":      [0.0, 0.0, 0.0, 0.0],
     })
+
+
+def test_strategy_evaluator_fitness_is_the_annualized_yield_of_the_backtest():
+    frame     = _frame_with_timestamps([0, 864000, 1728000, 2592000])  # 30-day window
     genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
-    evaluator = StrategyEvaluator(frame, _config())
-    assert evaluator.fitness(genome) == pytest.approx(evaluator.result(genome).gross_profit())
-    assert evaluator.fitness(genome) == pytest.approx(20.0)  # 10% of 1000 @100 -> 1 unit, +20 on the move
+    evaluator = StrategyEvaluator(frame, _config(), _KEYS)
+    result    = evaluator.result(genome)
+
+    assert result.gross_profit() == pytest.approx(20.0)  # 10% of 1000 @100 -> 1 unit, +20 on the move
+    assert evaluator.fitness(genome) == pytest.approx(evaluator.annualized_yield(result))
+    assert evaluator.fitness(genome) == pytest.approx((1.02) ** (SECONDS_PER_YEAR / 2592000) - 1.0)
+
+
+def test_strategy_evaluator_duration_falls_back_to_zero_for_a_single_row_frame():
+    frame     = _frame_with_timestamps([0, 864000, 1728000, 2592000]).iloc[:1]
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    evaluator = StrategyEvaluator(frame, _config(), _KEYS)
+    result    = evaluator.result(genome)
+    assert evaluator.annualized_yield(result) == pytest.approx(result.gross_profit() / _config().starting_balance)

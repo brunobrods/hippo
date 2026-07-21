@@ -3,7 +3,7 @@ import json
 import pytest
 
 from coinbase.ga.ga_engine import GaConfig, Genome
-from coinbase.ga.strategy_evaluator import BacktestResult, StrategyConfig, Trade
+from coinbase.ga.strategy_evaluator import StrategyConfig
 from coinbase.ga.strategy_output import (
     GaRunLog,
     MaxDrawdown,
@@ -15,6 +15,7 @@ from coinbase.ga.strategy_output import (
     TrainedStrategy,
     TrainingPeriod,
 )
+from coinbase.trading_strategy import BacktestResult, Trade
 
 
 def _ga_config() -> GaConfig:
@@ -116,8 +117,9 @@ def test_max_drawdown_empty_curve_is_zero():
 def test_performance_report_as_dict():
     trades = [Trade(100.0, 110.0, 1.0), Trade(100.0, 90.0, 1.0)]  # +10, -10
     result = BacktestResult(trades, equity_curve=[1000.0, 1010.0, 1000.0])
-    report = PerformanceReport(result).as_dict()
+    report = PerformanceReport(result, annualized_yield=0.0).as_dict()
     assert report["gross_profit"] == pytest.approx(0.0)
+    assert report["annualized_yield"] == pytest.approx(0.0)
     assert report["total_trades"] == 2
     assert report["win_rate"] == pytest.approx(0.5)
     assert report["avg_profit_per_trade"] == pytest.approx(0.0)
@@ -126,7 +128,7 @@ def test_performance_report_as_dict():
 
 def test_performance_report_handles_no_trades():
     result = BacktestResult([], equity_curve=[1000.0])
-    report = PerformanceReport(result).as_dict()
+    report = PerformanceReport(result, annualized_yield=0.0).as_dict()
     assert report["total_trades"] == 0
     assert report["win_rate"] == 0.0
     assert report["avg_profit_per_trade"] == 0.0
@@ -144,7 +146,7 @@ def test_strategy_json_round_trips_through_disk(tmp_path):
         created_at="2026-07-15T10:30:00+00:00",
     )
     strategy    = TrainedStrategy(genome, _strategy_config())
-    performance = PerformanceReport(BacktestResult([Trade(100.0, 110.0, 1.0)], [1000.0, 1010.0]))
+    performance = PerformanceReport(BacktestResult([Trade(100.0, 110.0, 1.0)], [1000.0, 1010.0]), annualized_yield=0.15)
 
     filepath = tmp_path / "best_strategy.json"
     StrategyJson(metadata, strategy, performance).save(str(filepath))
@@ -152,6 +154,7 @@ def test_strategy_json_round_trips_through_disk(tmp_path):
     on_disk = json.loads(filepath.read_text())
     assert on_disk["strategy"]["weights"] == {"sma_short": 1.0, "rsi": 0.0}
     assert on_disk["performance"]["gross_profit"] == pytest.approx(10.0)
+    assert on_disk["performance"]["annualized_yield"] == pytest.approx(0.15)
 
     loaded = StrategyJsonFile(str(filepath))
     assert loaded.weights() == {"sma_short": 1.0, "rsi": 0.0}

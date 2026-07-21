@@ -5,7 +5,7 @@ import pytest
 
 from coinbase.ga.ga_engine import GaConfig, Genome
 from coinbase.ga.main import ConsoleGenerationLog, TrainingRun, TrainingSummary
-from coinbase.ga.strategy_evaluator import BacktestResult, StrategyConfig, Trade
+from coinbase.ga.strategy_evaluator import StrategyConfig
 from coinbase.ga.strategy_output import (
     GaRunLog,
     PerformanceReport,
@@ -14,6 +14,7 @@ from coinbase.ga.strategy_output import (
     TrainedStrategy,
     TrainingPeriod,
 )
+from coinbase.trading_strategy import BacktestResult, Trade
 
 
 # ── Test double ──────────────────────────────────────────────────────
@@ -105,15 +106,16 @@ def test_training_summary_as_text_reports_saved_path_and_metrics():
         Genome({"sma_short": 1.0}),
         StrategyConfig(position_size_pct=0.1, buy_threshold=0.6, sell_threshold=0.4, starting_balance=1000.0),
     )
-    performance = PerformanceReport(BacktestResult([Trade(100.0, 110.0, 1.0)], [1000.0, 1010.0]))
+    performance = PerformanceReport(BacktestResult([Trade(100.0, 110.0, 1.0)], [1000.0, 1010.0]), annualized_yield=0.15)
     strategy_json = StrategyJson(metadata, strategy, performance)
 
     summary = TrainingSummary(strategy_json, output_path="/tmp/best_strategy.json", round_trip_matches=True)
     text = summary.as_text()
 
     assert "Saved strategy to /tmp/best_strategy.json" in text
-    assert "Test-set gross profit: 10.00" in text
-    assert "Reload round-trip:     OK" in text
+    assert "Test-set gross profit:  10.00" in text
+    assert "Test-set annualized yield: +15.0%" in text
+    assert "Reload round-trip:      OK" in text
 
 
 def test_training_summary_as_text_reports_round_trip_mismatch():
@@ -130,11 +132,11 @@ def test_training_summary_as_text_reports_round_trip_mismatch():
         Genome({"sma_short": 1.0}),
         StrategyConfig(position_size_pct=0.1, buy_threshold=0.6, sell_threshold=0.4, starting_balance=1000.0),
     )
-    performance = PerformanceReport(BacktestResult([], [1000.0]))
+    performance = PerformanceReport(BacktestResult([], [1000.0]), annualized_yield=0.0)
     strategy_json = StrategyJson(metadata, strategy, performance)
 
     summary = TrainingSummary(strategy_json, output_path="/tmp/x.json", round_trip_matches=False)
-    assert "Reload round-trip:     MISMATCH" in summary.as_text()
+    assert "Reload round-trip:      MISMATCH" in summary.as_text()
 
 
 # ── TrainingRun (end-to-end, fake adapter) ───────────────────────────

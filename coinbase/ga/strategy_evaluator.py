@@ -1,10 +1,10 @@
-import functools
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import pandas as pd
 
 from coinbase.ga.ga_engine import Genome, WEIGHT_KEYS
+from coinbase.trading_strategy import Action, Backtest, BacktestResult, Decision, Position
 
 
 # ── Config ─────────────────────────────────────────────────────────────
@@ -31,91 +31,42 @@ class StrategyConfigFile:
         )
 
 
-# ── Signal scoring ─────────────────────────────────────────────────────
+# ── GA-driven strategy ───────────────────────────────────────────────────
 
-class SignalScores:
-    def __init__(self, frame: pd.DataFrame, genome: Genome, keys: tuple[str, ...] = WEIGHT_KEYS) -> None:
-        self._frame  = frame
+class GaStrategy:
+    def __init__(self, genome: Genome, config: StrategyConfig, keys: tuple[str, ...] = WEIGHT_KEYS) -> None:
         self._genome = genome
+        self._config = config
         self._keys   = keys
 
-    @functools.cached_property
-    def series(self) -> pd.Series:
-        total = pd.Series(0.0, index=self._frame.index)
-        for key in self._keys:
-            total = total + self._genome.weight(key) * self._frame[f"norm_{key}"]
-        return total
+    def decide(self, row: dict[str, float], position: Optional[Position], balance: float) -> Decision:
+        score = self._signal_score(row)
+        if position is None and score > self._config.buy_threshold:
+            size = (balance * self._config.position_size_pct) / row["close"]
+            return Decision(Action.BUY, size)
+        if position is not None and score < self._config.sell_threshold:
+            return Decision(Action.SELL)
+        return Decision(Action.HOLD)
+
+    def _signal_score(self, row: dict[str, float]) -> float:
+        return sum(self._genome.weight(key) * row[f"norm_{key}"] for key in self._keys)
 
 
-# ── Trades ──────────────────────────────────────────────────────────────
+# ── Yield ────────────────────────────────────────────────────────────────
 
-class Trade:
-    def __init__(self, entry_price: float, exit_price: float, size: float) -> None:
-        self._entry_price = entry_price
-        self._exit_price  = exit_price
-        self._size        = size
+class AnnualizedYield:
+    _SECONDS_PER_YEAR = 365.25 * 24 * 3600
 
-    def profit(self) -> float:
-        return (self._exit_price - self._entry_price) * self._size
+    def __init__(self, gross_profit: float, starting_balance: float, duration_seconds: float) -> None:
+        self._gross_profit     = gross_profit
+        self._starting_balance = starting_balance
+        self._duration_seconds = duration_seconds
 
-
-class OpenPosition:
-    def __init__(self, entry_price: float, size: float) -> None:
-        self._entry_price = entry_price
-        self._size        = size
-
-    def closed(self, exit_price: float) -> Trade:
-        return Trade(self._entry_price, exit_price, self._size)
-
-    def unrealized(self, price: float) -> float:
-        return (price - self._entry_price) * self._size
-
-
-# ── Backtest ────────────────────────────────────────────────────────────
-
-class BacktestResult:
-    def __init__(self, trades: list[Trade], equity_curve: list[float]) -> None:
-        self._trades       = trades
-        self._equity_curve = equity_curve
-
-    def trades(self) -> list[Trade]:
-        return list(self._trades)
-
-    def gross_profit(self) -> float:
-        return sum(trade.profit() for trade in self._trades)
-
-    def equity_curve(self) -> list[float]:
-        return list(self._equity_curve)
-
-
-class Backtest:
-    def __init__(self, frame: pd.DataFrame, signal_scores: pd.Series, config: StrategyConfig) -> None:
-        self._frame         = frame
-        self._signal_scores = signal_scores
-        self._config        = config
-
-    def run(self) -> BacktestResult:
-        closes       = self._frame["close"].tolist()
-        scores       = self._signal_scores.tolist()
-        balance      = self._config.starting_balance
-        position: Optional[OpenPosition] = None
-        trades:       list[Trade] = []
-        equity_curve: list[float] = []
-
-        for price, score in zip(closes, scores):
-            if position is None and score > self._config.buy_threshold:
-                position = OpenPosition(price, (balance * self._config.position_size_pct) / price)
-            elif position is not None and score < self._config.sell_threshold:
-                trade    = position.closed(price)
-                balance += trade.profit()
-                trades.append(trade)
-                position = None
-            equity_curve.append(balance + (position.unrealized(price) if position is not None else 0.0))
-
-        if position is not None:
-            trades.append(position.closed(closes[-1]))
-
-        return BacktestResult(trades, equity_curve)
+    def value(self) -> float:
+        total_return = self._gross_profit / self._starting_balance
+        if self._duration_seconds <= 0.0:
+            return total_return
+        return (1.0 + total_return) ** (self._SECONDS_PER_YEAR / self._duration_seconds) - 1.0
 
 
 # ── Evaluator ───────────────────────────────────────────────────────────
@@ -127,8 +78,16 @@ class StrategyEvaluator:
         self._keys   = keys
 
     def fitness(self, genome: Genome) -> float:
-        return self.result(genome).gross_profit()
+        return self.annualized_yield(self.result(genome))
 
     def result(self, genome: Genome) -> BacktestResult:
-        scores = SignalScores(self._frame, genome, self._keys).series
-        return Backtest(self._frame, scores, self._config).run()
+        strategy = GaStrategy(genome, self._config, self._keys)
+        return Backtest(self._frame, strategy, self._config.starting_balance).run()
+
+    def annualized_yield(self, result: BacktestResult) -> float:
+        return AnnualizedYield(result.gross_profit(), self._config.starting_balance, self._duration_seconds()).value()
+
+    def _duration_seconds(self) -> float:
+        if len(self._frame) < 2:
+            return 0.0
+        return float(self._frame["timestamp"].iloc[-1] - self._frame["timestamp"].iloc[0])

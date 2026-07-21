@@ -5,6 +5,7 @@ from coinbase.coinbase_adapter import CoinbaseError
 from coinbase.ga.market_data_processor import (
     AccountBalance,
     ChunkedTimeRange,
+    Delta,
     HistoricalCandles,
     HistoricalMarketData,
     IndicatorFrame,
@@ -90,6 +91,15 @@ def test_macd_histogram_is_line_minus_signal():
     assert (macd.histogram == macd.line - macd.signal_line).all()
 
 
+def test_delta_series_is_percent_change_over_n_periods():
+    closes = pd.Series([100.0, 110.0, 121.0, 133.1])
+    delta  = Delta(closes, period=2)
+    assert delta.series.iloc[2] == pytest.approx((121.0 - 100.0) / 100.0)
+    assert delta.series.iloc[3] == pytest.approx((133.1 - 110.0) / 110.0)
+    assert pd.isna(delta.series.iloc[0])
+    assert pd.isna(delta.series.iloc[1])
+
+
 # ── MinMaxColumn ───────────────────────────────────────────────────────
 
 def test_min_max_column_scales_to_unit_range():
@@ -111,9 +121,24 @@ def test_indicator_frame_has_expected_columns_and_no_nan():
         "timestamp", "close", "volume", "high", "low",
         "sma_short", "sma_long", "sma_extra",
         "rsi", "macd", "macd_signal", "macd_histogram",
+        "delta_1", "delta_3", "delta_5", "delta_10",
     }
     assert expected.issubset(set(frame.columns))
     assert not frame.isna().any().any()
+
+
+def test_indicator_frame_survives_when_delta_10_is_the_binding_warmup_constraint():
+    # with every SMA/RSI/MACD period below 10, delta_10's own 10-row NaN
+    # prefix becomes the tightest dropna() constraint instead of being masked
+    # by sma_extra_period's usual (larger) warmup requirement
+    periods = IndicatorPeriods(
+        sma_short_period=2, sma_long_period=3, sma_extra_period=4,
+        rsi_period=3, macd_fast=2, macd_slow=3, macd_signal=2,
+    )
+    raw   = _rising_candles(20)
+    frame = IndicatorFrame(raw, periods).dataframe
+    assert len(frame) > 0
+    assert not frame["delta_10"].isna().any()
 
 
 def test_indicator_frame_sorts_out_of_order_candles():
@@ -126,8 +151,18 @@ def test_normalized_indicators_adds_norm_columns_in_unit_range():
     raw        = _rising_candles(80)
     frame      = IndicatorFrame(raw, IndicatorPeriods()).dataframe
     normalized = NormalizedIndicators(frame).dataframe
-    for column in ("norm_sma_short", "norm_sma_long", "norm_sma_extra", "norm_rsi", "norm_macd"):
+    for column in (
+        "norm_sma_short", "norm_sma_long", "norm_sma_extra", "norm_rsi", "norm_macd",
+        "norm_delta_1", "norm_delta_3", "norm_delta_5", "norm_delta_10",
+    ):
         assert normalized[column].between(0.0, 1.0).all()
+
+
+def test_normalized_indicators_default_does_not_touch_ga_weight_keys():
+    # DELTA_COLUMNS get normalized by default too, but must stay out of the GA's
+    # WEIGHT_KEYS/genome — that was a deliberate scoping decision, not an oversight.
+    from coinbase.ga.ga_engine import WEIGHT_KEYS
+    assert WEIGHT_KEYS == ("sma_short", "sma_long", "sma_extra", "rsi", "macd")
 
 
 def test_train_test_split_respects_fraction():
