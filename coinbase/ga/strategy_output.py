@@ -180,9 +180,50 @@ class StrategyJsonFile:
 
 # ── GA run log ───────────────────────────────────────────────────────────
 
+class RunHeader:
+    def __init__(
+        self,
+        started_at:      str,
+        pair:            str,
+        granularity:     str,
+        start_date:      str,
+        end_date:        str,
+        test_split:      float,
+        strategy_config: StrategyConfig,
+        ga_config:       GaConfig,
+    ) -> None:
+        self._started_at      = started_at
+        self._pair            = pair
+        self._granularity     = granularity
+        self._start_date      = start_date
+        self._end_date        = end_date
+        self._test_split      = test_split
+        self._strategy_config = strategy_config
+        self._ga_config       = ga_config
+
+    def lines(self) -> list[str]:
+        return [
+            f"=== run {self._started_at} ===",
+            f"pair={self._pair} granularity={self._granularity} "
+            f"window={self._start_date}..{self._end_date} test_split={self._test_split}",
+            f"buy_threshold={self._strategy_config.buy_threshold:.2f} "
+            f"sell_threshold={self._strategy_config.sell_threshold:.2f} "
+            f"position_size_pct={self._strategy_config.position_size_pct:.2f}",
+            f"population={self._ga_config.population_size} generations={self._ga_config.generations} "
+            f"mutation_rate={self._ga_config.mutation_rate} crossover_rate={self._ga_config.crossover_rate} "
+            f"tournament_size={self._ga_config.tournament_size} elitism_count={self._ga_config.elitism_count} "
+            f"mutation_sigma={self._ga_config.mutation_sigma} seed={self._ga_config.seed}",
+            "generation\tbest_fitness\tavg_fitness",
+        ]
+
+
 class GaRunLog:
     def __init__(self, filepath: str) -> None:
         self._filepath = filepath
+
+    def start(self, header: RunHeader) -> None:
+        with open(self._filepath, "a") as handle:
+            handle.write("\n".join(header.lines()) + "\n")
 
     def append(self, generation: int, best_fitness: float, average_fitness: float) -> None:
         with open(self._filepath, "a") as handle:

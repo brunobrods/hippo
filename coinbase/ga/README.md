@@ -120,7 +120,12 @@ timestamp), `strategy` (weights + buy/sell/position-size hyperparameters), and
 `performance` (gross profit, trade count, win rate, max drawdown, avg profit/trade —
 all computed on the held-out test split).
 
-**`ga_run_log.txt`** — one tab-separated line per generation: `generation\tbest_fitness\taverage_fitness`.
+**`ga_run_log.txt`** — appended to (never overwritten), one section per run. Each run
+opens with a header (`RunHeader` in `strategy_output.py`) written before the GA starts,
+so a run that crashes mid-evolution still leaves its config on record: a
+`=== run <started_at ISO-8601> ===` line, the pair/granularity/date window/test split,
+the strategy hyperparameters, and the GA config — followed by one tab-separated line per
+generation: `generation\tbest_fitness\taverage_fitness`.
 
 ### Tests
 

@@ -4,13 +4,14 @@ from typing import Any
 
 from coinbase.coinbase_adapter import CoinbaseAdapter
 from coinbase.ga.config import ConfigFile
-from coinbase.ga.ga_engine import GaConfigFile, GeneticAlgorithm, Genome, WEIGHT_KEYS
+from coinbase.ga.ga_engine import GaConfigFile, GeneticAlgorithm, Genome
 from coinbase.ga.market_data_processor import HistoricalMarketData, MarketDataConfig, TrainTestSplit
-from coinbase.ga.strategy_evaluator import POSITION_PNL_KEY, StrategyConfigFile, StrategyEvaluator
+from coinbase.ga.strategy_evaluator import POSITION_PNL_KEY, StrategyConfigFile, StrategyEvaluator, WeightKeysConfig
 from coinbase.ga.strategy_output import (
     GaRunLog,
     OutputConfigFile,
     PerformanceReport,
+    RunHeader,
     StrategyJson,
     StrategyJsonFile,
     StrategyMetadata,
@@ -25,6 +26,10 @@ from coinbase.ga.strategy_output import (
 class ConsoleGenerationLog:
     def __init__(self, log: GaRunLog) -> None:
         self._log = log
+
+    def start(self, header: RunHeader) -> None:
+        self._log.start(header)
+        print("\n".join(header.lines()))
 
     def append(self, generation: int, best_fitness: float, average_fitness: float) -> None:
         self._log.append(generation, best_fitness, average_fitness)
@@ -65,20 +70,31 @@ class TrainingRun:
         strategy_config = StrategyConfigFile(self._raw_config).config()
         ga_config       = GaConfigFile(self._raw_config).config()
         output_config   = OutputConfigFile(self._raw_config).config()
+        data            = self._raw_config["data"]
+        columns         = market_config.normalized_columns() + market_config.delta_columns()
 
         frame = await HistoricalMarketData(
-            self._adapter, window.pair, window.granularity, window.start, window.end, market_config.periods(),
+            self._adapter, window.pair, window.granularity, window.start, window.end, market_config.periods(), columns,
         ).dataframe()
         split = TrainTestSplit(frame, window.test_split)
-        keys  = WEIGHT_KEYS + (POSITION_PNL_KEY,)
+        keys  = WeightKeysConfig(self._raw_config).keys() + (POSITION_PNL_KEY,)
 
         train_evaluator = StrategyEvaluator(split.train(), strategy_config, keys)
         test_evaluator  = StrategyEvaluator(split.test(), strategy_config, keys)
 
         console_log = ConsoleGenerationLog(GaRunLog(output_config.log_filepath))
+        console_log.start(RunHeader(
+            started_at      = UtcNow().iso(),
+            pair            = window.pair,
+            granularity     = window.granularity,
+            start_date      = data["start_date"],
+            end_date        = data["end_date"],
+            test_split      = window.test_split,
+            strategy_config = strategy_config,
+            ga_config       = ga_config,
+        ))
         best_genome = GeneticAlgorithm(ga_config, keys).evolve(train_evaluator, on_generation=console_log.append)
 
-        data     = self._raw_config["data"]
         metadata = StrategyMetadata(
             pair            = window.pair,
             granularity     = window.granularity,

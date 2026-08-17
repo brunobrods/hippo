@@ -9,14 +9,15 @@ from coinbase.ga.strategy_evaluator import (
     StrategyConfig,
     StrategyConfigFile,
     StrategyEvaluator,
+    WeightKeysConfig,
 )
 from coinbase.trading_strategy import Action, Position
 
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
 
-# Explicit rather than relying on WEIGHT_KEYS' default — these tests exercise
-# GaStrategy/StrategyEvaluator's own logic, independent of whatever indicator
-# set the GA is currently configured to weigh.
+# Keys are always passed explicitly (never a module default) so these tests
+# exercise GaStrategy/StrategyEvaluator's own logic, independent of whatever
+# indicator set config.yaml currently configures the GA to weigh.
 _KEYS = ("sma_short", "sma_long", "sma_extra", "rsi", "macd")
 
 
@@ -63,6 +64,13 @@ def test_strategy_config_file_reads_section():
     assert config.buy_threshold == 0.7
     assert config.sell_threshold == 0.3
     assert config.starting_balance == 500.0
+
+
+# ── WeightKeysConfig ─────────────────────────────────────────────────
+
+def test_weight_keys_config_reads_section():
+    raw = {"strategy": {"weight_keys": ["sma_short", "rsi"]}}
+    assert WeightKeysConfig(raw).keys() == ("sma_short", "rsi")
 
 
 # ── GaStrategy ────────────────────────────────────────────────────────

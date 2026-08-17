@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from coinbase.ga.ga_engine import Genome, WEIGHT_KEYS
+from coinbase.ga.ga_engine import Genome
 from coinbase.trading_strategy import Action, Backtest, BacktestResult, Decision, Position
 
 
@@ -31,13 +31,21 @@ class StrategyConfigFile:
         )
 
 
+class WeightKeysConfig:
+    def __init__(self, raw: dict[str, Any]) -> None:
+        self._raw = raw
+
+    def keys(self) -> tuple[str, ...]:
+        return tuple(self._raw["strategy"]["weight_keys"])
+
+
 # ── GA-driven strategy ───────────────────────────────────────────────────
 
 POSITION_PNL_KEY = "position_pnl"
 
 
 class GaStrategy:
-    def __init__(self, genome: Genome, config: StrategyConfig, keys: tuple[str, ...] = WEIGHT_KEYS) -> None:
+    def __init__(self, genome: Genome, config: StrategyConfig, keys: tuple[str, ...]) -> None:
         self._genome = genome
         self._config = config
         self._keys   = keys
@@ -86,7 +94,7 @@ class AnnualizedYield:
 # ── Evaluator ───────────────────────────────────────────────────────────
 
 class StrategyEvaluator:
-    def __init__(self, frame: pd.DataFrame, config: StrategyConfig, keys: tuple[str, ...] = WEIGHT_KEYS) -> None:
+    def __init__(self, frame: pd.DataFrame, config: StrategyConfig, keys: tuple[str, ...]) -> None:
         self._frame  = frame
         self._config = config
         self._keys   = keys

@@ -47,12 +47,15 @@ def _account(currency: str, available: str) -> dict:
     return {"currency": currency, "available_balance": {"value": available, "currency": currency}}
 
 
+_NORMALIZED_COLUMNS = ("sma_short", "sma_long", "sma_extra", "rsi", "macd")
+
+
 # ── LiveMarketRow ────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_live_market_row_latest_has_close_and_normalized_columns():
     adapter = FakeAdapter(candles=_rising_candles(80), accounts=[])
-    row = await LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods()).latest()
+    row = await LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS).latest()
     assert "close" in row
     assert "norm_sma_short" in row
     assert "norm_rsi" in row
@@ -63,7 +66,7 @@ async def test_live_market_row_latest_has_close_and_normalized_columns():
 @pytest.mark.asyncio
 async def test_live_trading_run_returns_strategys_decision():
     adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[_account("USDC", "1000")])
-    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS)
     strategy   = _FixedActionStrategy([Action.BUY])
     run        = LiveTradingRun(adapter, market_row, strategy, quote_currency="USDC")
 
@@ -75,7 +78,7 @@ async def test_live_trading_run_returns_strategys_decision():
 @pytest.mark.asyncio
 async def test_live_trading_run_tracks_position_across_ticks():
     adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[_account("USDC", "1000")])
-    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS)
     strategy   = _FixedActionStrategy([Action.BUY, Action.SELL, Action.BUY])
     run        = LiveTradingRun(adapter, market_row, strategy, quote_currency="USDC")
 

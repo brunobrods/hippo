@@ -2,10 +2,6 @@ import random
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol
 
-from coinbase.ga.market_data_processor import NORMALIZED_COLUMNS, DELTA_COLUMNS
-
-WEIGHT_KEYS = DELTA_COLUMNS  # ("sma_short", "sma_long", "sma_extra", "rsi", "macd")
-
 
 # ── Config ─────────────────────────────────────────────────────────────
 
@@ -188,7 +184,7 @@ class GenerationStats:
 # ── Engine ─────────────────────────────────────────────────────────────
 
 class GeneticAlgorithm:
-    def __init__(self, config: GaConfig, keys: tuple[str, ...] = WEIGHT_KEYS) -> None:
+    def __init__(self, config: GaConfig, keys: tuple[str, ...]) -> None:
         self._config = config
         self._keys   = keys
         self._random = random.Random(config.seed)

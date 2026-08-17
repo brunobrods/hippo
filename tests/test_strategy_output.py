@@ -9,6 +9,7 @@ from coinbase.ga.strategy_output import (
     MaxDrawdown,
     OutputConfigFile,
     PerformanceReport,
+    RunHeader,
     StrategyJson,
     StrategyJsonFile,
     StrategyMetadata,
@@ -165,6 +166,33 @@ def test_strategy_json_round_trips_through_disk(tmp_path):
     }
 
 
+# ── RunHeader ────────────────────────────────────────────────────────
+
+def _run_header() -> RunHeader:
+    return RunHeader(
+        started_at="2026-07-21T21:15:03+00:00",
+        pair="FET-USDC",
+        granularity="TWO_HOUR",
+        start_date="2026-01-01",
+        end_date="2026-07-01",
+        test_split=0.5,
+        strategy_config=_strategy_config(),
+        ga_config=_ga_config(),
+    )
+
+
+def test_run_header_lines_include_timestamp_window_and_config():
+    lines = _run_header().lines()
+    assert lines[0] == "=== run 2026-07-21T21:15:03+00:00 ==="
+    assert lines[1] == "pair=FET-USDC granularity=TWO_HOUR window=2026-01-01..2026-07-01 test_split=0.5"
+    assert lines[2] == "buy_threshold=0.60 sell_threshold=0.40 position_size_pct=0.10"
+    assert lines[3] == (
+        "population=20 generations=5 mutation_rate=0.2 crossover_rate=0.7 "
+        "tournament_size=3 elitism_count=2 mutation_sigma=0.15 seed=42"
+    )
+    assert lines[4] == "generation\tbest_fitness\tavg_fitness"
+
+
 # ── GaRunLog ─────────────────────────────────────────────────────────
 
 def test_ga_run_log_appends_a_line_per_call(tmp_path):
@@ -177,3 +205,26 @@ def test_ga_run_log_appends_a_line_per_call(tmp_path):
     assert len(lines) == 2
     assert lines[0] == "1\t1.500000\t0.800000"
     assert lines[1] == "2\t2.000000\t1.100000"
+
+
+def test_ga_run_log_start_writes_header_before_generation_rows(tmp_path):
+    filepath = tmp_path / "ga_run_log.txt"
+    log = GaRunLog(str(filepath))
+    log.start(_run_header())
+    log.append(1, best_fitness=1.5, average_fitness=0.8)
+
+    lines = filepath.read_text().splitlines()
+    assert lines[:5] == _run_header().lines()
+    assert lines[5] == "1\t1.500000\t0.800000"
+
+
+def test_ga_run_log_start_appends_to_existing_history(tmp_path):
+    filepath = tmp_path / "ga_run_log.txt"
+    filepath.write_text("1\t0.100000\t0.050000\n")
+
+    log = GaRunLog(str(filepath))
+    log.start(_run_header())
+
+    lines = filepath.read_text().splitlines()
+    assert lines[0] == "1\t0.100000\t0.050000"
+    assert lines[1] == "=== run 2026-07-21T21:15:03+00:00 ==="
