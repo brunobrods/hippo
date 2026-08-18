@@ -109,7 +109,7 @@ class TrainingRun:
 async def _main() -> None:
     from coinbase.credentials import api_key, api_secret
 
-    raw_config = ConfigFile("D:\project\scratches\coinbase\ga\config.yaml").raw()
+    raw_config = ConfigFile("coinbase/ga/config.yaml").raw()
 
     async with CoinbaseAdapter(api_key, api_secret) as adapter:
         summary = await TrainingRun(adapter, raw_config).train()
