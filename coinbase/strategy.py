@@ -5,7 +5,7 @@ from typing import Optional
 from coinbase.coinbase_adapter import CoinbaseAdapter
 from coinbase.ga.market_data_processor import AccountBalance, HistoricalMarketData, IndicatorPeriods
 from coinbase.market_scanner import GRANULARITY_SECONDS
-from coinbase.trading_strategy import Action, Decision, Position, Strategy
+from coinbase.trading_strategy import Decision, Ledger, Strategy
 
 
 # ── Live row ─────────────────────────────────────────────────────────────
@@ -53,7 +53,9 @@ class LiveTradingRun:
         self._market_row     = market_row
         self._strategy       = strategy
         self._quote_currency = quote_currency
-        self._position: Optional[Position] = None
+        # Ledger's balance side goes unused here — only its position tracking is;
+        # the real balance is fetched fresh from the account on every tick.
+        self._ledger         = Ledger(0.0)
 
     # Decides what the strategy would do right now — it does not place a real
     # order. Wiring a Decision to actual CoinbaseAdapter order execution is a
@@ -63,12 +65,39 @@ class LiveTradingRun:
             self._market_row.latest(),
             AccountBalance(self._adapter, self._quote_currency).available(),
         )
-        decision = self._strategy.decide(row, self._position, balance)
-        self._update_position(decision, row["close"])
+        decision = self._strategy.decide(row, self._ledger.position(), balance)
+        self._ledger.apply(decision, row["close"])
         return decision
 
-    def _update_position(self, decision: Decision, price: float) -> None:
-        if decision.action is Action.BUY and self._position is None:
-            self._position = Position(price, decision.size)
-        elif decision.action is Action.SELL and self._position is not None:
-            self._position = None
+
+# ── Paper trading loop ───────────────────────────────────────────────────
+# Same shape as LiveTradingRun, but sizes/fills against a simulated Ledger
+# instead of the real account balance, and never touches order placement —
+# for watching a trained strategy's live decisions before it risks capital.
+
+class PaperTradingRun:
+    def __init__(
+        self,
+        market_row: LiveMarketRow,
+        strategy:   Strategy,
+        ledger:     Ledger,
+    ) -> None:
+        self._market_row = market_row
+        self._strategy   = strategy
+        self._ledger     = ledger
+        self._last_price: Optional[float] = None
+
+    async def on_timer(self) -> Decision:
+        row      = await self._market_row.latest()
+        decision = self._strategy.decide(row, self._ledger.position(), self._ledger.balance())
+        self._ledger.apply(decision, row["close"])
+        self._last_price = row["close"]
+        return decision
+
+    def ledger(self) -> Ledger:
+        return self._ledger
+
+    def last_price(self) -> float:
+        if self._last_price is None:
+            raise ValueError("PaperTradingRun has not ticked yet")
+        return self._last_price

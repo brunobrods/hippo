@@ -3,8 +3,8 @@ from typing import Optional
 import pytest
 
 from coinbase.ga.market_data_processor import IndicatorPeriods
-from coinbase.strategy import LiveMarketRow, LiveTradingRun
-from coinbase.trading_strategy import Action, Decision, Position
+from coinbase.strategy import LiveMarketRow, LiveTradingRun, PaperTradingRun
+from coinbase.trading_strategy import Action, Decision, Ledger, Position
 
 
 # ── Test doubles ─────────────────────────────────────────────────────
@@ -87,3 +87,67 @@ async def test_live_trading_run_tracks_position_across_ticks():
 
     await run.on_timer()
     assert strategy.received_positions[2] is None  # flat again after the SELL
+
+
+# ── PaperTradingRun ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_paper_trading_run_sizes_against_the_simulated_ledger_not_the_account():
+    adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[])  # no account data needed
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    strategy   = _FixedActionStrategy([Action.BUY])
+    run        = PaperTradingRun(market_row, strategy, Ledger(1000.0))
+
+    decision = await run.on_timer()
+    assert decision.action is Action.BUY
+    assert decision.size == pytest.approx((1000.0 * 0.10) / 179.0)  # sized off the ledger's 1000.0, not any account
+
+
+@pytest.mark.asyncio
+async def test_paper_trading_run_never_calls_the_adapters_order_endpoints():
+    # FakeAdapter deliberately implements no order-placement methods; if
+    # PaperTradingRun ever tried to place a real order this would raise
+    # AttributeError instead of completing.
+    adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[])
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    strategy   = _FixedActionStrategy([Action.BUY, Action.SELL])
+    run        = PaperTradingRun(market_row, strategy, Ledger(1000.0))
+
+    first  = await run.on_timer()
+    second = await run.on_timer()
+    assert (first.action, second.action) == (Action.BUY, Action.SELL)
+
+
+@pytest.mark.asyncio
+async def test_paper_trading_run_updates_the_ledger_across_ticks():
+    adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[])
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    strategy   = _FixedActionStrategy([Action.BUY, Action.SELL])
+    ledger     = Ledger(1000.0)
+    run        = PaperTradingRun(market_row, strategy, ledger)
+
+    await run.on_timer()
+    assert ledger.position() is not None
+
+    await run.on_timer()
+    assert ledger.position() is None
+    assert len(ledger.trades()) == 1  # FakeAdapter returns the same candles every tick, so this
+                                       # round-trips at an unchanged price -- zero profit is expected
+
+
+@pytest.mark.asyncio
+async def test_paper_trading_run_exposes_the_last_observed_price():
+    adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[])
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    strategy   = _FixedActionStrategy([Action.HOLD])
+    run        = PaperTradingRun(market_row, strategy, Ledger(1000.0))
+
+    await run.on_timer()
+    assert run.last_price() == pytest.approx(179.0)  # close of the last of 80 rising candles (100..179)
+
+
+def test_paper_trading_run_last_price_raises_before_the_first_tick():
+    market_row = LiveMarketRow(FakeAdapter([], []), "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    run = PaperTradingRun(market_row, _FixedActionStrategy([]), Ledger(1000.0))
+    with pytest.raises(ValueError):
+        run.last_price()

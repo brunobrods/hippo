@@ -6,15 +6,16 @@ from typing import Any
 
 from coinbase.ga.ga_engine import GaConfig, Genome
 from coinbase.ga.strategy_evaluator import StrategyConfig
-from coinbase.trading_strategy import BacktestResult
+from coinbase.trading_strategy import BacktestResult, Decision
 
 
 # ── Config ─────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class OutputConfig:
-    strategy_filepath: str
-    log_filepath:       str
+    strategy_filepath:    str
+    log_filepath:         str
+    dry_run_log_filepath: str
 
 
 class OutputConfigFile:
@@ -24,8 +25,9 @@ class OutputConfigFile:
     def config(self) -> OutputConfig:
         section = self._raw["output"]
         return OutputConfig(
-            strategy_filepath = section["strategy_filepath"],
-            log_filepath       = section["log_filepath"],
+            strategy_filepath    = section["strategy_filepath"],
+            log_filepath         = section["log_filepath"],
+            dry_run_log_filepath = section.get("dry_run_log_filepath", "./dry_run_log.txt"),
         )
 
 
@@ -187,3 +189,17 @@ class GaRunLog:
     def append(self, generation: int, best_fitness: float, average_fitness: float) -> None:
         with open(self._filepath, "a") as handle:
             handle.write(f"{generation}\t{best_fitness:.6f}\t{average_fitness:.6f}\n")
+
+
+# ── Dry-run log ────────────────────────────────────────────────────────
+
+class DryRunLog:
+    def __init__(self, filepath: str) -> None:
+        self._filepath = filepath
+
+    def append(self, timestamp: str, decision: Decision, balance: float, equity: float) -> None:
+        with open(self._filepath, "a") as handle:
+            handle.write(
+                f"{timestamp}\t{decision.action.value}\t{decision.size:.6f}\t"
+                f"{balance:.6f}\t{equity:.6f}\n"
+            )

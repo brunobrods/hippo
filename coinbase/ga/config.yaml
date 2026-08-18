@@ -37,3 +37,4 @@ genetic_algorithm:
 output:
   strategy_filepath: "./best_strategy.json"
   log_filepath: "./ga_run_log.txt"
+  dry_run_log_filepath: "./dry_run_log.txt"

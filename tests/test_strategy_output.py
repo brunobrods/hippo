@@ -5,6 +5,7 @@ import pytest
 from coinbase.ga.ga_engine import GaConfig, Genome
 from coinbase.ga.strategy_evaluator import StrategyConfig
 from coinbase.ga.strategy_output import (
+    DryRunLog,
     GaRunLog,
     MaxDrawdown,
     OutputConfigFile,
@@ -15,7 +16,7 @@ from coinbase.ga.strategy_output import (
     TrainedStrategy,
     TrainingPeriod,
 )
-from coinbase.trading_strategy import BacktestResult, Trade
+from coinbase.trading_strategy import Action, BacktestResult, Decision, Trade
 
 
 def _ga_config() -> GaConfig:
@@ -43,10 +44,21 @@ def _strategy_config() -> StrategyConfig:
 # ── OutputConfigFile ─────────────────────────────────────────────────
 
 def test_output_config_file_reads_section():
-    raw = {"output": {"strategy_filepath": "./best.json", "log_filepath": "./log.txt"}}
+    raw = {"output": {
+        "strategy_filepath": "./best.json",
+        "log_filepath": "./log.txt",
+        "dry_run_log_filepath": "./dry_run.txt",
+    }}
     config = OutputConfigFile(raw).config()
     assert config.strategy_filepath == "./best.json"
     assert config.log_filepath == "./log.txt"
+    assert config.dry_run_log_filepath == "./dry_run.txt"
+
+
+def test_output_config_file_defaults_dry_run_log_filepath_when_absent():
+    raw = {"output": {"strategy_filepath": "./best.json", "log_filepath": "./log.txt"}}
+    config = OutputConfigFile(raw).config()
+    assert config.dry_run_log_filepath == "./dry_run_log.txt"
 
 
 # ── TrainingPeriod ───────────────────────────────────────────────────
@@ -177,3 +189,17 @@ def test_ga_run_log_appends_a_line_per_call(tmp_path):
     assert len(lines) == 2
     assert lines[0] == "1\t1.500000\t0.800000"
     assert lines[1] == "2\t2.000000\t1.100000"
+
+
+# ── DryRunLog ────────────────────────────────────────────────────────
+
+def test_dry_run_log_appends_a_line_per_tick(tmp_path):
+    filepath = tmp_path / "dry_run_log.txt"
+    log = DryRunLog(str(filepath))
+    log.append("2026-08-18T00:00:00+00:00", Decision(Action.BUY, size=1.5), balance=1000.0, equity=1000.0)
+    log.append("2026-08-18T01:00:00+00:00", Decision(Action.HOLD), balance=1000.0, equity=1015.0)
+
+    lines = filepath.read_text().splitlines()
+    assert len(lines) == 2
+    assert lines[0] == "2026-08-18T00:00:00+00:00\tBUY\t1.500000\t1000.000000\t1000.000000"
+    assert lines[1] == "2026-08-18T01:00:00+00:00\tHOLD\t0.000000\t1000.000000\t1015.000000"

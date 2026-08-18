@@ -3,7 +3,7 @@ from typing import Optional
 import pandas as pd
 import pytest
 
-from coinbase.trading_strategy import Action, Backtest, Decision, Position, Trade
+from coinbase.trading_strategy import Action, Backtest, Decision, Ledger, Position, Trade
 
 
 # ── Test double ──────────────────────────────────────────────────────
@@ -59,6 +59,61 @@ def test_position_closed_and_unrealized_agree_at_same_price():
 
 def test_decision_size_defaults_to_zero():
     assert Decision(Action.HOLD).size == pytest.approx(0.0)
+
+
+# ── Ledger ───────────────────────────────────────────────────────────
+
+def test_ledger_starts_flat_at_the_starting_balance():
+    ledger = Ledger(1000.0)
+    assert ledger.balance() == pytest.approx(1000.0)
+    assert ledger.position() is None
+    assert ledger.equity(100.0) == pytest.approx(1000.0)
+
+
+def test_ledger_apply_buy_opens_a_position_without_touching_balance():
+    ledger = Ledger(1000.0)
+    ledger.apply(Decision(Action.BUY, size=2.0), price=100.0)
+    assert ledger.balance() == pytest.approx(1000.0)
+    assert ledger.position().entry_price() == pytest.approx(100.0)
+    assert ledger.equity(110.0) == pytest.approx(1020.0)  # unrealized gain only
+
+
+def test_ledger_apply_sell_closes_the_position_and_realizes_profit():
+    ledger = Ledger(1000.0)
+    ledger.apply(Decision(Action.BUY, size=2.0), price=100.0)
+    ledger.apply(Decision(Action.SELL), price=110.0)
+    assert ledger.position() is None
+    assert ledger.balance() == pytest.approx(1020.0)
+    assert len(ledger.trades()) == 1
+
+
+def test_ledger_apply_buy_while_already_in_a_position_is_a_no_op():
+    ledger = Ledger(1000.0)
+    ledger.apply(Decision(Action.BUY, size=2.0), price=100.0)
+    ledger.apply(Decision(Action.BUY, size=5.0), price=105.0)
+    assert ledger.position().entry_price() == pytest.approx(100.0)  # unchanged
+
+
+def test_ledger_apply_sell_while_flat_is_a_no_op():
+    ledger = Ledger(1000.0)
+    ledger.apply(Decision(Action.SELL), price=100.0)
+    assert ledger.balance() == pytest.approx(1000.0)
+    assert ledger.trades() == []
+
+
+def test_ledger_force_close_realizes_an_open_position():
+    ledger = Ledger(1000.0)
+    ledger.apply(Decision(Action.BUY, size=2.0), price=100.0)
+    ledger.force_close(110.0)
+    assert ledger.position() is None
+    assert ledger.balance() == pytest.approx(1020.0)
+
+
+def test_ledger_force_close_while_flat_is_a_no_op():
+    ledger = Ledger(1000.0)
+    ledger.force_close(100.0)
+    assert ledger.balance() == pytest.approx(1000.0)
+    assert ledger.trades() == []
 
 
 # ── Backtest ─────────────────────────────────────────────────────────

@@ -56,6 +56,43 @@ class Strategy(Protocol):
     def decide(self, row: dict[str, float], position: Optional[Position], balance: float) -> Decision: ...
 
 
+# ── Ledger ───────────────────────────────────────────────────────────────
+
+class Ledger:
+    def __init__(self, balance: float) -> None:
+        self._balance  = balance
+        self._position: Optional[Position] = None
+        self._trades:   list[Trade] = []
+
+    def apply(self, decision: Decision, price: float) -> None:
+        if decision.action is Action.BUY and self._position is None:
+            self._position = Position(price, decision.size)
+        elif decision.action is Action.SELL and self._position is not None:
+            self._close(price)
+
+    def force_close(self, price: float) -> None:
+        if self._position is not None:
+            self._close(price)
+
+    def balance(self) -> float:
+        return self._balance
+
+    def position(self) -> Optional[Position]:
+        return self._position
+
+    def equity(self, price: float) -> float:
+        return self._balance + (self._position.unrealized(price) if self._position is not None else 0.0)
+
+    def trades(self) -> list[Trade]:
+        return list(self._trades)
+
+    def _close(self, price: float) -> None:
+        trade = self._position.closed(price)
+        self._balance += trade.profit()
+        self._trades.append(trade)
+        self._position = None
+
+
 # ── Backtest ────────────────────────────────────────────────────────────
 
 class BacktestResult:
@@ -84,24 +121,15 @@ class Backtest:
         return self._frame.to_dict("records")
 
     def run(self) -> BacktestResult:
-        balance = self._starting_balance
-        position: Optional[Position] = None
-        trades:       list[Trade] = []
+        ledger = Ledger(self._starting_balance)
         equity_curve: list[float] = []
 
         for row in self._rows:
-            decision = self._strategy.decide(row, position, balance)
+            decision = self._strategy.decide(row, ledger.position(), ledger.balance())
             price    = row["close"]
-            if decision.action is Action.BUY and position is None:
-                position = Position(price, decision.size)
-            elif decision.action is Action.SELL and position is not None:
-                trade    = position.closed(price)
-                balance += trade.profit()
-                trades.append(trade)
-                position = None
-            equity_curve.append(balance + (position.unrealized(price) if position is not None else 0.0))
+            ledger.apply(decision, price)
+            equity_curve.append(ledger.equity(price))
 
-        if position is not None:
-            trades.append(position.closed(self._rows[-1]["close"]))
-
-        return BacktestResult(trades, equity_curve)
+        if self._rows:
+            ledger.force_close(self._rows[-1]["close"])
+        return BacktestResult(ledger.trades(), equity_curve)

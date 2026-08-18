@@ -1,0 +1,83 @@
+import asyncio
+
+from coinbase.coinbase_adapter import CoinbaseAdapter
+from coinbase.ga.config import ConfigFile
+from coinbase.ga.ga_engine import Genome, WEIGHT_KEYS
+from coinbase.ga.market_data_processor import MarketDataConfig
+from coinbase.ga.strategy_evaluator import GaStrategy, POSITION_PNL_KEY, StrategyConfigFile
+from coinbase.ga.strategy_output import DryRunLog, OutputConfigFile, StrategyJsonFile, UtcNow
+from coinbase.market_scanner import GRANULARITY_SECONDS
+from coinbase.strategy import LiveMarketRow, PaperTradingRun
+from coinbase.trading_strategy import Decision, Ledger
+
+
+# ── Console progress ─────────────────────────────────────────────────────
+
+class ConsoleDryRunLog:
+    def __init__(self, log: DryRunLog) -> None:
+        self._log = log
+
+    def append(self, timestamp: str, decision: Decision, balance: float, equity: float) -> None:
+        self._log.append(timestamp, decision, balance, equity)
+        print(
+            f"{timestamp}  {decision.action.value:<4}  size {decision.size:>12.6f}  "
+            f"balance {balance:>14.2f}  equity {equity:>14.2f}"
+        )
+
+
+# ── Loop ───────────────────────────────────────────────────────────────
+
+class DryRun:
+    def __init__(self, run: PaperTradingRun, log: ConsoleDryRunLog, interval_seconds: int) -> None:
+        self._run              = run
+        self._log              = log
+        self._interval_seconds = interval_seconds
+
+    async def forever(self) -> None:
+        while True:
+            await self.tick()
+            await asyncio.sleep(self._interval_seconds)
+
+    async def tick(self) -> None:
+        decision = await self._run.on_timer()
+        ledger   = self._run.ledger()
+        price    = self._run.last_price()
+        self._log.append(UtcNow().iso(), decision, ledger.balance(), ledger.equity(price))
+
+
+# ── Entry point ────────────────────────────────────────────────────────
+# Run:  python coinbase/ga/dry_run.py
+# Reloads the last trained strategy and drives it against live market data on
+# a loop matched to its trained granularity, logging every decision it would
+# make against a simulated balance seeded from config.yaml's starting_balance.
+# Never places a real order — safe to leave running against live prices.
+# Requires only a read-scoped Coinbase key (candles, no account/order calls).
+# Ctrl+C to stop.
+
+async def _main() -> None:
+    from coinbase.credentials import api_key, api_secret
+
+    raw_config      = ConfigFile("coinbase/ga/config.yaml").raw()
+    market_config   = MarketDataConfig(raw_config)
+    window          = market_config.window()
+    strategy_config = StrategyConfigFile(raw_config).config()
+    output_config   = OutputConfigFile(raw_config).config()
+    keys            = WEIGHT_KEYS + (POSITION_PNL_KEY,)
+
+    reloaded = StrategyJsonFile(output_config.strategy_filepath)
+    genome   = Genome(reloaded.weights())
+    strategy = GaStrategy(genome, strategy_config, keys)
+
+    async with CoinbaseAdapter(api_key, api_secret) as adapter:
+        market_row  = LiveMarketRow(adapter, window.pair, window.granularity, market_config.periods())
+        ledger      = Ledger(strategy_config.starting_balance)
+        run         = PaperTradingRun(market_row, strategy, ledger)
+        console_log = ConsoleDryRunLog(DryRunLog(output_config.dry_run_log_filepath))
+        interval    = GRANULARITY_SECONDS[window.granularity]
+
+        print(f"Dry-running {window.pair} every {interval}s against simulated balance {ledger.balance():.2f}")
+        await DryRun(run, console_log, interval).forever()
+
+
+if __name__ == "__main__":
+    asyncio.run(_main())
