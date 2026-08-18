@@ -15,8 +15,9 @@ from coinbase.ga.ga_engine import (
     RandomWeights,
     TournamentSelection,
     UniformCrossover,
-    WEIGHT_KEYS,
 )
+
+_KEYS = ("sma_short", "sma_long", "sma_extra", "rsi", "macd")
 
 
 # ── Genome ─────────────────────────────────────────────────────────────
@@ -55,13 +56,13 @@ def test_normalized_weights_falls_back_to_uniform_on_zero_sum():
 
 
 def test_random_weights_generate_sum_to_one():
-    weights = RandomWeights(WEIGHT_KEYS, random.Random(1)).generate()
-    assert set(weights) == set(WEIGHT_KEYS)
+    weights = RandomWeights(_KEYS, random.Random(1)).generate()
+    assert set(weights) == set(_KEYS)
     assert sum(weights.values()) == pytest.approx(1.0)
 
 
 def test_random_population_produces_normalized_genomes_of_requested_size():
-    genomes = RandomPopulation(10, WEIGHT_KEYS, random.Random(2)).genomes()
+    genomes = RandomPopulation(10, _KEYS, random.Random(2)).genomes()
     assert len(genomes) == 10
     for genome in genomes:
         assert sum(genome.weights().values()) == pytest.approx(1.0)
@@ -78,7 +79,7 @@ class _WeightSumFitness:
 
 
 def test_fitness_evaluation_scores_every_genome():
-    population = RandomPopulation(5, WEIGHT_KEYS, random.Random(3)).genomes()
+    population = RandomPopulation(5, _KEYS, random.Random(3)).genomes()
     scored     = FitnessEvaluation(population, _WeightSumFitness("rsi")).scored()
     assert all(genome.is_evaluated() for genome in scored)
     assert [g.fitness() for g in scored] == [g.weight("rsi") for g in scored]
@@ -177,9 +178,9 @@ def test_evolve_drives_weight_toward_what_fitness_rewards():
         mutation_sigma=0.15,
         seed=42,
     )
-    best = GeneticAlgorithm(config).evolve(_WeightSumFitness("rsi"))
+    best = GeneticAlgorithm(config, _KEYS).evolve(_WeightSumFitness("rsi"))
     assert best.is_evaluated()
-    assert best.weight("rsi") > 1.0 / len(WEIGHT_KEYS)  # better than the uniform-random baseline
+    assert best.weight("rsi") > 1.0 / len(_KEYS)  # better than the uniform-random baseline
 
 
 def test_evolve_invokes_on_generation_once_per_generation_with_plausible_stats():
@@ -193,7 +194,7 @@ def test_evolve_invokes_on_generation_once_per_generation_with_plausible_stats()
         seed=7,
     )
     calls: list[tuple[int, float, float]] = []
-    GeneticAlgorithm(config).evolve(_WeightSumFitness("rsi"), on_generation=lambda g, b, a: calls.append((g, b, a)))
+    GeneticAlgorithm(config, _KEYS).evolve(_WeightSumFitness("rsi"), on_generation=lambda g, b, a: calls.append((g, b, a)))
 
     assert [generation for generation, _, _ in calls] == [1, 2, 3, 4]
     for _, best, average in calls:
@@ -211,7 +212,7 @@ def test_evolve_is_reproducible_with_a_fixed_seed():
         seed=123,
     )
     fitness_function = _WeightSumFitness("macd")
-    best_a = GeneticAlgorithm(config).evolve(fitness_function)
-    best_b = GeneticAlgorithm(config).evolve(fitness_function)
+    best_a = GeneticAlgorithm(config, _KEYS).evolve(fitness_function)
+    best_b = GeneticAlgorithm(config, _KEYS).evolve(fitness_function)
     assert best_a.weights() == pytest.approx(best_b.weights())
     assert best_a.fitness() == pytest.approx(best_b.fitness())

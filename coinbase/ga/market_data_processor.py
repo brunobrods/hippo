@@ -13,9 +13,6 @@ from coinbase.market_scanner import GRANULARITY_SECONDS
 
 MAX_CANDLES_PER_REQUEST = 300
 
-NORMALIZED_COLUMNS = ("sma_short", "sma_long", "sma_extra", "rsi", "macd")
-DELTA_COLUMNS      = ("delta_1", "delta_3", "delta_5", "delta_10")
-
 
 # ── Config data ────────────────────────────────────────────────────────
 
@@ -74,6 +71,15 @@ class MarketDataConfig:
 
     def periods(self) -> IndicatorPeriods:
         return IndicatorPeriods(**self._raw["strategy"]["indicators"])
+
+    def normalized_columns(self) -> tuple[str, ...]:
+        return tuple(self._raw["market_data"]["normalized_columns"])
+
+    def delta_columns(self) -> tuple[str, ...]:
+        return tuple(self._raw["market_data"]["delta_columns"])
+
+    def columns(self) -> tuple[str, ...]:
+        return self.normalized_columns() + self.delta_columns()
 
 
 # ── Indicators ─────────────────────────────────────────────────────────
@@ -190,7 +196,7 @@ class IndicatorFrame:
 
 
 class NormalizedIndicators:
-    def __init__(self, frame: pd.DataFrame, columns: tuple[str, ...] = NORMALIZED_COLUMNS + DELTA_COLUMNS) -> None:
+    def __init__(self, frame: pd.DataFrame, columns: tuple[str, ...]) -> None:
         self._frame   = frame
         self._columns = columns
 
@@ -291,20 +297,22 @@ class HistoricalMarketData:
         start: int,
         end: int,
         periods: IndicatorPeriods,
+        normalized_columns: tuple[str, ...],
     ) -> None:
-        self._adapter     = adapter
-        self._product_id  = product_id
-        self._granularity = granularity
-        self._start       = start
-        self._end         = end
-        self._periods     = periods
+        self._adapter            = adapter
+        self._product_id         = product_id
+        self._granularity        = granularity
+        self._start              = start
+        self._end                = end
+        self._periods            = periods
+        self._normalized_columns = normalized_columns
 
     async def dataframe(self) -> pd.DataFrame:
         raw   = await HistoricalCandles(
             self._adapter, self._product_id, self._granularity, self._start, self._end
         ).raw()
         frame = IndicatorFrame(raw, self._periods).dataframe
-        return NormalizedIndicators(frame).dataframe
+        return NormalizedIndicators(frame, self._normalized_columns).dataframe
 
 
 class LiveMarketState:
@@ -347,7 +355,7 @@ async def _main() -> None:
 
     async with CoinbaseAdapter(api_key, api_secret) as adapter:
         market_data = HistoricalMarketData(
-            adapter, window.pair, window.granularity, window.start, window.end, config.periods()
+            adapter, window.pair, window.granularity, window.start, window.end, config.periods(), config.columns(),
         )
         frame = await market_data.dataframe()
         print(frame.tail())

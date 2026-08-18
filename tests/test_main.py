@@ -46,6 +46,10 @@ def _raw_config(output_dir) -> dict:
             "end_date": "2024-01-01",
             "test_split": 0.3,
         },
+        "market_data": {
+            "normalized_columns": ["sma_short", "sma_long", "sma_extra", "rsi", "macd"],
+            "delta_columns": ["delta_1", "delta_3", "delta_5", "delta_10"],
+        },
         "strategy": {
             "position_size_pct": 0.10,
             "buy_threshold": 0.6,
@@ -60,6 +64,7 @@ def _raw_config(output_dir) -> dict:
                 "macd_slow": 3,
                 "macd_signal": 2,
             },
+            "weight_keys": ["sma_short", "sma_long", "sma_extra", "rsi", "macd"],
         },
         "genetic_algorithm": {
             "population_size": 6,
@@ -155,9 +160,10 @@ async def test_training_run_trains_saves_and_round_trips(tmp_path):
     on_disk = json.loads(strategy_path.read_text())
     assert set(on_disk) == {"metadata", "strategy", "performance"}
     assert on_disk["metadata"]["pair"] == "BTC-USDC"
-    assert set(on_disk["strategy"]["weights"]) == {"sma_short", "sma_long", "sma_extra", "rsi", "macd"}
+    assert set(on_disk["strategy"]["weights"]) == {"sma_short", "sma_long", "sma_extra", "rsi", "macd", "position_pnl"}
 
     assert log_path.exists()
-    assert len(log_path.read_text().splitlines()) == 2  # one line per generation
+    generation_lines = log_path.read_text().splitlines()[5:]  # after the RunHeader's 5 lines
+    assert [line.split("\t")[0] for line in generation_lines] == ["1", "2"]  # one line per generation
 
-    assert "Reload round-trip:     OK" in summary.as_text()
+    assert "Reload round-trip:      OK" in summary.as_text()

@@ -47,12 +47,15 @@ def _account(currency: str, available: str) -> dict:
     return {"currency": currency, "available_balance": {"value": available, "currency": currency}}
 
 
+_NORMALIZED_COLUMNS = ("sma_short", "sma_long", "sma_extra", "rsi", "macd")
+
+
 # ── LiveMarketRow ────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_live_market_row_latest_has_close_and_normalized_columns():
     adapter = FakeAdapter(candles=_rising_candles(80), accounts=[])
-    row = await LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods()).latest()
+    row = await LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS).latest()
     assert "close" in row
     assert "norm_sma_short" in row
     assert "norm_rsi" in row
@@ -63,7 +66,7 @@ async def test_live_market_row_latest_has_close_and_normalized_columns():
 @pytest.mark.asyncio
 async def test_live_trading_run_returns_strategys_decision():
     adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[_account("USDC", "1000")])
-    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS)
     strategy   = _FixedActionStrategy([Action.BUY])
     run        = LiveTradingRun(adapter, market_row, strategy, quote_currency="USDC")
 
@@ -75,7 +78,7 @@ async def test_live_trading_run_returns_strategys_decision():
 @pytest.mark.asyncio
 async def test_live_trading_run_tracks_position_across_ticks():
     adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[_account("USDC", "1000")])
-    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS)
     strategy   = _FixedActionStrategy([Action.BUY, Action.SELL, Action.BUY])
     run        = LiveTradingRun(adapter, market_row, strategy, quote_currency="USDC")
 
@@ -94,7 +97,7 @@ async def test_live_trading_run_tracks_position_across_ticks():
 @pytest.mark.asyncio
 async def test_paper_trading_run_sizes_against_the_simulated_ledger_not_the_account():
     adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[])  # no account data needed
-    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS)
     strategy   = _FixedActionStrategy([Action.BUY])
     run        = PaperTradingRun(market_row, strategy, Ledger(1000.0))
 
@@ -109,7 +112,7 @@ async def test_paper_trading_run_never_calls_the_adapters_order_endpoints():
     # PaperTradingRun ever tried to place a real order this would raise
     # AttributeError instead of completing.
     adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[])
-    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS)
     strategy   = _FixedActionStrategy([Action.BUY, Action.SELL])
     run        = PaperTradingRun(market_row, strategy, Ledger(1000.0))
 
@@ -121,7 +124,7 @@ async def test_paper_trading_run_never_calls_the_adapters_order_endpoints():
 @pytest.mark.asyncio
 async def test_paper_trading_run_updates_the_ledger_across_ticks():
     adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[])
-    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS)
     strategy   = _FixedActionStrategy([Action.BUY, Action.SELL])
     ledger     = Ledger(1000.0)
     run        = PaperTradingRun(market_row, strategy, ledger)
@@ -138,7 +141,7 @@ async def test_paper_trading_run_updates_the_ledger_across_ticks():
 @pytest.mark.asyncio
 async def test_paper_trading_run_exposes_the_last_observed_price():
     adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[])
-    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS)
     strategy   = _FixedActionStrategy([Action.HOLD])
     run        = PaperTradingRun(market_row, strategy, Ledger(1000.0))
 
@@ -147,7 +150,7 @@ async def test_paper_trading_run_exposes_the_last_observed_price():
 
 
 def test_paper_trading_run_last_price_raises_before_the_first_tick():
-    market_row = LiveMarketRow(FakeAdapter([], []), "BTC-USDC", "ONE_HOUR", IndicatorPeriods())
+    market_row = LiveMarketRow(FakeAdapter([], []), "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS)
     run = PaperTradingRun(market_row, _FixedActionStrategy([]), Ledger(1000.0))
     with pytest.raises(ValueError):
         run.last_price()

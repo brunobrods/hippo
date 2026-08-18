@@ -22,19 +22,21 @@ class LiveMarketRow:
         pair: str,
         granularity: str,
         periods: IndicatorPeriods,
+        normalized_columns: tuple[str, ...],
         lookback_candles: int = 200,
     ) -> None:
-        self._adapter          = adapter
-        self._pair             = pair
-        self._granularity      = granularity
-        self._periods          = periods
-        self._lookback_candles = lookback_candles
+        self._adapter            = adapter
+        self._pair               = pair
+        self._granularity        = granularity
+        self._periods            = periods
+        self._normalized_columns = normalized_columns
+        self._lookback_candles   = lookback_candles
 
     async def latest(self) -> dict[str, float]:
         end   = int(time.time())
         start = end - self._lookback_candles * GRANULARITY_SECONDS[self._granularity]
         frame = await HistoricalMarketData(
-            self._adapter, self._pair, self._granularity, start, end, self._periods,
+            self._adapter, self._pair, self._granularity, start, end, self._periods, self._normalized_columns,
         ).dataframe()
         return frame.iloc[-1].to_dict()
 

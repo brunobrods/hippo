@@ -2,9 +2,15 @@ import asyncio
 
 from coinbase.coinbase_adapter import CoinbaseAdapter
 from coinbase.ga.config import ConfigFile
-from coinbase.ga.ga_engine import Genome, WEIGHT_KEYS
+from coinbase.ga.ga_engine import Genome
 from coinbase.ga.market_data_processor import MarketDataConfig
-from coinbase.ga.strategy_evaluator import GaStrategy, POSITION_PNL_KEY, StrategyConfigFile
+from coinbase.ga.strategy_evaluator import (
+    GaStrategy,
+    POSITION_PNL_KEY,
+    StrategyConfigFile,
+    ValidatedWeightKeys,
+    WeightKeysConfig,
+)
 from coinbase.ga.strategy_output import DryRunLog, OutputConfigFile, StrategyJsonFile, UtcNow
 from coinbase.market_scanner import GRANULARITY_SECONDS
 from coinbase.strategy import LiveMarketRow, PaperTradingRun
@@ -62,14 +68,19 @@ async def _main() -> None:
     window          = market_config.window()
     strategy_config = StrategyConfigFile(raw_config).config()
     output_config   = OutputConfigFile(raw_config).config()
-    keys            = WEIGHT_KEYS + (POSITION_PNL_KEY,)
+    weight_keys     = ValidatedWeightKeys(
+        WeightKeysConfig(raw_config).keys(), market_config.normalized_columns(),
+    ).keys()
+    keys = weight_keys + (POSITION_PNL_KEY,)
 
     reloaded = StrategyJsonFile(output_config.strategy_filepath)
     genome   = Genome(reloaded.weights())
     strategy = GaStrategy(genome, strategy_config, keys)
 
     async with CoinbaseAdapter(api_key, api_secret) as adapter:
-        market_row  = LiveMarketRow(adapter, window.pair, window.granularity, market_config.periods())
+        market_row  = LiveMarketRow(
+            adapter, window.pair, window.granularity, market_config.periods(), market_config.normalized_columns(),
+        )
         ledger      = Ledger(strategy_config.starting_balance)
         run         = PaperTradingRun(market_row, strategy, ledger)
         console_log = ConsoleDryRunLog(DryRunLog(output_config.dry_run_log_filepath))

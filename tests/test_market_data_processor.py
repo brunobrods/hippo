@@ -147,10 +147,14 @@ def test_indicator_frame_sorts_out_of_order_candles():
     assert frame["timestamp"].is_monotonic_increasing
 
 
+_NORMALIZED_COLUMNS = ("sma_short", "sma_long", "sma_extra", "rsi", "macd")
+_DELTA_COLUMNS      = ("delta_1", "delta_3", "delta_5", "delta_10")
+
+
 def test_normalized_indicators_adds_norm_columns_in_unit_range():
     raw        = _rising_candles(80)
     frame      = IndicatorFrame(raw, IndicatorPeriods()).dataframe
-    normalized = NormalizedIndicators(frame).dataframe
+    normalized = NormalizedIndicators(frame, _NORMALIZED_COLUMNS + _DELTA_COLUMNS).dataframe
     for column in (
         "norm_sma_short", "norm_sma_long", "norm_sma_extra", "norm_rsi", "norm_macd",
         "norm_delta_1", "norm_delta_3", "norm_delta_5", "norm_delta_10",
@@ -158,11 +162,12 @@ def test_normalized_indicators_adds_norm_columns_in_unit_range():
         assert normalized[column].between(0.0, 1.0).all()
 
 
-def test_normalized_indicators_default_does_not_touch_ga_weight_keys():
-    # DELTA_COLUMNS get normalized by default too, but must stay out of the GA's
-    # WEIGHT_KEYS/genome — that was a deliberate scoping decision, not an oversight.
-    from coinbase.ga.ga_engine import WEIGHT_KEYS
-    assert WEIGHT_KEYS == ("sma_short", "sma_long", "sma_extra", "rsi", "macd")
+def test_normalized_indicators_only_touches_the_injected_columns():
+    raw        = _rising_candles(80)
+    frame      = IndicatorFrame(raw, IndicatorPeriods()).dataframe
+    normalized = NormalizedIndicators(frame, ("rsi",)).dataframe
+    assert "norm_rsi" in normalized.columns
+    assert "norm_delta_1" not in normalized.columns
 
 
 def test_train_test_split_respects_fraction():
@@ -252,7 +257,9 @@ async def test_historical_market_data_dataframe_end_to_end():
         candles_by_window={window: _rising_candles(80, start_ts=0)},
         accounts=[],
     )
-    market_data = HistoricalMarketData(adapter, "BTC-USDC", "ONE_HOUR", start, end, IndicatorPeriods())
+    market_data = HistoricalMarketData(
+        adapter, "BTC-USDC", "ONE_HOUR", start, end, IndicatorPeriods(), _NORMALIZED_COLUMNS + _DELTA_COLUMNS,
+    )
     frame = await market_data.dataframe()
     assert "norm_rsi" in frame.columns
     assert len(frame) > 0
@@ -311,6 +318,10 @@ def test_market_data_config_window_and_periods():
                 "macd_signal": 9,
             }
         },
+        "market_data": {
+            "normalized_columns": ["sma_short", "rsi"],
+            "delta_columns": ["delta_1"],
+        },
     }
     config = MarketDataConfig(raw)
     window = config.window()
@@ -319,3 +330,6 @@ def test_market_data_config_window_and_periods():
     assert window.test_split == pytest.approx(0.25)
     assert window.end > window.start
     assert config.periods() == IndicatorPeriods()
+    assert config.normalized_columns() == ("sma_short", "rsi")
+    assert config.delta_columns() == ("delta_1",)
+    assert config.columns() == ("sma_short", "rsi", "delta_1")

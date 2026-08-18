@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from coinbase.ga.ga_engine import Genome, WEIGHT_KEYS
+from coinbase.ga.ga_engine import Genome
 from coinbase.trading_strategy import Action, Backtest, BacktestResult, Decision, Position
 
 
@@ -31,13 +31,35 @@ class StrategyConfigFile:
         )
 
 
+class WeightKeysConfig:
+    def __init__(self, raw: dict[str, Any]) -> None:
+        self._raw = raw
+
+    def keys(self) -> tuple[str, ...]:
+        return tuple(self._raw["strategy"]["weight_keys"])
+
+
+class ValidatedWeightKeys:
+    def __init__(self, weight_keys: tuple[str, ...], normalized_columns: tuple[str, ...]) -> None:
+        self._weight_keys        = weight_keys
+        self._normalized_columns = normalized_columns
+
+    def keys(self) -> tuple[str, ...]:
+        missing = set(self._weight_keys) - set(self._normalized_columns)
+        if missing:
+            raise ValueError(
+                f"strategy.weight_keys not in market_data.normalized_columns: {sorted(missing)}"
+            )
+        return self._weight_keys
+
+
 # ── GA-driven strategy ───────────────────────────────────────────────────
 
 POSITION_PNL_KEY = "position_pnl"
 
 
 class GaStrategy:
-    def __init__(self, genome: Genome, config: StrategyConfig, keys: tuple[str, ...] = WEIGHT_KEYS) -> None:
+    def __init__(self, genome: Genome, config: StrategyConfig, keys: tuple[str, ...]) -> None:
         self._genome = genome
         self._config = config
         self._keys   = keys
@@ -86,7 +108,7 @@ class AnnualizedYield:
 # ── Evaluator ───────────────────────────────────────────────────────────
 
 class StrategyEvaluator:
-    def __init__(self, frame: pd.DataFrame, config: StrategyConfig, keys: tuple[str, ...] = WEIGHT_KEYS) -> None:
+    def __init__(self, frame: pd.DataFrame, config: StrategyConfig, keys: tuple[str, ...]) -> None:
         self._frame  = frame
         self._config = config
         self._keys   = keys
