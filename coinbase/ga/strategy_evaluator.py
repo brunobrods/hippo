@@ -39,6 +39,20 @@ class WeightKeysConfig:
         return tuple(self._raw["strategy"]["weight_keys"])
 
 
+class ValidatedWeightKeys:
+    def __init__(self, weight_keys: tuple[str, ...], normalized_columns: tuple[str, ...]) -> None:
+        self._weight_keys        = weight_keys
+        self._normalized_columns = normalized_columns
+
+    def keys(self) -> tuple[str, ...]:
+        missing = set(self._weight_keys) - set(self._normalized_columns)
+        if missing:
+            raise ValueError(
+                f"strategy.weight_keys not in market_data.normalized_columns: {sorted(missing)}"
+            )
+        return self._weight_keys
+
+
 # ── GA-driven strategy ───────────────────────────────────────────────────
 
 POSITION_PNL_KEY = "position_pnl"

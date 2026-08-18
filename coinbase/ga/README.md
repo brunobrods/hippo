@@ -21,8 +21,7 @@ flowchart BT
 
     ADAPTER --> MDP
     CFG --> MDP
-    MDP -->|NORMALIZED_COLUMNS| GA
-    GA -->|Genome, WEIGHT_KEYS| SE
+    GA -->|Genome| SE
     MDP -->|indicator frame| SE
     GA -->|GaConfig, Genome| SO
     SE -->|BacktestResult, StrategyConfig| SO
@@ -85,10 +84,12 @@ out-of-sample estimate rather than the (optimistic) number the GA was optimizing
 | `data` | `pair`, `granularity` | Coinbase-format product ID and candle interval (e.g. `BTC-USDC`, `ONE_HOUR`) |
 | | `start_date`, `end_date` | Historical window to fetch, `YYYY-MM-DD` |
 | | `test_split` | Fraction of the window held out for out-of-sample evaluation |
+| `market_data` | `normalized_columns`, `delta_columns` | Which indicator/delta columns get min-max normalized into `norm_<column>` before scoring |
 | `strategy` | `indicators` | SMA/RSI/MACD periods |
 | | `buy_threshold` / `sell_threshold` | `signal_score` levels that open / close a position (hysteresis band between them = hold) |
 | | `position_size_pct` | Fraction of the *current* simulated balance risked per trade (compounding) |
 | | `starting_balance` | Fixed quote-currency balance a backtest starts from — not read from a live account, so training is deterministic and reproducible |
+| | `weight_keys` | Which `market_data.normalized_columns` the GA assigns a weight to and scores on (must be a subset of `normalized_columns` — checked at startup) |
 | `genetic_algorithm` | `population_size`, `generations`, `mutation_rate`, `crossover_rate`, `tournament_size`, `elitism_count`, `mutation_sigma`, `seed` | Standard GA hyperparameters; fix `seed` for reproducible runs |
 | `output` | `strategy_filepath`, `log_filepath` | Where the trained strategy JSON and the per-generation run log get written |
 
@@ -125,7 +126,7 @@ opens with a header (`RunHeader` in `strategy_output.py`) written before the GA 
 so a run that crashes mid-evolution still leaves its config on record: a
 `=== run <started_at ISO-8601> ===` line, the pair/granularity/date window/test split,
 the strategy hyperparameters, and the GA config — followed by one tab-separated line per
-generation: `generation\tbest_fitness\taverage_fitness`.
+generation: `generation\tbest_fitness\tavg_fitness`.
 
 ### Tests
 

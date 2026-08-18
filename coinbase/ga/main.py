@@ -6,7 +6,13 @@ from coinbase.coinbase_adapter import CoinbaseAdapter
 from coinbase.ga.config import ConfigFile
 from coinbase.ga.ga_engine import GaConfigFile, GeneticAlgorithm, Genome
 from coinbase.ga.market_data_processor import HistoricalMarketData, MarketDataConfig, TrainTestSplit
-from coinbase.ga.strategy_evaluator import POSITION_PNL_KEY, StrategyConfigFile, StrategyEvaluator, WeightKeysConfig
+from coinbase.ga.strategy_evaluator import (
+    POSITION_PNL_KEY,
+    StrategyConfigFile,
+    StrategyEvaluator,
+    ValidatedWeightKeys,
+    WeightKeysConfig,
+)
 from coinbase.ga.strategy_output import (
     GaRunLog,
     OutputConfigFile,
@@ -71,13 +77,16 @@ class TrainingRun:
         ga_config       = GaConfigFile(self._raw_config).config()
         output_config   = OutputConfigFile(self._raw_config).config()
         data            = self._raw_config["data"]
-        columns         = market_config.normalized_columns() + market_config.delta_columns()
 
         frame = await HistoricalMarketData(
-            self._adapter, window.pair, window.granularity, window.start, window.end, market_config.periods(), columns,
+            self._adapter, window.pair, window.granularity, window.start, window.end,
+            market_config.periods(), market_config.columns(),
         ).dataframe()
         split = TrainTestSplit(frame, window.test_split)
-        keys  = WeightKeysConfig(self._raw_config).keys() + (POSITION_PNL_KEY,)
+        weight_keys = ValidatedWeightKeys(
+            WeightKeysConfig(self._raw_config).keys(), market_config.normalized_columns(),
+        ).keys()
+        keys = weight_keys + (POSITION_PNL_KEY,)
 
         train_evaluator = StrategyEvaluator(split.train(), strategy_config, keys)
         test_evaluator  = StrategyEvaluator(split.test(), strategy_config, keys)

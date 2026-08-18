@@ -78,6 +78,9 @@ class MarketDataConfig:
     def delta_columns(self) -> tuple[str, ...]:
         return tuple(self._raw["market_data"]["delta_columns"])
 
+    def columns(self) -> tuple[str, ...]:
+        return self.normalized_columns() + self.delta_columns()
+
 
 # ── Indicators ─────────────────────────────────────────────────────────
 
@@ -351,9 +354,8 @@ async def _main() -> None:
     window = config.window()
 
     async with CoinbaseAdapter(api_key, api_secret) as adapter:
-        columns = config.normalized_columns() + config.delta_columns()
         market_data = HistoricalMarketData(
-            adapter, window.pair, window.granularity, window.start, window.end, config.periods(), columns,
+            adapter, window.pair, window.granularity, window.start, window.end, config.periods(), config.columns(),
         )
         frame = await market_data.dataframe()
         print(frame.tail())

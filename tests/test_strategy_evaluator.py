@@ -9,6 +9,7 @@ from coinbase.ga.strategy_evaluator import (
     StrategyConfig,
     StrategyConfigFile,
     StrategyEvaluator,
+    ValidatedWeightKeys,
     WeightKeysConfig,
 )
 from coinbase.trading_strategy import Action, Position
@@ -71,6 +72,18 @@ def test_strategy_config_file_reads_section():
 def test_weight_keys_config_reads_section():
     raw = {"strategy": {"weight_keys": ["sma_short", "rsi"]}}
     assert WeightKeysConfig(raw).keys() == ("sma_short", "rsi")
+
+
+# ── ValidatedWeightKeys ──────────────────────────────────────────────
+
+def test_validated_weight_keys_passes_through_a_subset():
+    keys = ValidatedWeightKeys(("sma_short", "rsi"), ("sma_short", "sma_long", "rsi")).keys()
+    assert keys == ("sma_short", "rsi")
+
+
+def test_validated_weight_keys_rejects_a_key_missing_from_normalized_columns():
+    with pytest.raises(ValueError, match="macd"):
+        ValidatedWeightKeys(("sma_short", "macd"), ("sma_short",)).keys()
 
 
 # ── GaStrategy ────────────────────────────────────────────────────────

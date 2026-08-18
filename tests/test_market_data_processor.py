@@ -332,3 +332,4 @@ def test_market_data_config_window_and_periods():
     assert config.periods() == IndicatorPeriods()
     assert config.normalized_columns() == ("sma_short", "rsi")
     assert config.delta_columns() == ("delta_1",)
+    assert config.columns() == ("sma_short", "rsi", "delta_1")
