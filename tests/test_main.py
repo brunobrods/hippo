@@ -47,6 +47,7 @@ def _raw_config(output_dir) -> dict:
             "test_split": 0.3,
         },
         "market_data": {
+            "cache_dir": str(output_dir / "candle_cache"),
             "normalized_columns": ["sma_short", "sma_long", "sma_extra", "rsi", "macd"],
             "delta_columns": ["delta_1", "delta_3", "delta_5", "delta_10"],
         },

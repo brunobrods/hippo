@@ -84,7 +84,8 @@ out-of-sample estimate rather than the (optimistic) number the GA was optimizing
 | `data` | `pair`, `granularity` | Coinbase-format product ID and candle interval (e.g. `BTC-USDC`, `ONE_HOUR`) |
 | | `start_date`, `end_date` | Historical window to fetch, `YYYY-MM-DD` |
 | | `test_split` | Fraction of the window held out for out-of-sample evaluation |
-| `market_data` | `normalized_columns`, `delta_columns` | Which indicator/delta columns get min-max normalized into `norm_<column>` before scoring |
+| `market_data` | `cache_dir` | Directory where fetched candle windows are cached to disk (JSON, keyed by pair/granularity/start/end) — a repeated fetch of the same window reads from here instead of Coinbase |
+| | `normalized_columns`, `delta_columns` | Which indicator/delta columns get min-max normalized into `norm_<column>` before scoring |
 | `strategy` | `indicators` | SMA/RSI/MACD periods |
 | | `buy_threshold` / `sell_threshold` | `signal_score` levels that open / close a position (hysteresis band between them = hold) |
 | | `position_size_pct` | Fraction of the *current* simulated balance risked per trade (compounding) |

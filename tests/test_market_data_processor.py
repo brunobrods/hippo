@@ -4,6 +4,9 @@ import pytest
 from coinbase.coinbase_adapter import CoinbaseError
 from coinbase.ga.market_data_processor import (
     AccountBalance,
+    CachedHistoricalCandles,
+    CandleCacheFile,
+    CandleCacheKey,
     ChunkedTimeRange,
     Delta,
     HistoricalCandles,
@@ -233,6 +236,53 @@ async def test_historical_candles_dedupes_boundary_candle():
     assert len(raw) == 599  # boundary candle counted once, not twice
 
 
+# ── Candle disk cache ──────────────────────────────────────────────────
+
+def test_candle_cache_key_filename_is_stable_for_the_same_window():
+    key = CandleCacheKey("BTC-USDC", "ONE_HOUR", 0, 3600 * 80)
+    assert key.filename() == CandleCacheKey("BTC-USDC", "ONE_HOUR", 0, 3600 * 80).filename()
+
+
+def test_candle_cache_key_filename_differs_for_a_different_window():
+    a = CandleCacheKey("BTC-USDC", "ONE_HOUR", 0, 3600 * 80)
+    b = CandleCacheKey("BTC-USDC", "ONE_HOUR", 0, 3600 * 90)
+    assert a.filename() != b.filename()
+
+
+def test_candle_cache_file_round_trips_candles(tmp_path):
+    key        = CandleCacheKey("BTC-USDC", "ONE_HOUR", 0, 3600 * 80)
+    cache_file = CandleCacheFile(str(tmp_path), key)
+    candles    = _rising_candles(5)
+
+    assert not cache_file.exists()
+    cache_file.write(candles)
+    assert cache_file.exists()
+    assert cache_file.read() == candles
+
+
+@pytest.mark.asyncio
+async def test_cached_historical_candles_fetches_once_then_reads_disk(tmp_path):
+    start, end = 0, 3600 * 80
+    window     = (0, 3600 * 80)
+    adapter = FakeAdapter(
+        candles_by_window={window: _rising_candles(80, start_ts=0)},
+        accounts=[],
+    )
+    key        = CandleCacheKey("BTC-USDC", "ONE_HOUR", start, end)
+    cache_file = CandleCacheFile(str(tmp_path), key)
+
+    first_raw = await CachedHistoricalCandles(
+        HistoricalCandles(adapter, "BTC-USDC", "ONE_HOUR", start, end), cache_file,
+    ).raw()
+    assert len(adapter.candle_calls) == 1
+
+    second_raw = await CachedHistoricalCandles(
+        HistoricalCandles(adapter, "BTC-USDC", "ONE_HOUR", start, end), cache_file,
+    ).raw()
+    assert second_raw == first_raw
+    assert len(adapter.candle_calls) == 1  # second instance never touched the adapter
+
+
 # ── AccountBalance ─────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -250,7 +300,7 @@ async def test_account_balance_available_is_zero_when_missing():
 # ── HistoricalMarketData / LiveMarketState ─────────────────────────────
 
 @pytest.mark.asyncio
-async def test_historical_market_data_dataframe_end_to_end():
+async def test_historical_market_data_dataframe_end_to_end(tmp_path):
     start, end = 0, 3600 * 80
     window     = (0, 3600 * 80)
     adapter = FakeAdapter(
@@ -258,11 +308,33 @@ async def test_historical_market_data_dataframe_end_to_end():
         accounts=[],
     )
     market_data = HistoricalMarketData(
-        adapter, "BTC-USDC", "ONE_HOUR", start, end, IndicatorPeriods(), _NORMALIZED_COLUMNS + _DELTA_COLUMNS,
+        adapter, "BTC-USDC", "ONE_HOUR", start, end, IndicatorPeriods(),
+        _NORMALIZED_COLUMNS + _DELTA_COLUMNS, str(tmp_path),
     )
     frame = await market_data.dataframe()
     assert "norm_rsi" in frame.columns
     assert len(frame) > 0
+
+
+@pytest.mark.asyncio
+async def test_historical_market_data_reuses_disk_cache_across_instances(tmp_path):
+    start, end = 0, 3600 * 80
+    window     = (0, 3600 * 80)
+    adapter = FakeAdapter(
+        candles_by_window={window: _rising_candles(80, start_ts=0)},
+        accounts=[],
+    )
+
+    def market_data() -> HistoricalMarketData:
+        return HistoricalMarketData(
+            adapter, "BTC-USDC", "ONE_HOUR", start, end, IndicatorPeriods(),
+            _NORMALIZED_COLUMNS + _DELTA_COLUMNS, str(tmp_path),
+        )
+
+    first  = await market_data().dataframe()
+    second = await market_data().dataframe()
+    assert len(adapter.candle_calls) == 1  # second instance read the disk cache, not the adapter
+    assert first.equals(second)
 
 
 @pytest.mark.asyncio
@@ -319,6 +391,7 @@ def test_market_data_config_window_and_periods():
             }
         },
         "market_data": {
+            "cache_dir": "./candle_cache",
             "normalized_columns": ["sma_short", "rsi"],
             "delta_columns": ["delta_1"],
         },
@@ -333,3 +406,4 @@ def test_market_data_config_window_and_periods():
     assert config.normalized_columns() == ("sma_short", "rsi")
     assert config.delta_columns() == ("delta_1",)
     assert config.columns() == ("sma_short", "rsi", "delta_1")
+    assert config.cache_dir() == "./candle_cache"

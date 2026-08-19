@@ -11,6 +11,10 @@ data:
   test_split: 0.5        # fraction of the window held out for testing
 
 market_data:
+  # directory where fetched candle windows are cached to disk, keyed by
+  # (pair, granularity, start, end) — repeat fetches of the same window
+  # (e.g. across a parameter sweep) read from here instead of Coinbase.
+  cache_dir: "./candle_cache"
   # columns min-max normalized into norm_<column> before scoring/training.
   normalized_columns: ["sma_short", "sma_long", "sma_extra", "rsi", "macd"]
   delta_columns: ["delta_1", "delta_3", "delta_5", "delta_10"]
