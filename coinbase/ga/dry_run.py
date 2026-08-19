@@ -52,7 +52,9 @@ class DryRun:
 
 
 # ── Entry point ────────────────────────────────────────────────────────
-# Run:  python coinbase/ga/dry_run.py
+# Run (as a module, from the repo root — a direct script path fails with
+# ModuleNotFoundError: No module named 'coinbase'):
+#   python -m coinbase.ga.dry_run
 # Reloads the last trained strategy and drives it against live market data on
 # a loop matched to its trained granularity, logging every decision it would
 # make against a simulated balance seeded from config.yaml's starting_balance.

@@ -30,19 +30,24 @@ Keys created at <https://portal.cdp.coinbase.com/>. Loaded via `CredentialsFile`
 
 ## Commands
 
+Run every script below as a module, from the repo root — a direct script path
+(`python coinbase/market_scanner.py`) fails with `ModuleNotFoundError: No module
+named 'coinbase'`, since Python only adds the script's own directory to `sys.path`,
+not the repo root.
+
 ```bash
 # Market scanner — live snapshot
-python market_scanner.py
-python market_scanner.py --granularity ONE_HOUR --candles 200 --pairs BTC-USDC ETH-USDC
-python market_scanner.py --at 2026-05-22T14:30
-python market_scanner.py --week --step 6
+python -m coinbase.market_scanner
+python -m coinbase.market_scanner --granularity ONE_HOUR --candles 200 --pairs BTC-USDC ETH-USDC
+python -m coinbase.market_scanner --at 2026-05-22T14:30
+python -m coinbase.market_scanner --week --step 6
 
 # Adapter smoke test (live — requires trade:read_write key)
-python coinbase/coinbase_adapter.py
+python -m coinbase.coinbase_adapter
 
 # Tests
 pytest
-pytest tests/test_coinbase_adapter.py   # single file
+pytest tests/test_config.py   # single file
 ```
 
 ## Architecture

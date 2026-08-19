@@ -289,7 +289,9 @@ class PortfolioPnl:
 
 
 # ── Smoke test ─────────────────────────────────────────────────────────
-# Run:  python coinbase/pnl.py
+# Run (as a module, from the repo root — a direct script path fails with
+# ModuleNotFoundError: No module named 'coinbase'):
+#   python -m coinbase.pnl
 # Reads live balances and fills — requires a key with trade:read (or read_write).
 
 async def _main() -> None:

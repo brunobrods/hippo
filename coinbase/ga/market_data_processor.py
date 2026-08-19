@@ -412,7 +412,9 @@ class LiveMarketState:
 
 
 # ── Smoke test ─────────────────────────────────────────────────────────
-# Run:  python coinbase/ga/market_data_processor.py
+# Run (as a module, from the repo root — a direct script path fails with
+# ModuleNotFoundError: No module named 'coinbase'):
+#   python -m coinbase.ga.market_data_processor
 # Fetches a small BTC-USDC window and prints the indicator frame's tail.
 
 async def _main() -> None:
