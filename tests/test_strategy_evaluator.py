@@ -65,6 +65,21 @@ def test_strategy_config_file_reads_section():
     assert config.buy_threshold == 0.7
     assert config.sell_threshold == 0.3
     assert config.starting_balance == 500.0
+    assert config.unwind_at_entry_price is True  # defaults on when absent from config.yaml
+
+
+def test_strategy_config_file_reads_unwind_at_entry_price_when_present():
+    raw = {
+        "strategy": {
+            "position_size_pct": 0.2,
+            "buy_threshold": 0.7,
+            "sell_threshold": 0.3,
+            "starting_balance": 500.0,
+            "indicators": {},
+            "unwind_at_entry_price": False,
+        }
+    }
+    assert StrategyConfigFile(raw).config().unwind_at_entry_price is False
 
 
 # ── WeightKeysConfig ─────────────────────────────────────────────────
@@ -203,6 +218,34 @@ def test_strategy_evaluator_fitness_is_the_annualized_yield_of_the_backtest():
     assert result.gross_profit() == pytest.approx(20.0)  # 10% of 1000 @100 -> 1 unit, +20 on the move
     assert evaluator.fitness(genome) == pytest.approx(evaluator.annualized_yield(result))
     assert evaluator.fitness(genome) == pytest.approx((1.02) ** (SECONDS_PER_YEAR / 2592000) - 1.0)
+
+
+def _frame_that_buys_and_never_sells() -> pd.DataFrame:
+    return pd.DataFrame({
+        "timestamp":      [0, 864000],
+        "close":          [100.0, 150.0],
+        "norm_sma_short": [1.0, 1.0],
+        "norm_sma_long":  [0.0, 0.0],
+        "norm_sma_extra": [0.0, 0.0],
+        "norm_rsi":       [0.0, 0.0],
+        "norm_macd":      [0.0, 0.0],
+    })
+
+
+def test_strategy_evaluator_result_unwinds_a_still_open_position_at_entry_price_by_default():
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    evaluator = StrategyEvaluator(_frame_that_buys_and_never_sells(), _config(), _KEYS)  # default: unwind_at_entry_price=True
+    result    = evaluator.result(genome)
+    assert result.gross_profit() == pytest.approx(0.0)  # still "in flight", not realized at the 150.0 close
+
+
+def test_strategy_evaluator_result_realizes_at_market_price_when_unwind_at_entry_price_is_false():
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    evaluator = StrategyEvaluator(
+        _frame_that_buys_and_never_sells(), _config(unwind_at_entry_price=False), _KEYS,
+    )
+    result = evaluator.result(genome)
+    assert result.gross_profit() == pytest.approx(50.0)  # 10% of 1000 @100 -> 1 unit, +50 on the move
 
 
 def test_strategy_evaluator_duration_falls_back_to_zero_for_a_single_row_frame():

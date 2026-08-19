@@ -90,6 +90,7 @@ out-of-sample estimate rather than the (optimistic) number the GA was optimizing
 | | `position_size_pct` | Fraction of the *current* simulated balance risked per trade (compounding) |
 | | `starting_balance` | Fixed quote-currency balance a backtest starts from — not read from a live account, so training is deterministic and reproducible |
 | | `weight_keys` | Which `market_data.normalized_columns` the GA assigns a weight to and scores on (must be a subset of `normalized_columns` — checked at startup) |
+| | `unwind_at_entry_price` | If true (default), a still-open position at the end of a backtest is force-closed at its own entry price (net-zero, not counted as a win or loss) instead of the window's last market price — so a strategy isn't judged on wherever the window happened to cut off mid-hold |
 | `genetic_algorithm` | `population_size`, `generations`, `mutation_rate`, `crossover_rate`, `tournament_size`, `elitism_count`, `mutation_sigma`, `seed` | Standard GA hyperparameters; fix `seed` for reproducible runs |
 | `output` | `strategy_filepath`, `log_filepath` | Where the trained strategy JSON and the per-generation run log get written |
 

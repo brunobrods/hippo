@@ -134,10 +134,19 @@ def test_backtest_never_opens_a_second_overlapping_position():
     assert len(result.trades()) == 1  # never re-buys; only trade is the forced close at the end
 
 
-def test_backtest_force_closes_an_open_position_at_the_final_close():
+def test_backtest_unwinds_an_open_position_at_entry_price_by_default():
     frame    = _frame([100.0, 110.0])
     strategy = _strategy([0.7, 0.7])  # buys and never sells
     result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    trades   = result.trades()
+    assert len(trades) == 1
+    assert trades[0].profit() == pytest.approx(0.0)  # still "in flight", not judged a win or a loss
+
+
+def test_backtest_force_closes_at_the_final_market_price_when_unwind_at_entry_price_is_false():
+    frame    = _frame([100.0, 110.0])
+    strategy = _strategy([0.7, 0.7])  # buys and never sells
+    result   = Backtest(frame, strategy, starting_balance=1000.0, unwind_at_entry_price=False).run()
     trades   = result.trades()
     assert len(trades) == 1
     assert trades[0].profit() == pytest.approx((110.0 - 100.0) / 100.0 * 100.0)

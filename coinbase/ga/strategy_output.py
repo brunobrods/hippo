@@ -85,9 +85,10 @@ class TrainedStrategy:
         return {
             "weights": self._genome.weights(),
             "hyperparameters": {
-                "buy_threshold":     self._config.buy_threshold,
-                "sell_threshold":    self._config.sell_threshold,
-                "position_size_pct": self._config.position_size_pct,
+                "buy_threshold":         self._config.buy_threshold,
+                "sell_threshold":        self._config.sell_threshold,
+                "position_size_pct":     self._config.position_size_pct,
+                "unwind_at_entry_price": self._config.unwind_at_entry_price,
             },
         }
 
@@ -210,7 +211,8 @@ class RunHeader:
             f"window={self._start_date}..{self._end_date} test_split={self._test_split}",
             f"buy_threshold={self._strategy_config.buy_threshold:.2f} "
             f"sell_threshold={self._strategy_config.sell_threshold:.2f} "
-            f"position_size_pct={self._strategy_config.position_size_pct:.2f}",
+            f"position_size_pct={self._strategy_config.position_size_pct:.2f} "
+            f"unwind_at_entry_price={self._strategy_config.unwind_at_entry_price}",
             f"population={self._ga_config.population_size} generations={self._ga_config.generations} "
             f"mutation_rate={self._ga_config.mutation_rate} crossover_rate={self._ga_config.crossover_rate} "
             f"tournament_size={self._ga_config.tournament_size} elitism_count={self._ga_config.elitism_count} "

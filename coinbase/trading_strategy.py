@@ -111,10 +111,17 @@ class BacktestResult:
 
 
 class Backtest:
-    def __init__(self, frame: pd.DataFrame, strategy: Strategy, starting_balance: float) -> None:
-        self._frame            = frame
-        self._strategy         = strategy
-        self._starting_balance = starting_balance
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        strategy: Strategy,
+        starting_balance: float,
+        unwind_at_entry_price: bool = True,
+    ) -> None:
+        self._frame                 = frame
+        self._strategy              = strategy
+        self._starting_balance      = starting_balance
+        self._unwind_at_entry_price = unwind_at_entry_price
 
     @functools.cached_property
     def _rows(self) -> list[dict[str, float]]:
@@ -131,5 +138,11 @@ class Backtest:
             equity_curve.append(ledger.equity(price))
 
         if self._rows:
-            ledger.force_close(self._rows[-1]["close"])
+            ledger.force_close(self._final_close_price(ledger, self._rows[-1]["close"]))
         return BacktestResult(ledger.trades(), equity_curve)
+
+    def _final_close_price(self, ledger: Ledger, market_price: float) -> float:
+        position = ledger.position()
+        if self._unwind_at_entry_price and position is not None:
+            return position.entry_price()
+        return market_price

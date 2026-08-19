@@ -11,10 +11,11 @@ from coinbase.trading_strategy import Action, Backtest, BacktestResult, Decision
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    position_size_pct: float
-    buy_threshold:     float
-    sell_threshold:    float
-    starting_balance:  float
+    position_size_pct:     float
+    buy_threshold:         float
+    sell_threshold:        float
+    starting_balance:      float
+    unwind_at_entry_price: bool = True
 
 
 class StrategyConfigFile:
@@ -24,10 +25,11 @@ class StrategyConfigFile:
     def config(self) -> StrategyConfig:
         section = self._raw["strategy"]
         return StrategyConfig(
-            position_size_pct = section["position_size_pct"],
-            buy_threshold     = section["buy_threshold"],
-            sell_threshold    = section["sell_threshold"],
-            starting_balance  = section["starting_balance"],
+            position_size_pct     = section["position_size_pct"],
+            buy_threshold         = section["buy_threshold"],
+            sell_threshold        = section["sell_threshold"],
+            starting_balance      = section["starting_balance"],
+            unwind_at_entry_price = section.get("unwind_at_entry_price", True),
         )
 
 
@@ -118,7 +120,9 @@ class StrategyEvaluator:
 
     def result(self, genome: Genome) -> BacktestResult:
         strategy = GaStrategy(genome, self._config, self._keys)
-        return Backtest(self._frame, strategy, self._config.starting_balance).run()
+        return Backtest(
+            self._frame, strategy, self._config.starting_balance, self._config.unwind_at_entry_price,
+        ).run()
 
     def annualized_yield(self, result: BacktestResult) -> float:
         return AnnualizedYield(result.gross_profit(), self._config.starting_balance, self._duration_seconds()).value()

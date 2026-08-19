@@ -20,6 +20,13 @@ strategy:
   buy_threshold: 0.60       # signal_score above this opens a position
   sell_threshold: 0.40      # signal_score below this closes an open position
   starting_balance: 10000.0  # quote-currency balance at the start of a backtest
+  # A backtest force-closes any still-open position at the end of the window so
+  # every run produces a final profit figure. When true, that forced close is
+  # priced at the position's own entry price (net-zero profit — the position is
+  # simply still "in flight", not judged a win or a loss) instead of at the
+  # window's last market price, so a strategy isn't penalized or credited just
+  # for where the training/test window happened to cut off mid-hold.
+  unwind_at_entry_price: true
   indicators:
     sma_short_period: 9
     sma_long_period: 20
