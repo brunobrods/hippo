@@ -6,7 +6,7 @@ on held-out data, and persists the winning strategy as JSON.
 
 ## Architecture
 
-Six independent, individually-tested modules. Arrows show what each module imports
+Seven independent, individually-tested modules. Arrows show what each module imports
 from another (i.e. "provides → consumes"):
 
 ```mermaid
@@ -19,6 +19,7 @@ flowchart BT
     EH[experiment_history.py]
     CFG[config.py]
     MAIN[main.py]
+    SWEEP[sweep.py]
 
     ADAPTER --> MDP
     CFG --> MDP
@@ -32,6 +33,9 @@ flowchart BT
     SO --> MAIN
     EH --> MAIN
     ADAPTER --> MAIN
+    CFG --> SWEEP
+    MAIN -->|TrainingRun| SWEEP
+    ADAPTER --> SWEEP
 ```
 
 | File | Responsibility |
@@ -42,6 +46,54 @@ flowchart BT
 | `strategy_output.py` | Assembles a trained genome + its config + its test-set performance into the `best_strategy.json` schema, saves/reloads it, and logs per-generation GA progress to a run log |
 | `experiment_history.py` | Gives every run a `run_id`, snapshots its resolved config/strategy/log under `experiments/<run_id>/`, and appends one leaderboard row (hyperparameters + performance + git commit) to `experiments/index.csv` |
 | `main.py` | Orchestrates all five: fetch → split → train on `train_df` → evaluate the winner on `test_df` → save (both the "current" strategy file and this run's own history entry) → reload from disk → verify the reload reproduces the same backtest result |
+| `sweep.py` | Reads `sweep.yaml`, expands it into one-factor-at-a-time config variants (× seed repeats), and runs `main.py`'s `TrainingRun` sequentially over each — no changes to any other module |
+
+## Sweeping (`sweep.py`)
+
+`main.py` trains one strategy for whatever `config.yaml` says. `sweep.py` trains many,
+by varying one parameter at a time against a shared base config:
+
+```bash
+python coinbase/ga/sweep.py
+```
+
+`sweep.yaml` defines the sweep:
+
+```yaml
+base_config: "coinbase/ga/config.yaml"
+seeds: [1, 2, 3, 4, 5]
+axes:
+  - path: "genetic_algorithm.mutation_rate"
+    values: [0.05, 0.1, 0.2, 0.4]
+  - path: "strategy.buy_threshold"
+    values: [0.5, 0.6, 0.7]
+```
+
+| Key | Meaning |
+|---|---|
+| `base_config` | Path to the config every point starts from — only the fields listed below are overridden per point |
+| `seeds` | Every axis value is trained once per seed listed here (`genetic_algorithm.seed` override), so results report as mean/spread across seeds rather than one possibly-lucky run |
+| `axes` | Each `path` is a dotted `config.yaml` key (e.g. `strategy.buy_threshold`); each `values` entry becomes one point, with every *other* axis held at `base_config`'s value — this is what makes it one-factor-at-a-time rather than a full grid |
+
+A sweep with 2 axes of 3 values each and 5 seeds trains `(3 + 3) × 5 = 30` points — not
+`3 × 3 × 5`, because axes never combine with each other, only with seeds. Each point is
+an unmodified `TrainingRun.train()` call, so it gets its own `experiments/<run_id>/`
+history and `experiments/index.csv` row exactly like a `main.py` run — group by
+`axis_path`/the varied column in the index to compare a sweep's results.
+
+Points run **sequentially, not concurrently**: most axes only touch strategy/GA
+hyperparameters, so every point after the first reuses `market_data.cache_dir`'s
+already-fetched candles instead of racing several cold fetches of the same window.
+
+`TrainingRun.train()` always overwrites `output.strategy_filepath` — the "current"
+strategy `dry_run.py` reloads. A sweep redirects every point's `strategy_filepath` to a
+shared `experiments/_sweep_scratch/best_strategy.json` instead, so running a sweep can
+never clobber the canonical file with whatever point happened to train last; each
+point's real, permanent record is still its own `experiments/<run_id>/strategy.json`.
+
+Joint/combined sweeps (varying two parameters together) are deliberately out of scope —
+see `MODEL_DEVELOPMENT_PLAN.md` step 3, which reserves that for a later, narrower random
+search once one-factor-at-a-time results identify which parameters are worth combining.
 
 ## Pipeline (`main.py`)
 
@@ -140,8 +192,9 @@ generation: `generation\tbest_fitness\tavg_fitness`.
 run's exact `config.json` (the fully resolved config used, not just `config.yaml`),
 `strategy.json` (identical content to `best_strategy.json` at save time), and its own
 `run_log.txt` (this run's generations only, not the shared log above). `run_id` is a
-UTC timestamp plus a short hash of the resolved config, so two runs never collide even
-with the same config re-run — see `RunId` in `experiment_history.py`.
+microsecond-precision UTC timestamp plus a random suffix, so two runs never collide
+even when a sweep re-runs the exact same config within the same second — see `RunId` in
+`experiment_history.py`.
 
 **`experiments/index.csv`** — one row appended per run: `run_id`, `started_at`,
 `git_commit`, the data window, every GA/strategy hyperparameter, and the test-set
@@ -153,11 +206,11 @@ opening each one's `strategy.json`.
 ```bash
 pytest tests/test_market_data_processor.py tests/test_ga_engine.py \
        tests/test_strategy_evaluator.py tests/test_strategy_output.py \
-       tests/test_experiment_history.py tests/test_main.py
+       tests/test_experiment_history.py tests/test_main.py tests/test_sweep.py
 ```
 
 All tests run against fake/mocked adapters — no live credentials or network access
-required. Only `python coinbase/ga/main.py` itself needs real credentials.
+required. Only `python coinbase/ga/main.py`/`sweep.py` themselves need real credentials.
 
 ### Design decisions worth knowing
 
