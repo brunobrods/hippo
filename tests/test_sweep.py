@@ -183,6 +183,17 @@ def test_sweep_plan_redirects_strategy_filepath_to_a_shared_scratch_file():
         assert point.raw_config["output"]["strategy_filepath"] != base["output"]["strategy_filepath"]
 
 
+def test_sweep_plan_scratch_path_uses_shared_default_when_experiments_dir_absent():
+    from coinbase.ga.config import GA_RESULTS_ROOT
+
+    base   = {"strategy": {"buy_threshold": 0.6}, "genetic_algorithm": {"seed": 1}, "output": {}}
+    axes   = (SweepAxis(path="strategy.buy_threshold", values=(0.5,)),)
+    points = SweepPlan(base, axes, seeds=(1,)).points()
+
+    expected = os.path.join(str(GA_RESULTS_ROOT / "experiments"), "_sweep_scratch", "best_strategy.json")
+    assert points[0].raw_config["output"]["strategy_filepath"] == expected
+
+
 def test_sweep_plan_ensure_scratch_directory_creates_the_directory(tmp_path):
     base = _minimal_base(experiments_dir=str(tmp_path / "experiments"))
     axes = (SweepAxis(path="strategy.buy_threshold", values=(0.5,)),)

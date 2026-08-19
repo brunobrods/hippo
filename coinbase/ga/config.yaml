@@ -14,7 +14,9 @@ market_data:
   # directory where fetched candle windows are cached to disk, keyed by
   # (pair, granularity, start, end) — repeat fetches of the same window
   # (e.g. across a parameter sweep) read from here instead of Coinbase.
-  cache_dir: "./candle_cache"
+  # Optional — defaults to ~/.coinbase/ga/candle_cache (shared across every
+  # worktree of this checkout). Uncomment to override:
+  # cache_dir: "./candle_cache"
   # columns min-max normalized into norm_<column> before scoring/training.
   normalized_columns: ["sma_short", "sma_long", "sma_extra", "rsi", "macd"]
   delta_columns: ["delta_1", "delta_3", "delta_5", "delta_10"]
@@ -54,12 +56,16 @@ genetic_algorithm:
   seed: 1                # set an int for reproducible runs (e.g. in tests)
 
 output:
-  strategy_filepath: "./best_strategy.json"
-  log_filepath: "./ga_run_log.txt"
-  dry_run_log_filepath: "./dry_run_log.txt"
+  # Every path below is optional and defaults to a fixed location under
+  # ~/.coinbase/ga/ — outside the repo, so every git worktree of this checkout
+  # shares one results/cache location instead of each accumulating its own.
+  # Uncomment any of these to override:
+  # strategy_filepath: "./best_strategy.json"
+  # log_filepath: "./ga_run_log.txt"
+  # dry_run_log_filepath: "./dry_run_log.txt"
   # every run's resolved config + strategy + GA log, kept under its own run_id
   # subdirectory — full history, never overwritten (unlike strategy_filepath above).
-  experiments_dir: "./experiments"
+  # experiments_dir: "./experiments"
   # one CSV row per run (pair, hyperparameters, performance) appended here —
   # a leaderboard for comparing runs without opening each one's strategy.json.
-  index_filepath: "./experiments/index.csv"
+  # index_filepath: "./experiments/index.csv"
