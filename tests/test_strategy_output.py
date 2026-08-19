@@ -6,6 +6,7 @@ from coinbase.ga.ga_engine import GaConfig, Genome
 from coinbase.ga.strategy_evaluator import StrategyConfig
 from coinbase.ga.strategy_output import (
     DryRunLog,
+    FanOutRunLog,
     GaRunLog,
     MaxDrawdown,
     OutputConfigFile,
@@ -49,15 +50,24 @@ def test_output_config_file_reads_section():
         "strategy_filepath": "./best.json",
         "log_filepath": "./log.txt",
         "dry_run_log_filepath": "./dry_run.txt",
+        "experiments_dir": "./experiments",
+        "index_filepath": "./experiments/index.csv",
     }}
     config = OutputConfigFile(raw).config()
     assert config.strategy_filepath == "./best.json"
     assert config.log_filepath == "./log.txt"
     assert config.dry_run_log_filepath == "./dry_run.txt"
+    assert config.experiments_dir == "./experiments"
+    assert config.index_filepath == "./experiments/index.csv"
 
 
 def test_output_config_file_defaults_dry_run_log_filepath_when_absent():
-    raw = {"output": {"strategy_filepath": "./best.json", "log_filepath": "./log.txt"}}
+    raw = {"output": {
+        "strategy_filepath": "./best.json",
+        "log_filepath": "./log.txt",
+        "experiments_dir": "./experiments",
+        "index_filepath": "./experiments/index.csv",
+    }}
     config = OutputConfigFile(raw).config()
     assert config.dry_run_log_filepath == "./dry_run_log.txt"
 
@@ -242,6 +252,19 @@ def test_ga_run_log_start_appends_to_existing_history(tmp_path):
     lines = filepath.read_text().splitlines()
     assert lines[0] == "1\t0.100000\t0.050000"
     assert lines[1] == "=== run 2026-07-21T21:15:03+00:00 ==="
+
+
+def test_fan_out_run_log_writes_to_every_underlying_log(tmp_path):
+    path_a, path_b = tmp_path / "a.txt", tmp_path / "b.txt"
+    fan_out = FanOutRunLog((GaRunLog(str(path_a)), GaRunLog(str(path_b))))
+
+    fan_out.start(_run_header())
+    fan_out.append(1, best_fitness=1.5, average_fitness=0.8)
+
+    for path in (path_a, path_b):
+        lines = path.read_text().splitlines()
+        assert lines[:5] == _run_header().lines()
+        assert lines[5] == "1\t1.500000\t0.800000"
 
 
 # ── DryRunLog ────────────────────────────────────────────────────────

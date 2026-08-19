@@ -57,3 +57,9 @@ output:
   strategy_filepath: "./best_strategy.json"
   log_filepath: "./ga_run_log.txt"
   dry_run_log_filepath: "./dry_run_log.txt"
+  # every run's resolved config + strategy + GA log, kept under its own run_id
+  # subdirectory — full history, never overwritten (unlike strategy_filepath above).
+  experiments_dir: "./experiments"
+  # one CSV row per run (pair, hyperparameters, performance) appended here —
+  # a leaderboard for comparing runs without opening each one's strategy.json.
+  index_filepath: "./experiments/index.csv"
