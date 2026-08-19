@@ -131,12 +131,12 @@ def test_dotted_path_override_raises_for_an_unknown_path():
         DottedPathOverride(raw_config, "strategy.nonexistent_key.deeper", 1).applied()
 
 
-def test_dotted_path_override_coerces_a_none_section_instead_of_crashing():
-    # a YAML mapping whose every child is commented out (e.g. config.yaml's
-    # shipped `output:` section) parses to None, not {}
+def test_dotted_path_override_treats_a_fully_commented_out_section_as_empty():
+    # A YAML mapping whose every child is commented out (e.g. a fully
+    # optional `output:` section) parses to None, not {}.
     raw_config = {"output": None}
-    result = DottedPathOverride(raw_config, "output.strategy_filepath", "/x.json").applied()
-    assert result["output"]["strategy_filepath"] == "/x.json"
+    result = DottedPathOverride(raw_config, "output.strategy_filepath", "./scratch.json").applied()
+    assert result["output"]["strategy_filepath"] == "./scratch.json"
 
 
 # ── SweepPlan ────────────────────────────────────────────────────────

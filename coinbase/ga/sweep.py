@@ -59,9 +59,12 @@ class DottedPathOverride:
         target = result
         keys   = self._path.split(".")
         for key in keys[:-1]:
-            # a YAML mapping whose every child is commented out (e.g. `output:`
-            # in config.yaml) parses to None, not {} — coerce it so overriding
-            # a path under it doesn't crash on 'NoneType' item assignment.
+            # A YAML mapping whose every child is commented out (e.g. a fully
+            # optional `output:` section) parses to None, not {} — treat a
+            # *present* key with that value as an empty section so overriding
+            # one of its paths doesn't crash on a section nobody has
+            # customized. A genuinely absent key still raises KeyError below,
+            # same as before.
             if target[key] is None:
                 target[key] = {}
             target = target[key]
