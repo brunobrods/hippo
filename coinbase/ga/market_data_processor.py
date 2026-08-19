@@ -10,7 +10,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from coinbase.coinbase_adapter import CoinbaseAdapter, CoinbaseError
-from coinbase.ga.config import ConfigFile
+from coinbase.ga.config import GA_RESULTS_ROOT, ConfigFile
 from coinbase.market_scanner import GRANULARITY_SECONDS
 
 MAX_CANDLES_PER_REQUEST = 300
@@ -84,7 +84,8 @@ class MarketDataConfig:
         return self.normalized_columns() + self.delta_columns()
 
     def cache_dir(self) -> str:
-        return self._raw["market_data"]["cache_dir"]
+        default = str(GA_RESULTS_ROOT / "candle_cache")
+        return self._raw["market_data"].get("cache_dir", default)
 
 
 # ── Indicators ─────────────────────────────────────────────────────────

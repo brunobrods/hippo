@@ -139,7 +139,7 @@ out-of-sample estimate rather than the (optimistic) number the GA was optimizing
 | `data` | `pair`, `granularity` | Coinbase-format product ID and candle interval (e.g. `BTC-USDC`, `ONE_HOUR`) |
 | | `start_date`, `end_date` | Historical window to fetch, `YYYY-MM-DD` |
 | | `test_split` | Fraction of the window held out for out-of-sample evaluation |
-| `market_data` | `cache_dir` | Directory where fetched candle windows are cached to disk (JSON, keyed by pair/granularity/start/end) — a repeated fetch of the same window reads from here instead of Coinbase |
+| `market_data` | `cache_dir` *(optional)* | Directory where fetched candle windows are cached to disk (JSON, keyed by pair/granularity/start/end) — a repeated fetch of the same window reads from here instead of Coinbase. Defaults to `~/.coinbase/ga/candle_cache` |
 | | `normalized_columns`, `delta_columns` | Which indicator/delta columns get min-max normalized into `norm_<column>` before scoring |
 | `strategy` | `indicators` | SMA/RSI/MACD periods |
 | | `buy_threshold` / `sell_threshold` | `signal_score` levels that open / close a position (hysteresis band between them = hold) |
@@ -148,8 +148,14 @@ out-of-sample estimate rather than the (optimistic) number the GA was optimizing
 | | `weight_keys` | Which `market_data.normalized_columns` the GA assigns a weight to and scores on (must be a subset of `normalized_columns` — checked at startup) |
 | | `unwind_at_entry_price` | If true (default), a still-open position at the end of a backtest is force-closed at its own entry price (net-zero, not counted as a win or loss) instead of the window's last market price — so a strategy isn't judged on wherever the window happened to cut off mid-hold |
 | `genetic_algorithm` | `population_size`, `generations`, `mutation_rate`, `crossover_rate`, `tournament_size`, `elitism_count`, `mutation_sigma`, `seed` | Standard GA hyperparameters; fix `seed` for reproducible runs |
-| `output` | `strategy_filepath`, `log_filepath` | Where the *current* trained strategy JSON and per-generation run log get written — overwritten/appended by every run, this is what `dry_run.py` reloads |
-| | `experiments_dir`, `index_filepath` | Where every run's own history is kept instead — `experiments/<run_id>/` (never overwritten) and the `experiments/index.csv` leaderboard row for it |
+| `output` | `strategy_filepath`, `log_filepath` *(both optional)* | Where the *current* trained strategy JSON and per-generation run log get written — overwritten/appended by every run, this is what `dry_run.py` reloads. Default to `~/.coinbase/ga/best_strategy.json` / `ga_run_log.txt` |
+| | `experiments_dir`, `index_filepath` *(both optional)* | Where every run's own history is kept instead — `<experiments_dir>/<run_id>/` (never overwritten) and the leaderboard CSV. Default to `~/.coinbase/ga/experiments` / `~/.coinbase/ga/experiments/index.csv` |
+
+Every path in `output` and `market_data.cache_dir` is optional and, unless overridden,
+resolves under `~/.coinbase/ga/` — outside the repo, so every git worktree of this
+checkout shares one cache and one results history instead of each accumulating its own.
+`config.yaml` ships with these commented out; uncomment any of them to point a specific
+worktree/run at a different location.
 
 ## Usage
 

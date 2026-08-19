@@ -7,6 +7,7 @@ from typing import Any
 from coinbase.coinbase_adapter import CoinbaseAdapter
 from coinbase.ga.config import ConfigFile
 from coinbase.ga.main import TrainingRun, TrainingSummary
+from coinbase.ga.strategy_output import OutputConfigFile
 
 # genetic_algorithm.seed is overridden per seed repeat regardless of which
 # axis is varying, so every axis value gets trained once per configured seed.
@@ -98,7 +99,7 @@ class SweepPlan:
         os.makedirs(os.path.dirname(self._scratch_strategy_path()), exist_ok=True)
 
     def _scratch_strategy_path(self) -> str:
-        experiments_dir = self._base_config["output"]["experiments_dir"]
+        experiments_dir = OutputConfigFile(self._base_config).config().experiments_dir
         return os.path.join(experiments_dir, "_sweep_scratch", "best_strategy.json")
 
 

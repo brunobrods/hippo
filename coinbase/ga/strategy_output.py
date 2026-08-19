@@ -1,9 +1,11 @@
 import dataclasses
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from coinbase.ga.config import GA_RESULTS_ROOT
 from coinbase.ga.ga_engine import GaConfig, Genome
 from coinbase.ga.strategy_evaluator import StrategyConfig
 from coinbase.trading_strategy import BacktestResult, Decision
@@ -25,13 +27,16 @@ class OutputConfigFile:
         self._raw = raw
 
     def config(self) -> OutputConfig:
-        section = self._raw["output"]
+        # `or {}`: a YAML mapping whose every child is commented out parses to
+        # None, not {} — every path here is meant to be optional in that case.
+        section          = self._raw.get("output") or {}
+        experiments_dir  = section.get("experiments_dir", str(GA_RESULTS_ROOT / "experiments"))
         return OutputConfig(
-            strategy_filepath    = section["strategy_filepath"],
-            log_filepath         = section["log_filepath"],
-            dry_run_log_filepath = section.get("dry_run_log_filepath", "./dry_run_log.txt"),
-            experiments_dir      = section["experiments_dir"],
-            index_filepath       = section["index_filepath"],
+            strategy_filepath    = section.get("strategy_filepath", str(GA_RESULTS_ROOT / "best_strategy.json")),
+            log_filepath         = section.get("log_filepath", str(GA_RESULTS_ROOT / "ga_run_log.txt")),
+            dry_run_log_filepath = section.get("dry_run_log_filepath", str(GA_RESULTS_ROOT / "dry_run_log.txt")),
+            experiments_dir      = experiments_dir,
+            index_filepath       = section.get("index_filepath", os.path.join(experiments_dir, "index.csv")),
         )
 
 
@@ -147,6 +152,18 @@ class PerformanceReport:
 
 # ── Persistence ─────────────────────────────────────────────────────────
 
+class ParentDirectory:
+    # The various default output paths now live under GA_RESULTS_ROOT, which
+    # (unlike the old cwd-relative defaults) may not exist yet on first use.
+    def __init__(self, filepath: str) -> None:
+        self._filepath = filepath
+
+    def ensure(self) -> None:
+        directory = os.path.dirname(self._filepath)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+
 class StrategyJson:
     def __init__(
         self,
@@ -166,6 +183,7 @@ class StrategyJson:
         }
 
     def save(self, filepath: str) -> None:
+        ParentDirectory(filepath).ensure()
         with open(filepath, "w") as handle:
             json.dump(self.as_dict(), handle, indent=2)
 
@@ -230,10 +248,12 @@ class GaRunLog:
         self._filepath = filepath
 
     def start(self, header: RunHeader) -> None:
+        ParentDirectory(self._filepath).ensure()
         with open(self._filepath, "a") as handle:
             handle.write("\n".join(header.lines()) + "\n")
 
     def append(self, generation: int, best_fitness: float, average_fitness: float) -> None:
+        ParentDirectory(self._filepath).ensure()
         with open(self._filepath, "a") as handle:
             handle.write(f"{generation}\t{best_fitness:.6f}\t{average_fitness:.6f}\n")
 
@@ -258,6 +278,7 @@ class DryRunLog:
         self._filepath = filepath
 
     def append(self, timestamp: str, decision: Decision, balance: float, equity: float) -> None:
+        ParentDirectory(self._filepath).ensure()
         with open(self._filepath, "a") as handle:
             handle.write(
                 f"{timestamp}\t{decision.action.value}\t{decision.size:.6f}\t"

@@ -1,7 +1,9 @@
 import json
+import os
 
 import pytest
 
+from coinbase.ga.config import GA_RESULTS_ROOT
 from coinbase.ga.ga_engine import GaConfig, Genome
 from coinbase.ga.strategy_evaluator import StrategyConfig
 from coinbase.ga.strategy_output import (
@@ -10,6 +12,7 @@ from coinbase.ga.strategy_output import (
     GaRunLog,
     MaxDrawdown,
     OutputConfigFile,
+    ParentDirectory,
     PerformanceReport,
     RunHeader,
     StrategyJson,
@@ -43,6 +46,19 @@ def _strategy_config() -> StrategyConfig:
     )
 
 
+# ── ParentDirectory ───────────────────────────────────────────────────
+
+def test_parent_directory_creates_missing_nested_directories(tmp_path):
+    filepath = tmp_path / "a" / "b" / "c" / "file.txt"
+    assert not filepath.parent.exists()
+    ParentDirectory(str(filepath)).ensure()
+    assert filepath.parent.is_dir()
+
+
+def test_parent_directory_is_a_no_op_for_a_bare_filename():
+    ParentDirectory("file.txt").ensure()  # must not raise
+
+
 # ── OutputConfigFile ─────────────────────────────────────────────────
 
 def test_output_config_file_reads_section():
@@ -69,7 +85,29 @@ def test_output_config_file_defaults_dry_run_log_filepath_when_absent():
         "index_filepath": "./experiments/index.csv",
     }}
     config = OutputConfigFile(raw).config()
-    assert config.dry_run_log_filepath == "./dry_run_log.txt"
+    assert config.dry_run_log_filepath == str(GA_RESULTS_ROOT / "dry_run_log.txt")
+
+
+def test_output_config_file_defaults_every_path_when_output_section_absent():
+    config = OutputConfigFile({}).config()
+    assert config.strategy_filepath == str(GA_RESULTS_ROOT / "best_strategy.json")
+    assert config.log_filepath == str(GA_RESULTS_ROOT / "ga_run_log.txt")
+    assert config.dry_run_log_filepath == str(GA_RESULTS_ROOT / "dry_run_log.txt")
+    assert config.experiments_dir == str(GA_RESULTS_ROOT / "experiments")
+    assert config.index_filepath == str(GA_RESULTS_ROOT / "experiments" / "index.csv")
+
+
+def test_output_config_file_defaults_every_path_when_output_section_is_none():
+    # a YAML mapping whose every child is commented out parses to None, not {}
+    config = OutputConfigFile({"output": None}).config()
+    assert config.strategy_filepath == str(GA_RESULTS_ROOT / "best_strategy.json")
+    assert config.experiments_dir == str(GA_RESULTS_ROOT / "experiments")
+
+
+def test_output_config_file_index_filepath_defaults_inside_overridden_experiments_dir():
+    raw = {"output": {"experiments_dir": "/custom/experiments"}}
+    config = OutputConfigFile(raw).config()
+    assert config.index_filepath == os.path.join("/custom/experiments", "index.csv")
 
 
 # ── TrainingPeriod ───────────────────────────────────────────────────
@@ -190,6 +228,21 @@ def test_strategy_json_round_trips_through_disk(tmp_path):
     }
 
 
+def test_strategy_json_save_creates_missing_parent_directories(tmp_path):
+    # the default strategy_filepath now lives under ~/.coinbase/ga/, which
+    # (unlike the old cwd-relative default) may not exist yet on first use
+    metadata    = StrategyMetadata(
+        pair="BTC-USDC", granularity="ONE_HOUR", training_period=TrainingPeriod("2024-01-01", "2024-01-02"),
+        ga_config=_ga_config(), created_at="2026-07-15T10:30:00+00:00",
+    )
+    strategy    = TrainedStrategy(Genome({"sma_short": 1.0}), _strategy_config())
+    performance = PerformanceReport(BacktestResult([], [1000.0]), annualized_yield=0.0)
+
+    filepath = tmp_path / "nested" / "dir" / "best_strategy.json"
+    StrategyJson(metadata, strategy, performance).save(str(filepath))
+    assert filepath.exists()
+
+
 # ── RunHeader ────────────────────────────────────────────────────────
 
 def _run_header() -> RunHeader:
@@ -229,6 +282,18 @@ def test_ga_run_log_appends_a_line_per_call(tmp_path):
     assert len(lines) == 2
     assert lines[0] == "1\t1.500000\t0.800000"
     assert lines[1] == "2\t2.000000\t1.100000"
+
+
+def test_ga_run_log_append_creates_missing_parent_directories(tmp_path):
+    filepath = tmp_path / "nested" / "dir" / "ga_run_log.txt"
+    GaRunLog(str(filepath)).append(1, best_fitness=1.5, average_fitness=0.8)
+    assert filepath.exists()
+
+
+def test_ga_run_log_start_creates_missing_parent_directories(tmp_path):
+    filepath = tmp_path / "nested" / "dir" / "ga_run_log.txt"
+    GaRunLog(str(filepath)).start(_run_header())
+    assert filepath.exists()
 
 
 def test_ga_run_log_start_writes_header_before_generation_rows(tmp_path):
@@ -279,3 +344,9 @@ def test_dry_run_log_appends_a_line_per_tick(tmp_path):
     assert len(lines) == 2
     assert lines[0] == "2026-08-18T00:00:00+00:00\tBUY\t1.500000\t1000.000000\t1000.000000"
     assert lines[1] == "2026-08-18T01:00:00+00:00\tHOLD\t0.000000\t1000.000000\t1015.000000"
+
+
+def test_dry_run_log_creates_missing_parent_directories(tmp_path):
+    filepath = tmp_path / "nested" / "dir" / "dry_run_log.txt"
+    DryRunLog(str(filepath)).append("2026-08-18T00:00:00+00:00", Decision(Action.HOLD), balance=1000.0, equity=1000.0)
+    assert filepath.exists()

@@ -407,3 +407,10 @@ def test_market_data_config_window_and_periods():
     assert config.delta_columns() == ("delta_1",)
     assert config.columns() == ("sma_short", "rsi", "delta_1")
     assert config.cache_dir() == "./candle_cache"
+
+
+def test_market_data_config_cache_dir_defaults_when_absent():
+    from coinbase.ga.config import GA_RESULTS_ROOT
+
+    raw = {"market_data": {"normalized_columns": [], "delta_columns": []}}
+    assert MarketDataConfig(raw).cache_dir() == str(GA_RESULTS_ROOT / "candle_cache")
