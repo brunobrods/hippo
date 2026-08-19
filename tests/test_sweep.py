@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+from coinbase.ga.config import ConfigFile
 from coinbase.ga.ga_engine import GaConfig, Genome
 from coinbase.ga.main import TrainingSummary
 from coinbase.ga.strategy_evaluator import StrategyConfig
@@ -130,6 +131,14 @@ def test_dotted_path_override_raises_for_an_unknown_path():
         DottedPathOverride(raw_config, "strategy.nonexistent_key.deeper", 1).applied()
 
 
+def test_dotted_path_override_coerces_a_none_section_instead_of_crashing():
+    # a YAML mapping whose every child is commented out (e.g. config.yaml's
+    # shipped `output:` section) parses to None, not {}
+    raw_config = {"output": None}
+    result = DottedPathOverride(raw_config, "output.strategy_filepath", "/x.json").applied()
+    assert result["output"]["strategy_filepath"] == "/x.json"
+
+
 # ── SweepPlan ────────────────────────────────────────────────────────
 
 def _minimal_base(experiments_dir: str = "./experiments") -> dict:
@@ -192,6 +201,16 @@ def test_sweep_plan_scratch_path_uses_shared_default_when_experiments_dir_absent
 
     expected = os.path.join(str(GA_RESULTS_ROOT / "experiments"), "_sweep_scratch", "best_strategy.json")
     assert points[0].raw_config["output"]["strategy_filepath"] == expected
+
+
+def test_sweep_plan_works_against_the_real_shipped_config_yaml():
+    # regression test: config.yaml ships with every `output:` key commented
+    # out, so raw["output"] is None — SweepPlan must not crash on this.
+    base   = ConfigFile("coinbase/ga/config.yaml").raw()
+    axes   = (SweepAxis(path="strategy.buy_threshold", values=(0.5,)),)
+    points = SweepPlan(base, axes, seeds=(1,)).points()
+    assert len(points) == 1
+    assert points[0].raw_config["output"]["strategy_filepath"]
 
 
 def test_sweep_plan_ensure_scratch_directory_creates_the_directory(tmp_path):

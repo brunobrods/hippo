@@ -6,7 +6,7 @@ on held-out data, and persists the winning strategy as JSON.
 
 ## Architecture
 
-Seven independent, individually-tested modules. Arrows show what each module imports
+Eight independent, individually-tested modules. Arrows show what each module imports
 from another (i.e. "provides → consumes"):
 
 ```mermaid
@@ -20,6 +20,7 @@ flowchart BT
     CFG[config.py]
     MAIN[main.py]
     SWEEP[sweep.py]
+    RESULTS[results.py]
 
     ADAPTER --> MDP
     CFG --> MDP
@@ -36,6 +37,9 @@ flowchart BT
     CFG --> SWEEP
     MAIN -->|TrainingRun| SWEEP
     ADAPTER --> SWEEP
+    CFG --> RESULTS
+    EH --> RESULTS
+    SO --> RESULTS
 ```
 
 | File | Responsibility |
@@ -47,6 +51,7 @@ flowchart BT
 | `experiment_history.py` | Gives every run a `run_id`, snapshots its resolved config/strategy/log under `experiments/<run_id>/`, and appends one leaderboard row (hyperparameters + performance + git commit) to `experiments/index.csv` |
 | `main.py` | Orchestrates all five: fetch → split → train on `train_df` → evaluate the winner on `test_df` → save (both the "current" strategy file and this run's own history entry) → reload from disk → verify the reload reproduces the same backtest result |
 | `sweep.py` | Reads `sweep.yaml`, expands it into one-factor-at-a-time config variants (× seed repeats), and runs `main.py`'s `TrainingRun` sequentially over each — no changes to any other module |
+| `results.py` | Reads back `experiments/index.csv` (leaderboard / group-by-parameter comparison) or one run's `run_log.txt` (GA convergence) — read-only, no training, no network access |
 
 ## Sweeping (`sweep.py`)
 
@@ -94,6 +99,39 @@ point's real, permanent record is still its own `experiments/<run_id>/strategy.j
 Joint/combined sweeps (varying two parameters together) are deliberately out of scope —
 see `MODEL_DEVELOPMENT_PLAN.md` step 3, which reserves that for a later, narrower random
 search once one-factor-at-a-time results identify which parameters are worth combining.
+
+## Comparing results (`results.py`)
+
+A sweep (or several separate `main.py` runs) produces one row per run in
+`experiments/index.csv`. `results.py` reads it back — no training, no network access,
+no credentials needed:
+
+```bash
+python -m coinbase.ga.results                          # top 20 runs by annualized_yield
+python -m coinbase.ga.results --top 10 --pair FET-USDC  # filter to one pair
+python -m coinbase.ga.results --group-by mutation_rate  # compare a swept parameter
+python -m coinbase.ga.results --run-log <run_id>        # one run's per-generation fitness
+```
+
+`--group-by` is how you actually read a sweep's result: since each OFAT axis varies
+exactly one config path, and that path already has its own column in the index (e.g.
+`genetic_algorithm.mutation_rate` → the `mutation_rate` column), grouping by that column
+directly gives count/mean/std/min/max of `--metric` per value — no separate "which axis
+was varied" bookkeeping needed. `--metric` defaults to `annualized_yield` but accepts any
+numeric column in the index (`gross_profit`, `win_rate`, `max_drawdown`, ...).
+
+`--run-log` is the convergence sanity check from `MODEL_DEVELOPMENT_PLAN.md` §6: it
+prints one run's `best_fitness`/`avg_fitness` per generation from its
+`experiments/<run_id>/run_log.txt`, so you can eyeball whether the GA actually converged
+for that run rather than trusting the final number in isolation.
+
+**Run as a module** (`python -m coinbase.ga.results`), not as a direct script path — this
+applies to every entry point in this module (`main.py`, `sweep.py`, `dry_run.py`
+included), not just `results.py`: running `python coinbase/ga/results.py` directly fails
+with `ModuleNotFoundError: No module named 'coinbase'`, because Python only adds the
+script's own directory to `sys.path`, not the repo root, so the `coinbase` package can't
+resolve. `python -m coinbase.ga.results` resolves it correctly via the current directory
+instead.
 
 ## Pipeline (`main.py`)
 

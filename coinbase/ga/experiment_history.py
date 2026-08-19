@@ -9,6 +9,7 @@ from typing import Any
 
 from coinbase.ga.ga_engine import GaConfig
 from coinbase.ga.strategy_evaluator import StrategyConfig
+from coinbase.ga.strategy_output import ParentDirectory
 
 # One row per training run — a flat, greppable/pandas-loadable leaderboard so
 # comparing runs doesn't require opening every experiments/<run_id>/strategy.json.
@@ -136,9 +137,7 @@ class ExperimentIndex:
         self._filepath = filepath
 
     def append(self, record: ExperimentRecord) -> None:
-        directory = os.path.dirname(self._filepath)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
+        ParentDirectory(self._filepath).ensure()
         is_new = self._create_exclusively()
         with open(self._filepath, "a", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=_INDEX_FIELDS)
