@@ -16,6 +16,8 @@ class OutputConfig:
     strategy_filepath:    str
     log_filepath:         str
     dry_run_log_filepath: str
+    experiments_dir:      str
+    index_filepath:       str
 
 
 class OutputConfigFile:
@@ -28,6 +30,8 @@ class OutputConfigFile:
             strategy_filepath    = section["strategy_filepath"],
             log_filepath         = section["log_filepath"],
             dry_run_log_filepath = section.get("dry_run_log_filepath", "./dry_run_log.txt"),
+            experiments_dir      = section["experiments_dir"],
+            index_filepath       = section["index_filepath"],
         )
 
 
@@ -232,6 +236,19 @@ class GaRunLog:
     def append(self, generation: int, best_fitness: float, average_fitness: float) -> None:
         with open(self._filepath, "a") as handle:
             handle.write(f"{generation}\t{best_fitness:.6f}\t{average_fitness:.6f}\n")
+
+
+class FanOutRunLog:
+    def __init__(self, logs: tuple[GaRunLog, ...]) -> None:
+        self._logs = logs
+
+    def start(self, header: RunHeader) -> None:
+        for log in self._logs:
+            log.start(header)
+
+    def append(self, generation: int, best_fitness: float, average_fitness: float) -> None:
+        for log in self._logs:
+            log.append(generation, best_fitness, average_fitness)
 
 
 # ── Dry-run log ────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ on held-out data, and persists the winning strategy as JSON.
 
 ## Architecture
 
-Five independent, individually-tested modules. Arrows show what each module imports
+Six independent, individually-tested modules. Arrows show what each module imports
 from another (i.e. "provides → consumes"):
 
 ```mermaid
@@ -16,6 +16,7 @@ flowchart BT
     GA[ga_engine.py]
     SE[strategy_evaluator.py]
     SO[strategy_output.py]
+    EH[experiment_history.py]
     CFG[config.py]
     MAIN[main.py]
 
@@ -29,16 +30,18 @@ flowchart BT
     GA --> MAIN
     SE --> MAIN
     SO --> MAIN
+    EH --> MAIN
     ADAPTER --> MAIN
 ```
 
 | File | Responsibility |
 |---|---|
-| `market_data_processor.py` | Fetches Coinbase OHLCV candles (auto-chunked/paginated), computes SMA/RSI/MACD, min-max normalizes them to `[0, 1]`, splits into train/test, exposes a live account+price snapshot |
+| `market_data_processor.py` | Fetches Coinbase OHLCV candles (auto-chunked/paginated, disk-cached), computes SMA/RSI/MACD, min-max normalizes them to `[0, 1]`, splits into train/test, exposes a live account+price snapshot |
 | `ga_engine.py` | Genome (a normalized weight vector), and the GA operators that evolve a population against a pluggable `FitnessFunction`: tournament selection, uniform crossover, Gaussian mutation, elitism |
 | `strategy_evaluator.py` | Turns a genome's weights into a per-candle `signal_score`, walks the candles as a single-position backtest (buy above threshold, sell below, force-close at the end), and reports gross profit — this *is* the `FitnessFunction` the GA evolves against |
 | `strategy_output.py` | Assembles a trained genome + its config + its test-set performance into the `best_strategy.json` schema, saves/reloads it, and logs per-generation GA progress to a run log |
-| `main.py` | Orchestrates all four: fetch → split → train on `train_df` → evaluate the winner on `test_df` → save → reload from disk → verify the reload reproduces the same backtest result |
+| `experiment_history.py` | Gives every run a `run_id`, snapshots its resolved config/strategy/log under `experiments/<run_id>/`, and appends one leaderboard row (hyperparameters + performance + git commit) to `experiments/index.csv` |
+| `main.py` | Orchestrates all five: fetch → split → train on `train_df` → evaluate the winner on `test_df` → save (both the "current" strategy file and this run's own history entry) → reload from disk → verify the reload reproduces the same backtest result |
 
 ## Pipeline (`main.py`)
 
@@ -93,7 +96,8 @@ out-of-sample estimate rather than the (optimistic) number the GA was optimizing
 | | `weight_keys` | Which `market_data.normalized_columns` the GA assigns a weight to and scores on (must be a subset of `normalized_columns` — checked at startup) |
 | | `unwind_at_entry_price` | If true (default), a still-open position at the end of a backtest is force-closed at its own entry price (net-zero, not counted as a win or loss) instead of the window's last market price — so a strategy isn't judged on wherever the window happened to cut off mid-hold |
 | `genetic_algorithm` | `population_size`, `generations`, `mutation_rate`, `crossover_rate`, `tournament_size`, `elitism_count`, `mutation_sigma`, `seed` | Standard GA hyperparameters; fix `seed` for reproducible runs |
-| `output` | `strategy_filepath`, `log_filepath` | Where the trained strategy JSON and the per-generation run log get written |
+| `output` | `strategy_filepath`, `log_filepath` | Where the *current* trained strategy JSON and per-generation run log get written — overwritten/appended by every run, this is what `dry_run.py` reloads |
+| | `experiments_dir`, `index_filepath` | Where every run's own history is kept instead — `experiments/<run_id>/` (never overwritten) and the `experiments/index.csv` leaderboard row for it |
 
 ## Usage
 
@@ -108,6 +112,7 @@ This prints per-generation `best`/`avg` fitness as training proceeds, then a sum
 
 ```
 Saved strategy to ./best_strategy.json
+Experiment run_id:      20260819T140322Z-9f3a1c2e
 Test-set gross profit: 187.42
 Total trades:          14
 Win rate:              57.1%
@@ -121,7 +126,8 @@ Reload round-trip:     OK
 for the exact schema: `metadata` (pair, timeframe, training period, full GA config,
 timestamp), `strategy` (weights + buy/sell/position-size hyperparameters), and
 `performance` (gross profit, trade count, win rate, max drawdown, avg profit/trade —
-all computed on the held-out test split).
+all computed on the held-out test split). Overwritten by every run — this is the
+"current" strategy `dry_run.py` reloads.
 
 **`ga_run_log.txt`** — appended to (never overwritten), one section per run. Each run
 opens with a header (`RunHeader` in `strategy_output.py`) written before the GA starts,
@@ -130,11 +136,24 @@ so a run that crashes mid-evolution still leaves its config on record: a
 the strategy hyperparameters, and the GA config — followed by one tab-separated line per
 generation: `generation\tbest_fitness\tavg_fitness`.
 
+**`experiments/<run_id>/`** — one subdirectory per run, never overwritten, holding that
+run's exact `config.json` (the fully resolved config used, not just `config.yaml`),
+`strategy.json` (identical content to `best_strategy.json` at save time), and its own
+`run_log.txt` (this run's generations only, not the shared log above). `run_id` is a
+UTC timestamp plus a short hash of the resolved config, so two runs never collide even
+with the same config re-run — see `RunId` in `experiment_history.py`.
+
+**`experiments/index.csv`** — one row appended per run: `run_id`, `started_at`,
+`git_commit`, the data window, every GA/strategy hyperparameter, and the test-set
+performance metrics. A flat leaderboard for comparing runs (e.g. via pandas) without
+opening each one's `strategy.json`.
+
 ### Tests
 
 ```bash
 pytest tests/test_market_data_processor.py tests/test_ga_engine.py \
-       tests/test_strategy_evaluator.py tests/test_strategy_output.py tests/test_main.py
+       tests/test_strategy_evaluator.py tests/test_strategy_output.py \
+       tests/test_experiment_history.py tests/test_main.py
 ```
 
 All tests run against fake/mocked adapters — no live credentials or network access
