@@ -27,7 +27,7 @@ from typing import Optional
 import pandas as pd
 
 from coinbase.coinbase_adapter import CoinbaseAdapter
-from coinbase.credentials import api_key, api_secret
+from coinbase.credentials_file import CredentialsFile
 
 
 # ── Configuration ──────────────────────────────────────────────────────
@@ -266,10 +266,11 @@ def parse_args(args_in) -> argparse.Namespace:
 
 
 async def main(args_in) -> None:
-    args      = parse_args(args_in)
-    ref_times = build_reference_times(args)
+    args        = parse_args(args_in)
+    ref_times   = build_reference_times(args)
+    credentials = CredentialsFile().credentials()
 
-    async with CoinbaseAdapter(api_key, api_secret) as adapter:
+    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
         for ref_time in ref_times:
             tasks     = [fetch_snapshot(adapter, p, args.granularity, args.candles, ref_time) for p in args.pairs]
             snapshots = await asyncio.gather(*tasks)

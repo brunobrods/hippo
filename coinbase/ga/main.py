@@ -177,11 +177,12 @@ class TrainingRun:
 # the saved JSON reloads into an identical backtest result.
 
 async def _main() -> None:
-    from coinbase.credentials import api_key, api_secret
+    from coinbase.credentials_file import CredentialsFile
 
-    raw_config = ConfigFile("coinbase/ga/config.yaml").raw()
+    credentials = CredentialsFile().credentials()
+    raw_config  = ConfigFile("coinbase/ga/config.yaml").raw()
 
-    async with CoinbaseAdapter(api_key, api_secret) as adapter:
+    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
         summary = await TrainingRun(adapter, raw_config).train()
 
     print()

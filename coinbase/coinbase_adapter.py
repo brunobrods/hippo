@@ -440,14 +440,13 @@ def snap_to_increment(value: float, increment: float) -> str:
 #          Use a key with trade:read_write and keep amounts tiny.
 
 async def _smoke_test():
-    from credentials import api_key, api_secret
+    from coinbase.credentials_file import CredentialsFile
 
-    api_key    = api_key
-    api_secret = api_secret
+    credentials = CredentialsFile().credentials()
 
     PRODUCT = "BTC-USDC"
 
-    async with CoinbaseAdapter(api_key, api_secret) as adapter:
+    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
 
         # 1. Accounts
         print("\n=== Accounts ===")

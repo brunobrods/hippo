@@ -61,8 +61,9 @@ class DryRun:
 # Ctrl+C to stop.
 
 async def _main() -> None:
-    from coinbase.credentials import api_key, api_secret
+    from coinbase.credentials_file import CredentialsFile
 
+    credentials     = CredentialsFile().credentials()
     raw_config      = ConfigFile("coinbase/ga/config.yaml").raw()
     market_config   = MarketDataConfig(raw_config)
     window          = market_config.window()
@@ -77,7 +78,7 @@ async def _main() -> None:
     genome   = Genome(reloaded.weights())
     strategy = GaStrategy(genome, strategy_config, keys)
 
-    async with CoinbaseAdapter(api_key, api_secret) as adapter:
+    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
         market_row  = LiveMarketRow(
             adapter, window.pair, window.granularity, market_config.periods(), market_config.normalized_columns(),
         )
