@@ -293,9 +293,11 @@ class PortfolioPnl:
 # Reads live balances and fills — requires a key with trade:read (or read_write).
 
 async def _main() -> None:
-    from coinbase.credentials import api_key, api_secret
+    from coinbase.credentials_file import CredentialsFile
 
-    async with CoinbaseAdapter(api_key, api_secret) as adapter:
+    credentials = CredentialsFile().credentials()
+
+    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
         report = await PortfolioPnl(adapter).report()
         print(report.as_table())
 

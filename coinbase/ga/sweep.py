@@ -148,8 +148,9 @@ class Sweep:
 # comparing sweep results needs no sweep-specific tooling.
 
 async def _main() -> None:
-    from coinbase.credentials import api_key, api_secret
+    from coinbase.credentials_file import CredentialsFile
 
+    credentials  = CredentialsFile().credentials()
     sweep_config = SweepConfigFile(ConfigFile("coinbase/ga/sweep.yaml").raw())
     base_config  = ConfigFile(sweep_config.base_config_path()).raw()
     plan         = SweepPlan(base_config, sweep_config.axes(), sweep_config.seeds())
@@ -159,7 +160,7 @@ async def _main() -> None:
     print(f"Sweeping {len(points)} points across {len(sweep_config.axes())} axes, "
           f"{len(sweep_config.seeds())} seeds each")
 
-    async with CoinbaseAdapter(api_key, api_secret) as adapter:
+    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
         await Sweep(adapter, points, ConsoleSweepProgress(len(points))).run()
 
 

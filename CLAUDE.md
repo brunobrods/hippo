@@ -16,12 +16,17 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Credentials go in `coinbase/credentials.py` (gitignored — never commit):
-```python
-api_key    = "organizations/<org_id>/apiKeys/<key_id>"
-api_secret = "-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----\n"
+Credentials go in `~/.coinbase/credentials.yaml` (outside the repo — shared across
+every worktree of this checkout, never committed):
+```yaml
+api_key: "organizations/<org_id>/apiKeys/<key_id>"
+api_secret: |
+  -----BEGIN EC PRIVATE KEY-----
+  ...
+  -----END EC PRIVATE KEY-----
 ```
-Keys created at <https://portal.cdp.coinbase.com/>.
+Keys created at <https://portal.cdp.coinbase.com/>. Loaded via `CredentialsFile` in
+`coinbase/credentials_file.py`.
 
 ## Commands
 
@@ -45,7 +50,7 @@ pytest tests/test_coinbase_adapter.py   # single file
 - `coinbase/coinbase_adapter.py` — `CoinbaseAdapter` async context manager. Auth via per-request ES256 JWTs (2-min TTL). All order amount fields must be **strings** — Coinbase rejects floats.
 - `coinbase/market_scanner.py` — fetches OHLCV candles concurrently via `asyncio.gather`, computes RSI (EWM, 48-period) / MACD (12/26/9) / Bollinger (20-period ±2σ) using pandas, prints a snapshot table.
 - `coinbase/strategy.py` — stub; `Strategy.onTimer()` not yet implemented.
-- `coinbase/credentials.py` — gitignored. No sandbox exists for Coinbase Advanced Trade — all testing is live.
+- `coinbase/credentials_file.py` — `CredentialsFile` loads `~/.coinbase/credentials.yaml`. No sandbox exists for Coinbase Advanced Trade — all testing is live.
 
 ## Code Style
 

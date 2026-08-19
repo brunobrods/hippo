@@ -153,7 +153,7 @@ out-of-sample estimate rather than the (optimistic) number the GA was optimizing
 
 ## Usage
 
-Requires live Coinbase credentials in `coinbase/credentials.py` (see the repo-root
+Requires live Coinbase credentials in `~/.coinbase/credentials.yaml` (see the repo-root
 README) — there is no sandbox, so training runs against real historical market data.
 
 ```bash

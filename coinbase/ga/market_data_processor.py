@@ -415,12 +415,13 @@ class LiveMarketState:
 # Fetches a small BTC-USDC window and prints the indicator frame's tail.
 
 async def _main() -> None:
-    from coinbase.credentials import api_key, api_secret
+    from coinbase.credentials_file import CredentialsFile
 
-    config = MarketDataConfig(ConfigFile("coinbase/ga/config.yaml").raw())
-    window = config.window()
+    credentials = CredentialsFile().credentials()
+    config      = MarketDataConfig(ConfigFile("coinbase/ga/config.yaml").raw())
+    window      = config.window()
 
-    async with CoinbaseAdapter(api_key, api_secret) as adapter:
+    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
         market_data = HistoricalMarketData(
             adapter, window.pair, window.granularity, window.start, window.end,
             config.periods(), config.columns(), config.cache_dir(),
