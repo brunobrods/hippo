@@ -7,7 +7,7 @@ from typing import Any
 from coinbase.coinbase_adapter import CoinbaseAdapter
 from coinbase.ga.config import ConfigFile
 from coinbase.ga.main import TrainingRun, TrainingSummary
-from coinbase.ga.strategy_output import OutputConfigFile
+from coinbase.ga.strategy_output import OutputConfigFile, ParentDirectory
 
 # genetic_algorithm.seed is overridden per seed repeat regardless of which
 # axis is varying, so every axis value gets trained once per configured seed.
@@ -59,6 +59,11 @@ class DottedPathOverride:
         target = result
         keys   = self._path.split(".")
         for key in keys[:-1]:
+            # a YAML mapping whose every child is commented out (e.g. `output:`
+            # in config.yaml) parses to None, not {} — coerce it so overriding
+            # a path under it doesn't crash on 'NoneType' item assignment.
+            if target[key] is None:
+                target[key] = {}
             target = target[key]
         target[keys[-1]] = self._value
         return result
@@ -96,7 +101,7 @@ class SweepPlan:
         return tuple(points)
 
     def ensure_scratch_directory(self) -> None:
-        os.makedirs(os.path.dirname(self._scratch_strategy_path()), exist_ok=True)
+        ParentDirectory(self._scratch_strategy_path()).ensure()
 
     def _scratch_strategy_path(self) -> str:
         experiments_dir = OutputConfigFile(self._base_config).config().experiments_dir
