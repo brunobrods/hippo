@@ -171,7 +171,9 @@ class TrainingRun:
 
 
 # ── Entry point ────────────────────────────────────────────────────────
-# Run:  python coinbase/ga/main.py
+# Run (as a module, from the repo root — a direct script path fails with
+# ModuleNotFoundError: No module named 'coinbase'):
+#   python -m coinbase.ga.main
 # Trains a GA strategy on live Coinbase historical data, evaluates it on the
 # held-out test split, saves it to output.strategy_filepath, and verifies
 # the saved JSON reloads into an identical backtest result.

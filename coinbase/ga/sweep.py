@@ -146,7 +146,9 @@ class Sweep:
 
 
 # ── Entry point ────────────────────────────────────────────────────────
-# Run:  python coinbase/ga/sweep.py
+# Run (as a module, from the repo root — a direct script path fails with
+# ModuleNotFoundError: No module named 'coinbase'):
+#   python -m coinbase.ga.sweep
 # Trains one full GA strategy per (axis value, seed) point in sweep.yaml,
 # holding every other parameter at base_config's value (one-factor-at-a-time).
 # Each point is an ordinary TrainingRun — same experiments/<run_id>/ history

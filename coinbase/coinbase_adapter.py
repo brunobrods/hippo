@@ -431,7 +431,10 @@ def snap_to_increment(value: float, increment: float) -> str:
 
 
 # ── Smoke test ─────────────────────────────────────────────────────────
-# Run:  python coinbase_adapter.py
+# Run (as a module, from the repo root — `python coinbase/coinbase_adapter.py`
+# directly fails with ModuleNotFoundError: No module named 'coinbase', since
+# Python only adds the script's own directory to sys.path, not the repo root):
+#   python -m coinbase.coinbase_adapter
 #
 # Places a passive limit BUY on BTC-USDC 2% below best bid,
 # confirms it's open, then cancels it.

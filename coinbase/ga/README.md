@@ -59,7 +59,7 @@ flowchart BT
 by varying one parameter at a time against a shared base config:
 
 ```bash
-python coinbase/ga/sweep.py
+python -m coinbase.ga.sweep
 ```
 
 `sweep.yaml` defines the sweep:
@@ -201,7 +201,7 @@ Requires live Coinbase credentials in `~/.coinbase/credentials.yaml` (see the re
 README) — there is no sandbox, so training runs against real historical market data.
 
 ```bash
-python coinbase/ga/main.py
+python -m coinbase.ga.main
 ```
 
 This prints per-generation `best`/`avg` fitness as training proceeds, then a summary:
@@ -250,11 +250,13 @@ opening each one's `strategy.json`.
 ```bash
 pytest tests/test_market_data_processor.py tests/test_ga_engine.py \
        tests/test_strategy_evaluator.py tests/test_strategy_output.py \
-       tests/test_experiment_history.py tests/test_main.py tests/test_sweep.py
+       tests/test_experiment_history.py tests/test_main.py tests/test_sweep.py \
+       tests/test_results.py
 ```
 
 All tests run against fake/mocked adapters — no live credentials or network access
-required. Only `python coinbase/ga/main.py`/`sweep.py` themselves need real credentials.
+required. Only `python -m coinbase.ga.main`/`sweep`/`dry_run` themselves need real
+credentials — `results.py` never touches the network.
 
 ### Design decisions worth knowing
 
