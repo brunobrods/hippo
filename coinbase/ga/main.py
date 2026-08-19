@@ -80,7 +80,7 @@ class TrainingRun:
 
         frame = await HistoricalMarketData(
             self._adapter, window.pair, window.granularity, window.start, window.end,
-            market_config.periods(), market_config.columns(),
+            market_config.periods(), market_config.columns(), market_config.cache_dir(),
         ).dataframe()
         split = TrainTestSplit(frame, window.test_split)
         weight_keys = ValidatedWeightKeys(

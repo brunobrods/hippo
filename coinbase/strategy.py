@@ -35,8 +35,11 @@ class LiveMarketRow:
     async def latest(self) -> dict[str, float]:
         end   = int(time.time())
         start = end - self._lookback_candles * GRANULARITY_SECONDS[self._granularity]
+        # cache_dir=None: this window slides every call, so disk caching would
+        # never hit and would just accumulate one throwaway file per tick.
         frame = await HistoricalMarketData(
-            self._adapter, self._pair, self._granularity, start, end, self._periods, self._normalized_columns,
+            self._adapter, self._pair, self._granularity, start, end,
+            self._periods, self._normalized_columns, cache_dir=None,
         ).dataframe()
         return frame.iloc[-1].to_dict()
 

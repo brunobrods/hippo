@@ -1,5 +1,7 @@
 import asyncio
 import functools
+import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -80,6 +82,9 @@ class MarketDataConfig:
 
     def columns(self) -> tuple[str, ...]:
         return self.normalized_columns() + self.delta_columns()
+
+    def cache_dir(self) -> str:
+        return self._raw["market_data"]["cache_dir"]
 
 
 # ── Indicators ─────────────────────────────────────────────────────────
@@ -273,6 +278,60 @@ class HistoricalCandles:
         return self._cache
 
 
+# ── Candle disk cache ──────────────────────────────────────────────────
+# Persists raw candles across process runs, keyed by the exact window
+# requested, so a parameter sweep that repeats a (pair, granularity,
+# start, end) window many times only fetches it from Coinbase once.
+# Deliberately not used by LiveMarketState, which needs the true latest
+# candle on every call.
+
+class CandleCacheKey:
+    def __init__(self, pair: str, granularity: str, start: int, end: int) -> None:
+        self._pair        = pair
+        self._granularity = granularity
+        self._start       = start
+        self._end         = end
+
+    def filename(self) -> str:
+        return f"{self._pair}_{self._granularity}_{self._start}_{self._end}.json"
+
+
+class CandleCacheFile:
+    def __init__(self, directory: str, key: CandleCacheKey) -> None:
+        self._directory = directory
+        self._key       = key
+
+    def exists(self) -> bool:
+        return os.path.exists(self._path())
+
+    def read(self) -> list[dict]:
+        with open(self._path()) as handle:
+            return json.load(handle)
+
+    def write(self, candles: list[dict]) -> None:
+        os.makedirs(self._directory, exist_ok=True)
+        tmp_path = f"{self._path()}.tmp-{os.getpid()}"
+        with open(tmp_path, "w") as handle:
+            json.dump(candles, handle)
+        os.replace(tmp_path, self._path())  # atomic — a crash or concurrent writer never leaves a truncated cache file
+
+    def _path(self) -> str:
+        return os.path.join(self._directory, self._key.filename())
+
+
+class CachedHistoricalCandles:
+    def __init__(self, candles: HistoricalCandles, cache_file: CandleCacheFile) -> None:
+        self._candles    = candles
+        self._cache_file = cache_file
+
+    async def raw(self) -> list[dict]:
+        if self._cache_file.exists():
+            return self._cache_file.read()
+        raw = await self._candles.raw()
+        self._cache_file.write(raw)
+        return raw
+
+
 class AccountBalance:
     def __init__(self, adapter: CoinbaseAdapter, currency: str) -> None:
         self._adapter  = adapter
@@ -298,6 +357,7 @@ class HistoricalMarketData:
         end: int,
         periods: IndicatorPeriods,
         normalized_columns: tuple[str, ...],
+        cache_dir: Optional[str] = None,
     ) -> None:
         self._adapter            = adapter
         self._product_id         = product_id
@@ -306,11 +366,18 @@ class HistoricalMarketData:
         self._end                = end
         self._periods            = periods
         self._normalized_columns = normalized_columns
+        self._cache_dir          = cache_dir
 
     async def dataframe(self) -> pd.DataFrame:
-        raw   = await HistoricalCandles(
-            self._adapter, self._product_id, self._granularity, self._start, self._end
-        ).raw()
+        base    = HistoricalCandles(self._adapter, self._product_id, self._granularity, self._start, self._end)
+        candles = base if self._cache_dir is None else CachedHistoricalCandles(
+            base,
+            CandleCacheFile(
+                self._cache_dir,
+                CandleCacheKey(self._product_id, self._granularity, self._start, self._end),
+            ),
+        )
+        raw   = await candles.raw()
         frame = IndicatorFrame(raw, self._periods).dataframe
         return NormalizedIndicators(frame, self._normalized_columns).dataframe
 
@@ -355,7 +422,8 @@ async def _main() -> None:
 
     async with CoinbaseAdapter(api_key, api_secret) as adapter:
         market_data = HistoricalMarketData(
-            adapter, window.pair, window.granularity, window.start, window.end, config.periods(), config.columns(),
+            adapter, window.pair, window.granularity, window.start, window.end,
+            config.periods(), config.columns(), config.cache_dir(),
         )
         frame = await market_data.dataframe()
         print(frame.tail())
