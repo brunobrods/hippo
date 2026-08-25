@@ -4,7 +4,7 @@ import pytest
 
 from coinbase.ga.market_data_processor import IndicatorPeriods
 from coinbase.strategy import LiveMarketRow, LiveTradingRun, PaperTradingRun
-from coinbase.trading_strategy import Action, Decision, Ledger, Position
+from coinbase.trading_strategy import Action, Decision, IsolatedMargin, Ledger, Position
 
 
 # ── Test doubles ─────────────────────────────────────────────────────
@@ -130,10 +130,10 @@ async def test_paper_trading_run_never_calls_the_adapters_order_endpoints():
 
 @pytest.mark.asyncio
 async def test_paper_trading_run_liquidates_a_short_that_the_market_ran_through():
-    # _rising_candles climbs from 100 well past 200, so a short opened on the
-    # first tick is breached later — paper trading must apply the same 1x
-    # isolated margin rule the strategy was trained under, not carry the
-    # position indefinitely.
+    # Paper trading must apply the same isolated margin rule the strategy was
+    # trained under, not carry a breached position indefinitely. The breach
+    # price is taken from IsolatedMargin itself rather than a hardcoded
+    # multiple, since it depends on the collateral backing the short.
     adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[])
     market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS)
     ledger     = Ledger(1000.0)
@@ -141,9 +141,11 @@ async def test_paper_trading_run_liquidates_a_short_that_the_market_ran_through(
 
     await run.on_timer()
     assert ledger.position() is not None
-    entry = ledger.position().entry_price()
+    entry     = ledger.position().entry_price()
+    liquidation = IsolatedMargin(ledger.position(), ledger.balance()).liquidation_price()
+    assert liquidation > entry * 2.0   # a 10%-sized short survives far past 2x
 
-    ledger.liquidate(high=entry * 2.0, low=entry)  # the breach the next tick would carry in
+    ledger.liquidate(high=liquidation, low=entry)  # the breach the next tick would carry in
     assert ledger.position() is None
     assert ledger.trades()[0].profit() < 0.0
 

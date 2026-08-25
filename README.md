@@ -17,6 +17,9 @@ and [Binance isolated margin](https://developers.binance.com/docs/margin_trading
 
 Product IDs, granularities and timestamps stay in Coinbase's vocabulary
 everywhere in this codebase — `"BTC-USDC"`, `"SIX_HOUR"`, UNIX **seconds**.
+The candle cache is keyed by exchange, so the same window fetched from two
+venues never collides. Cache files written before that change are orphaned;
+copy them to `<exchange>_<old name>` to keep them, or let them refetch.
 `BinanceAdapter` translates them on the wire (`BTCUSDC`, `6h`, milliseconds) and
 normalizes klines back into Coinbase-shaped candle dicts, so one config and one
 trained strategy drive either exchange.
@@ -198,6 +201,6 @@ All pinned in `requirements.txt`.
 - Neither exchange offers a usable sandbox here — Coinbase Advanced Trade has none,
   and Binance's spot testnet does not serve margin endpoints. Test with the smallest
   possible amounts, against the pair's `minNotional`.
-- Binance shorts borrow real funds and can be liquidated. `IsolatedRisk` reads the
-  exchange's own `marginLevel` and `liquidatePrice` — trust those over the
-  backtest's 2×-entry approximation.
+- Binance shorts borrow real funds and can be liquidated. `IsolatedMargin` models
+  the same formula the exchange uses, but `IsolatedRisk` reads Binance's own
+  `marginLevel` and `liquidatePrice` — trust those when trading live.

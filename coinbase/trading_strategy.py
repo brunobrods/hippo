@@ -1,4 +1,5 @@
 import functools
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Protocol
@@ -85,19 +86,50 @@ class Position:
 
 
 # ── Margin ───────────────────────────────────────────────────────────────
-# 1x isolated: the position's own notional is the entire margin backing it, so
-# an adverse move equal to the entry price wipes the position out. For a short
-# that is a 100% rise (liquidation at 2x entry); for a long it would require
-# the price to reach zero, which never happens — longs are unliquidatable here.
+# Isolated margin, matching how Binance actually liquidates.
+#
+# A short borrows the base asset and sells it, so the wallet afterwards holds
+# its original collateral plus the sale proceeds, against a debt of `size` base
+# units marked at the live price:
+#
+#     margin level = (collateral + size * entry) / (size * price)
+#
+# Binance closes the position when that ratio decays to LIQUIDATION_MARGIN_LEVEL,
+# giving
+#
+#     liquidation price = (collateral + size * entry) / (level * size)
+#
+# Both halves were verified live on BTCUSDT: a short of 0.00019022 BTC entered
+# at 78,266 against 57.9295 USDT of quote assets reported marginLevel 3.890 and
+# liquidatePrice 290,022.60, which puts the trigger at exactly 1.05.
+#
+# This replaces a flat "shorts liquidate at 2x entry" rule. That rule is only
+# right for a short whose notional is the ENTIRE wallet — and even then it is
+# slightly generous, since 2x/1.05 = 1.905x is where the level is really hit.
+# Below full size it fired far too early: at position_size_pct 0.60 the real
+# liquidation is around 2.54x entry, so shorts were being closed at a loss that
+# the exchange would have let run.
+#
+# A long here borrows nothing (Binance orders use sideEffectType NO_SIDE_EFFECT),
+# so it carries no debt and no liquidation price at all.
+
+LIQUIDATION_MARGIN_LEVEL = 1.05
+
 
 class IsolatedMargin:
-    def __init__(self, position: Position) -> None:
-        self._position = position
+    def __init__(self, position: Position, collateral: float) -> None:
+        self._position   = position
+        self._collateral = collateral
 
     def liquidation_price(self) -> float:
-        if self._position.direction() is Direction.SHORT:
-            return self._position.entry_price() * 2.0
-        return 0.0
+        if self._position.direction() is not Direction.SHORT:
+            return 0.0
+        size = self._position.size()
+        # No borrow means no debt to be liquidated against, at any price.
+        if size <= 0.0:
+            return math.inf
+        proceeds = size * self._position.entry_price()
+        return (self._collateral + proceeds) / (LIQUIDATION_MARGIN_LEVEL * size)
 
     def breached_by(self, high: float, low: float) -> bool:
         if self._position.direction() is Direction.SHORT:
@@ -135,7 +167,7 @@ class Ledger:
     def liquidate(self, high: float, low: float) -> None:
         if self._position is None:
             return
-        margin = IsolatedMargin(self._position)
+        margin = IsolatedMargin(self._position, self._balance)
         if margin.breached_by(high, low):
             self._close(margin.liquidation_price())
 

@@ -32,8 +32,9 @@ Order model (isolated margin):
     spot buy: nothing is borrowed, no interest accrues, and there is no
     liquidation price. Shorts must borrow the base asset to sell it, so
     market_short/limit_short use MARGIN_BUY and the matching cover uses
-    AUTO_REPAY. That asymmetry is what trading_strategy.IsolatedMargin already
-    models — longs unliquidatable, shorts liquidated at 2x entry.
+    AUTO_REPAY. That asymmetry is what trading_strategy.IsolatedMargin
+    models — longs borrow nothing so they cannot be liquidated, while a short's
+    liquidation price falls out of its collateral ratio.
 
     NOTE: Binance charges hourly interest on borrowed funds. Ledger/Backtest
     do not model it, so a short held for days scores better in the GA than it
@@ -259,7 +260,8 @@ class IsolatedAccounts:
 
 
 # Binance's own risk numbers for one isolated pair — the real liquidation
-# price, rather than the 2x-entry approximation the backtest assumes.
+# price. IsolatedMargin computes the same figure from the ledger's own
+# collateral; this is the exchange's authoritative version.
 class IsolatedRisk:
     def __init__(self, pair: dict[str, Any]) -> None:
         self._pair = pair
@@ -972,7 +974,7 @@ async def _smoke_test(product: str = DEFAULT_SMOKE_TEST_PRODUCT) -> None:
                     f"interest={float(acct['interest']):.8f}"
                 )
 
-        # 2. Pair risk — Binance's real liquidation price, not the 2x-entry model
+        # 2. Pair risk — the exchange's own liquidation price
         print(f"\n=== Isolated risk: {PRODUCT} ===")
         pair = await adapter.get_isolated_account(PRODUCT)
         risk = IsolatedRisk(pair)
