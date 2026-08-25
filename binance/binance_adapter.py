@@ -994,7 +994,11 @@ async def _smoke_test(product: str = DEFAULT_SMOKE_TEST_PRODUCT) -> None:
         raw_size     = max(float(product["base_min_size"]), min_notional / float(limit_price) * 1.05)
         base_size    = SnappedValue(raw_size, base_increment).as_string()
 
-        print(f"\n=== Placing limit BUY: {base_size} BTC @ {limit_price} USDC ===")
+        symbol = BinanceSymbol(PRODUCT)
+        print(
+            f"\n=== Placing limit BUY: {base_size} {symbol.base()} "
+            f"@ {limit_price} {symbol.quote()} ==="
+        )
         result   = await adapter.limit_buy(
             product_id  = PRODUCT,
             base_size   = base_size,
