@@ -75,10 +75,48 @@ python -m binance.binance_adapter            # defaults to BTC-USDC
 python -m binance.binance_adapter BTC-USDT   # any isolated pair
 # both need a margin-enabled key and QUOTE currency in that pair's isolated wallet
 
+# Paper trading — ONE tick per invocation, then exits (for Task Scheduler).
+# Acts on the last CLOSED candle and refuses to act on the same candle twice,
+# so scheduling it more often than the granularity is safe and free.
+python -m coinbase.ga.paper_trading
+./scripts/register_paper_task.ps1                    # register, every 30 min
+./scripts/register_paper_task.ps1 -Remove            # unregister
+
 # Tests
 pytest
 pytest tests/test_config.py   # single file
 ```
+
+## Paper trading
+
+`coinbase/ga/dry_run.py` holds a process open and sleeps between ticks;
+`coinbase/ga/paper_trading.py` runs one tick and exits, which is what makes it
+schedulable. Two properties make the scheduled form safe:
+
+- **State persists.** Balance and any open position are written to
+  `paper_state.json` after every tick and reloaded on the next, so a reboot or
+  a closed lid does not silently reset the book to flat. `dry_run.py` builds a
+  fresh `Ledger` on every launch and does restart flat — that is fine for a
+  process you watch, wrong for a scheduled one.
+- **Idempotent per candle.** A tick records `last_candle_start` and refuses to
+  act on that candle again, so the task can be scheduled far more often than
+  the granularity. Every 30 minutes against `SIX_HOUR` candles means 11 of 12
+  runs exit as no-ops. This is deliberately preferred over aligning a
+  local-time schedule to UTC boundaries: no DST arithmetic, and a machine
+  asleep at the boundary acts late rather than skipping the candle.
+
+Decisions are taken on the last **closed** candle (`ClosedMarketRow`), matching
+what `Backtest` sees — `LiveMarketRow`'s last row is the still-forming candle,
+whose close is just the current price and whose high/low are partial.
+
+The `paper:` section of `config.yaml` sets the market independently of `data:`,
+so a genome trained on Coinbase BTC-USDC can be papered against Binance
+BTC-USDT without disturbing training config.
+
+**Known gap:** `LiveMarketRow` min-max normalizes against its trailing window
+while the GA trained against the full training window's range, so `norm_*`
+columns do not mean quite the same thing live as in scoring. Deferred
+deliberately; it affects any live or paper run.
 
 ## Architecture
 

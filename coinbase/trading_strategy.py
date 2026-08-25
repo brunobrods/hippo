@@ -146,9 +146,13 @@ class Strategy(Protocol):
 # ── Ledger ───────────────────────────────────────────────────────────────
 
 class Ledger:
-    def __init__(self, balance: float) -> None:
+    # `position` restores a book carried in from a previous process — a paper
+    # or live run that ticks once per candle rebuilds its open position here.
+    # `trades` always starts empty: it records what closed during THIS ledger's
+    # life, while realized profit is already folded into `balance`.
+    def __init__(self, balance: float, position: Optional[Position] = None) -> None:
         self._balance  = balance
-        self._position: Optional[Position] = None
+        self._position = position
         self._trades:   list[Trade] = []
 
     def apply(self, decision: Decision, price: float) -> None:

@@ -35,6 +35,27 @@ market_data:
   normalized_columns: ["sma_short", "sma_long", "sma_extra", "rsi", "macd"]
   delta_columns: ["delta_1", "delta_3", "delta_5", "delta_10"]
 
+# Paper trading — `python -m coinbase.ga.paper_trading` runs ONE tick and exits,
+# so it can be driven by Windows Task Scheduler instead of a process left open.
+# It acts on the last CLOSED candle and refuses to act on the same candle twice,
+# so scheduling it more often than the granularity is safe and costs nothing:
+# every 30 minutes against SIX_HOUR candles means 11 of 12 runs are no-ops.
+# That avoids aligning a local-time schedule to UTC boundaries across DST, and
+# a machine asleep at the boundary acts late rather than skipping the candle.
+#
+# The ledger is simulated and seeded from strategy.starting_balance below.
+# Nothing here places an order or reads a real account balance.
+paper:
+  # The market to follow, which need NOT be the one the genome was trained on.
+  # Trained on Coinbase BTC-USDC; papered against the venue actually intended
+  # for execution.
+  exchange: "binance"
+  pair: "BTC-USDT"
+  # Balance and open position persist here between ticks, so a reboot does not
+  # silently reset the book to flat. Optional — defaults to
+  # ~/.coinbase/ga/paper_state.json. Delete the file to start the run over.
+  # state_filepath: "./paper_state.json"
+
 strategy:
   position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
   buy_threshold: 0.60       # signal_score above this opens a position
