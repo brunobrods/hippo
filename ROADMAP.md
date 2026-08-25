@@ -1,8 +1,8 @@
 # Roadmap
 
-Where this project stands and the next big steps, in dependency order. Written
-2026-08-17 from the current state of the repo (last commit `beb0562`, "Feed
-current position PnL into the GA strategy's signal").
+Where this project stands and the next big steps, in dependency order.
+Written 2026-08-17, updated 2026-08-19 after merging the dry-run mode and an
+independent config-driven weight-keys refactor (last commit `d28539a`).
 
 ## Where things stand
 
@@ -11,38 +11,37 @@ historical candles, computes indicators, evolves a `GaStrategy` genome against
 an annualized-yield fitness function, backtests it out-of-sample, and saves
 `best_strategy.json`. See `coinbase/ga/README.md` for the architecture.
 
-The **live-trading side is a decision engine with no execution behind it**.
-`coinbase/strategy.py`'s `LiveTradingRun.on_timer()` pulls a live market row
-and account balance, asks a `Strategy` for a `Decision`, and updates its own
-in-memory `Position` — but the comment on `on_timer()` says it plainly: *"it
-decides but does not place a real order."* Nothing calls `on_timer()` on a
+**A dry-run mode now exists**: `coinbase/ga/dry_run.py` reloads a trained
+strategy and drives it against live market data on a loop matched to its
+granularity, sizing/filling against a simulated `Ledger` and logging every
+tick — never touching order placement. Walk-forward validation and a
+cross-pair sanity check (originally listed here in §1) are still outstanding;
+do those, or at least a period of watching the dry run's log, before trusting
+a strategy enough to move to §2.
+
+The **live-trading side is still a decision engine with no execution behind
+it**. `coinbase/strategy.py`'s `LiveTradingRun.on_timer()` pulls a live market
+row and account balance, asks a `Strategy` for a `Decision`, and updates a
+`Ledger`'s position tracking — but the comment on `on_timer()` says it
+plainly: *"it does not place a real order."* Nothing calls `on_timer()` on a
 schedule, nothing sends the `Decision` to `CoinbaseAdapter`, and `pnl.py`'s
 account-derived position tracking (`OpenPositions`/`EntryPrice`) is never
-consulted by the live loop, which instead trusts only its own in-memory state.
+consulted by the live loop, which instead trusts only its own in-process
+`Ledger`.
 
 That gap — decision without execution, and in-memory state without
 reconciliation — is the shape of everything below.
 
-## 0. Fix a bug blocking reliable runs
+## 0. ~~Fix a bug blocking reliable runs~~ — done
 
-`coinbase/ga/main.py:112` hardcodes an absolute path to `config.yaml`:
-
-```python
-raw_config = ConfigFile("D:\project\scratches\coinbase\ga\config.yaml").raw()
-```
-
-Two problems: it's not a raw string (the backslash sequences aren't valid
-escapes and will warn), and it points at the **main checkout**, not whichever
-worktree `main.py` is actually run from — so from this worktree it would
-silently load the wrong `config.yaml`. Every other entry point in the module
-(`market_data_processor.py`'s smoke test) uses the relative path
-`"coinbase/ga/config.yaml"`; `main.py` should match.
+~~`coinbase/ga/main.py:112` hardcoded an absolute path to `config.yaml`~~ —
+fixed; now uses the relative `"coinbase/ga/config.yaml"` like every other
+entry point in the module.
 
 ## 1. De-risk the strategy before it touches money
 
 Nothing yet establishes that the GA strategy generalizes rather than
-overfitting to one historical window on one pair (`FET-USDC`,
-2025-06-01→2026-07-01 per `config.yaml`). Before wiring up execution:
+overfitting to one historical window on one pair. Before wiring up execution:
 
 - **Walk-forward validation** — retrain/re-evaluate across several rolling
   historical windows (not just one train/test split) and check performance is
@@ -50,14 +49,11 @@ overfitting to one historical window on one pair (`FET-USDC`,
 - **Cross-pair sanity check** — run the same pipeline against a couple of
   other pairs to see whether the learned weights are pair-specific noise or a
   real signal.
-- **A dry-run / paper-trading mode** — drive `LiveTradingRun` off real-time
-  data, log every `Decision` it would have made, but never call the adapter.
-  Given Coinbase Advanced Trade has no sandbox, this is the only safe way to
-  watch the live loop behave before it risks real capital.
+- ~~**A dry-run / paper-trading mode**~~ — done: `coinbase/ga/dry_run.py`.
 
 ## 2. Wire up real execution
 
-Once the strategy has been paper-traded and trusted:
+Once the strategy has been dry-run and trusted:
 
 - **Send `Decision` to `CoinbaseAdapter`** — `on_timer()` computes a
   `Decision` and throws it away; connect `BUY`/`SELL` to
@@ -65,7 +61,7 @@ Once the strategy has been paper-traded and trusted:
   `SnappedPrice`-style rounding object per `CLAUDE.md`'s Coinbase-specifics
   rule — all order amounts must be strings).
 - **Reconcile position state from the account, not from memory** —
-  `LiveTradingRun._position` is rebuilt purely from this process's own past
+  `LiveTradingRun`'s `Ledger` is rebuilt purely from this process's own past
   decisions. A restart, a manual trade, or a partial fill desyncs it silently.
   `pnl.py`'s `OpenPositions`/`EntryPrice` already know how to derive real
   position state from account balances and fill history — the live loop
@@ -100,6 +96,6 @@ Once the strategy has been paper-traded and trusted:
 
 ---
 
-Suggested next conversation: pick one item from §0–1 (the bug fix is a
-five-minute change; the dry-run mode is the highest-leverage next feature)
-and scope it properly per `WORKFLOW.md` before implementing.
+Suggested next conversation: run the dry-run mode for a while and/or do the
+walk-forward/cross-pair validation from §1, then scope one item from §2 per
+`WORKFLOW.md` before implementing.
