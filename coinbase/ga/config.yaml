@@ -48,10 +48,11 @@ strategy:
   # margin model, and only the backtest simulates it today.
   allow_short: true
   short_entry_threshold: 0.25  # signal_score below this opens a short
-  # Sits above sell_threshold so the short side carries hysteresis comparable to
-  # the long side's 0.60/0.40, and leaves room for short_entry to be swept up to
-  # 0.45 without inverting the two.
-  short_exit_threshold: 0.50   # signal_score above this covers an open short
+  # 0.45 rather than 0.50 on the evidence of sweep 1c: +10.9% mean vs +3.4% at
+  # 0.50, seed sd 3.9%, all five seeds positive, Welch t=3.25. The only
+  # calibration result so far whose effect clearly exceeds its seed noise.
+  # Above 0.50 it degrades sharply and a -9.5%/2-trade failure mode recurs.
+  short_exit_threshold: 0.45   # signal_score above this covers an open short
   indicators:
     sma_short_period: 9
     sma_long_period: 20
