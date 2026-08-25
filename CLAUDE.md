@@ -104,6 +104,9 @@ Each adapter translates on the wire. Never leak an exchange's own dialect
 
 - Isolated margin balances are **per pair**, not account-wide. `AccountBalance` takes an optional `product_id` to scope the lookup; accounts without that key (Coinbase's) match regardless.
 - An isolated pair starts empty — `transfer_in` before trading it, or orders fail on insufficient balance.
+- **Shorts have a minimum borrow size.** Below it Binance returns `-11007 "Exceeding the maximum borrowable limit"`, which names the opposite bound and is badly misleading. Verified live: a short borrowing 0.00006 BTC was rejected while `maxBorrowable` reported 0.00495 BTC; 0.00019 BTC succeeded. The minimum is not published in `exchangeInfo`, so a strategy sizing shorts off a small balance can emit orders that can never fill.
+- **You cannot always sell back what you just bought.** Buy fees are taken in the base asset, so a buy sized near `minNotional` leaves you holding slightly less than you ordered; flooring that to `stepSize` can drop the sell under `minNotional` and fail with `-1013 Filter failure: NOTIONAL`. Size entries with headroom over the floor, not at it.
+- **Binance's real liquidation price is not the backtest's 2x entry.** Verified live: a short entered at ~78,266 with 42 USDT of collateral reported `liquidatePrice` 290,022 — the model's 2x rule (156,532) only corresponds to a short whose notional is the *entire* isolated wallet. Read `IsolatedRisk.liquidation_price()` for the real number.
 - `Ledger`/`Backtest` charge **no borrow interest**, but Binance does, hourly. Shorts held for days score better in the GA than they trade live. `IsolatedRisk` exposes the exchange's real `marginLevel`/`liquidatePrice`; prefer those over `IsolatedMargin`'s 2×-entry approximation.
 
 ## Code Style

@@ -518,6 +518,14 @@ class BinanceAdapter:
         )
 
     # ── Orders: shorts (MARGIN_BUY borrows, AUTO_REPAY settles) ────────
+    #
+    # Binance enforces a MINIMUM borrow per asset, and a short that would
+    # borrow less than it is rejected with -11007 "Exceeding the maximum
+    # borrowable limit" — the message names the wrong bound entirely.
+    # Verified live on BTCUSDT: borrowing 0.00006 BTC was rejected while
+    # maxBorrowable reported 0.00495; 0.00019 BTC went through untouched.
+    # A short must therefore clear BOTH the pair's minNotional and the base
+    # asset's minimum borrow, and the second is not in exchangeInfo.
 
     async def market_short(
         self,
