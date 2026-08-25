@@ -20,6 +20,12 @@ class FakeAdapter:
     async def get_accounts(self, limit: int = 250) -> list[dict]:
         return self._accounts
 
+    def max_candles_per_request(self) -> int:
+        return 300
+
+    def name(self) -> str:
+        return "coinbase"
+
 
 class _FixedActionStrategy:
     def __init__(self, actions: list[Action]) -> None:

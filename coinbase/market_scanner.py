@@ -27,8 +27,8 @@ from typing import Optional
 
 import pandas as pd
 
-from coinbase.coinbase_adapter import CoinbaseAdapter
-from coinbase.credentials_file import CredentialsFile
+from exchange.adapter import ExchangeAdapter
+from exchange.selection import ConfiguredExchange
 
 
 # ── Configuration ──────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ class Snapshot:
 
 
 async def fetch_snapshot(
-    adapter: CoinbaseAdapter,
+    adapter: ExchangeAdapter,
     pair: str,
     granularity: str,
     n_candles: int,
@@ -224,7 +224,14 @@ def build_reference_times(args: argparse.Namespace) -> list[int]:
 # ── Entry point ────────────────────────────────────────────────────────
 
 def parse_args(args_in) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Coinbase market scanner with RSI/MACD/BB")
+    p = argparse.ArgumentParser(description="Market scanner with RSI/MACD/BB")
+    p.add_argument(
+        "--exchange", "-e",
+        default="coinbase",
+        choices=["coinbase", "binance"],
+        help="Which exchange to scan (default: coinbase). Pair names stay canonical "
+             "('BTC-USDC') either way.",
+    )
     p.add_argument(
         "--granularity", "-g",
         default="THIRTY_MINUTE",
@@ -235,7 +242,7 @@ def parse_args(args_in) -> argparse.Namespace:
         "--candles", "-n",
         type=int,
         default=100,
-        help="Number of candles to fetch per pair (default: 100, max: 300)",
+        help="Number of candles to fetch per pair (default: 100; max 300 on coinbase, 1000 on binance)",
     )
     p.add_argument(
         "--pairs", "-p",
@@ -267,11 +274,10 @@ def parse_args(args_in) -> argparse.Namespace:
 
 
 async def main(args_in) -> None:
-    args        = parse_args(args_in)
-    ref_times   = build_reference_times(args)
-    credentials = CredentialsFile().credentials()
+    args      = parse_args(args_in)
+    ref_times = build_reference_times(args)
 
-    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
+    async with ConfiguredExchange({"data": {"exchange": args.exchange}}).adapter() as adapter:
         for ref_time in ref_times:
             tasks     = [fetch_snapshot(adapter, p, args.granularity, args.candles, ref_time) for p in args.pairs]
             snapshots = await asyncio.gather(*tasks)

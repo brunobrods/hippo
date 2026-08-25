@@ -2,10 +2,9 @@ from pathlib import Path
 
 from exchange.credentials_file import Credentials, YamlCredentialsFile
 
-# Fixed, outside any git checkout/worktree — every worktree of this repo
-# shares one real credentials file instead of each needing its own gitignored
-# coinbase/credentials.py copy.
-DEFAULT_PATH = Path.home() / ".coinbase" / "credentials.yaml"
+# Fixed, outside any git checkout/worktree — every worktree of this repo shares
+# one real credentials file. Mirrors coinbase.credentials_file.DEFAULT_PATH.
+DEFAULT_PATH = Path.home() / ".binance" / "credentials.yaml"
 
 
 class CredentialsFile:

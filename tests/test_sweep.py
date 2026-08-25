@@ -24,6 +24,12 @@ class FakeAdapter:
     async def get_product_candles(self, product_id: str, start: int, end: int, granularity: str) -> list[dict]:
         return self._candles
 
+    def max_candles_per_request(self) -> int:
+        return 300
+
+    def name(self) -> str:
+        return "coinbase"
+
 
 def _candle(start: int, close: float) -> dict:
     return {"start": str(start), "close": str(close), "high": str(close), "low": str(close), "volume": "1.0"}

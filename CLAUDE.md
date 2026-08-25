@@ -6,7 +6,8 @@ See @WORKFLOW.md for process rules (when to ask clarifying questions, when to sp
 
 ## Project
 
-Async Python toolkit for the Coinbase Advanced Trade REST API. Python 3.11+.
+Async Python toolkit for the Coinbase Advanced Trade REST API and Binance
+isolated margin. Python 3.11+.
 
 ## Setup
 
@@ -17,8 +18,8 @@ pip install -r requirements.txt
 git config core.hooksPath .githooks  # see "Branching" below — not automatic
 ```
 
-Credentials go in `~/.coinbase/credentials.yaml` (outside the repo — shared across
-every worktree of this checkout, never committed):
+Credentials go in `~/.coinbase/credentials.yaml` and `~/.binance/credentials.yaml`
+(outside the repo — shared across every worktree of this checkout, never committed):
 ```yaml
 api_key: "organizations/<org_id>/apiKeys/<key_id>"
 api_secret: |
@@ -28,6 +29,16 @@ api_secret: |
 ```
 Keys created at <https://portal.cdp.coinbase.com/>. Loaded via `CredentialsFile` in
 `coinbase/credentials_file.py`.
+
+Binance uses HMAC-SHA256 with a plain shared secret, so both fields are ordinary
+strings:
+```yaml
+api_key:    "<64-char key>"
+api_secret: "<64-char secret>"
+```
+Keys created at <https://www.binance.com/en/my/settings/api-management> with
+**Enable Margin** + **Enable Spot & Margin Trading**. Loaded via `CredentialsFile`
+in `binance/credentials_file.py`; both share `exchange/credentials_file.py`.
 
 ## Branching
 
@@ -51,14 +62,16 @@ named 'coinbase'`, since Python only adds the script's own directory to `sys.pat
 not the repo root.
 
 ```bash
-# Market scanner — live snapshot
+# Market scanner — live snapshot (--exchange coinbase|binance)
 python -m coinbase.market_scanner
+python -m coinbase.market_scanner --exchange binance --pairs BTC-USDC
 python -m coinbase.market_scanner --granularity ONE_HOUR --candles 200 --pairs BTC-USDC ETH-USDC
 python -m coinbase.market_scanner --at 2026-05-22T14:30
 python -m coinbase.market_scanner --week --step 6
 
-# Adapter smoke test (live — requires trade:read_write key)
-python -m coinbase.coinbase_adapter
+# Adapter smoke tests (live — no sandbox on either exchange)
+python -m coinbase.coinbase_adapter   # requires trade:read_write key
+python -m binance.binance_adapter     # requires margin-enabled key + funded isolated wallet
 
 # Tests
 pytest
@@ -67,10 +80,29 @@ pytest tests/test_config.py   # single file
 
 ## Architecture
 
+Two exchanges behind one contract. `exchange/adapter.py` defines the
+`ExchangeAdapter` Protocol; the GA pipeline, live/paper runs and scanner are all
+typed against it, never against a concrete adapter.
+
+**Canonical formats** — product IDs, granularities and timestamps stay in
+Coinbase's vocabulary everywhere (`"BTC-USDC"`, `"SIX_HOUR"`, UNIX seconds).
+Each adapter translates on the wire. Never leak an exchange's own dialect
+(`BTCUSDC`, `6h`, milliseconds) past its adapter boundary.
+
+- `exchange/adapter.py` — `ExchangeAdapter` Protocol + `ExchangeError` base. `CoinbaseError` and `BinanceError` both subclass it, so shared code catches the base.
+- `exchange/selection.py` — `ConfiguredExchange` builds the adapter named by `data.exchange` in `config.yaml`. Adapter imports are deferred inside the method to avoid an import cycle.
+- `exchange/credentials_file.py` — shared YAML parsing; the per-exchange modules own only the default path.
+- `binance/binance_adapter.py` — `BinanceAdapter`, mirroring `CoinbaseAdapter`'s surface over `/sapi/v1/margin/*`. Auth via HMAC-SHA256 over the exact encoded query string. Every order carries `isIsolated=TRUE`. Longs use `sideEffectType=NO_SIDE_EFFECT` (nothing borrowed — economically a spot buy); `market_short`/`limit_short` use `MARGIN_BUY` and covers use `AUTO_REPAY`. Amounts are strings here too.
 - `coinbase/coinbase_adapter.py` — `CoinbaseAdapter` async context manager. Auth via per-request ES256 JWTs (2-min TTL). All order amount fields must be **strings** — Coinbase rejects floats.
 - `coinbase/market_scanner.py` — fetches OHLCV candles concurrently via `asyncio.gather`, computes RSI (EWM, 48-period) / MACD (12/26/9) / Bollinger (20-period ±2σ) using pandas, prints a snapshot table.
 - `coinbase/strategy.py` — stub; `Strategy.onTimer()` not yet implemented.
-- `coinbase/credentials_file.py` — `CredentialsFile` loads `~/.coinbase/credentials.yaml`. No sandbox exists for Coinbase Advanced Trade — all testing is live.
+- `coinbase/credentials_file.py` — `CredentialsFile` loads `~/.coinbase/credentials.yaml`. No sandbox exists for Coinbase Advanced Trade, and Binance's spot testnet does not serve margin endpoints — all testing is live.
+
+### Margin caveats
+
+- Isolated margin balances are **per pair**, not account-wide. `AccountBalance` takes an optional `product_id` to scope the lookup; accounts without that key (Coinbase's) match regardless.
+- An isolated pair starts empty — `transfer_in` before trading it, or orders fail on insufficient balance.
+- `Ledger`/`Backtest` charge **no borrow interest**, but Binance does, hourly. Shorts held for days score better in the GA than they trade live. `IsolatedRisk` exposes the exchange's real `marginLevel`/`liquidatePrice`; prefer those over `IsolatedMargin`'s 2×-entry approximation.
 
 ## Code Style
 
@@ -224,8 +256,13 @@ Write `pytest` tests for every new class. Place them in `tests/` mirroring the
 package (e.g. `tests/test_coinbase_adapter.py`). Mock `aiohttp.ClientSession`
 for unit tests; use `pytest-asyncio` for async test methods.
 
-### Coinbase specifics
+### Exchange specifics
 
-All price and size values sent to the API must be strings — Coinbase rejects
-floats. Use a `SnappedPrice` (or equivalent) object to enforce rounding before
-any order is placed.
+All price and size values sent to either API must be strings — both reject
+floats. Snap to the venue's increment before placing an order, using a snapping
+**object**: `SnappedValue` for Binance (`tickSize` / `stepSize`, whose own decimal
+text carries the precision). Coinbase's `snap_to_increment` is still a free
+function — it is the "Wrong — utility function" example above, and ROADMAP tracks
+replacing it with a `SnappedPrice`; follow `SnappedValue`'s shape for new code
+rather than copying it. Binance additionally rejects anything under the pair's
+`minNotional`.

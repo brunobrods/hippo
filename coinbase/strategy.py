@@ -2,10 +2,10 @@ import asyncio
 import time
 from typing import Optional
 
-from coinbase.coinbase_adapter import CoinbaseAdapter
 from coinbase.ga.market_data_processor import AccountBalance, HistoricalMarketData, IndicatorPeriods
 from coinbase.market_scanner import GRANULARITY_SECONDS
 from coinbase.trading_strategy import Decision, Ledger, Strategy
+from exchange.adapter import ExchangeAdapter
 
 
 # ── Live row ─────────────────────────────────────────────────────────────
@@ -18,7 +18,7 @@ from coinbase.trading_strategy import Decision, Ledger, Strategy
 class LiveMarketRow:
     def __init__(
         self,
-        adapter: CoinbaseAdapter,
+        adapter: ExchangeAdapter,
         pair: str,
         granularity: str,
         periods: IndicatorPeriods,
@@ -31,6 +31,9 @@ class LiveMarketRow:
         self._periods            = periods
         self._normalized_columns = normalized_columns
         self._lookback_candles   = lookback_candles
+
+    def pair(self) -> str:
+        return self._pair
 
     async def latest(self) -> dict[str, float]:
         end   = int(time.time())
@@ -49,7 +52,7 @@ class LiveMarketRow:
 class LiveTradingRun:
     def __init__(
         self,
-        adapter: CoinbaseAdapter,
+        adapter: ExchangeAdapter,
         market_row: LiveMarketRow,
         strategy: Strategy,
         quote_currency: str,
@@ -63,12 +66,17 @@ class LiveTradingRun:
         self._ledger         = Ledger(0.0)
 
     # Decides what the strategy would do right now — it does not place a real
-    # order. Wiring a Decision to actual CoinbaseAdapter order execution is a
-    # deliberately separate step (this API has no sandbox to test against).
+    # order. Wiring a Decision to actual adapter order execution is a
+    # deliberately separate step (neither exchange offers a sandbox for these
+    # endpoints, so a mistake here trades real funds).
     async def on_timer(self) -> Decision:
+        # Scoped to the traded pair: on Binance isolated margin the quote
+        # balance lives in that pair's own wallet, not an account-wide one.
         row, balance = await asyncio.gather(
             self._market_row.latest(),
-            AccountBalance(self._adapter, self._quote_currency).available(),
+            AccountBalance(
+                self._adapter, self._quote_currency, self._market_row.pair(),
+            ).available(),
         )
         # Same order as Backtest.run(): a position carried in from the previous
         # tick is liquidation-checked against this candle's range before a new

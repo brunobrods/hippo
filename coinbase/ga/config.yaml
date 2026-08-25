@@ -1,9 +1,15 @@
 # GA crypto trading module — configuration.
 # Product IDs and granularities follow Coinbase Advanced Trade's own format
-# (e.g. "BTC-USDC", "ONE_HOUR") rather than generic "BTC/USDT" / "1h" strings,
-# since CoinbaseAdapter is called directly with these values.
+# (e.g. "BTC-USDC", "ONE_HOUR") rather than generic "BTC/USDT" / "1h" strings.
+# These are canonical across the codebase — BinanceAdapter translates them to
+# "BTCUSDC" / "6h" on the wire, so the same config drives either exchange.
 
 data:
+  # coinbase | binance. Binance trades isolated margin: longs are sent with
+  # sideEffectType NO_SIDE_EFFECT (nothing borrowed, so economically identical
+  # to a Coinbase spot buy), shorts auto-borrow via MARGIN_BUY and cover with
+  # AUTO_REPAY. Credentials come from ~/.coinbase/ or ~/.binance/ accordingly.
+  exchange: "coinbase"
   # BTC over 2024-04 -> 2026-08 deliberately: both halves of the split contain
   # bull AND bear quarters (test half is 3 of each), unlike the previous
   # FET 2025-06 -> 2026-07 window whose test half held zero bull quarters and
