@@ -161,6 +161,8 @@ def test_kline_row_produces_the_keys_the_indicator_frame_reads():
 def _isolated_pair(symbol: str = "BTCUSDC", free_base: str = "0.5", free_quote: str = "100") -> dict:
     return {
         "symbol":     symbol,
+        "isolatedCreated": True,
+        "enabled":         True,
         "marginLevel": "3.5",
         "liquidatePrice": "41000.0",
         "baseAsset":  {"asset": "BTC", "free": free_base, "locked": "0.1",
@@ -529,6 +531,27 @@ async def test_an_untraded_isolated_pair_raises_rather_than_returning_nothing():
     session = FakeSession({"assets": []})
 
     with pytest.raises(BinanceError, match="transfer funds in first"):
+        await _adapter(session).get_isolated_account("BTC-USDC")
+
+
+@pytest.mark.asyncio
+async def test_a_never_created_pairs_placeholder_row_raises_instead_of_reassuring():
+    # Verified live: Binance answers for a pair that does not exist with a full
+    # row whose risk fields read as healthy, not with an empty list.
+    session = FakeSession({"assets": [{
+        "symbol": "BTCUSDC",
+        "isolatedCreated": False,
+        "enabled": False,
+        "tradeEnabled": False,
+        "marginLevel": "999",
+        "liquidatePrice": "0",
+        "baseAsset":  {"asset": "BTC", "free": "0", "locked": "0",
+                       "borrowed": "0", "interest": "0", "netAsset": "0"},
+        "quoteAsset": {"asset": "USDC", "free": "0", "locked": "0",
+                       "borrowed": "0", "interest": "0", "netAsset": "0"},
+    }]})
+
+    with pytest.raises(BinanceError, match="never been created"):
         await _adapter(session).get_isolated_account("BTC-USDC")
 
 

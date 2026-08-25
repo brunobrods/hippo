@@ -687,7 +687,21 @@ class BinanceAdapter:
             raise BinanceError(
                 0, result, f"No isolated margin account for {product_id} — transfer funds in first"
             )
-        return assets[0]
+        pair = assets[0]
+        # A pair that was never created still answers, with a placeholder row
+        # rather than an empty list — isolatedCreated/enabled/tradeEnabled all
+        # false, and marginLevel "999" / liquidatePrice "0". Those risk numbers
+        # read as a perfectly healthy account, so existence has to be taken from
+        # the flag. Verified live: BTCUSDC returned exactly this shape while
+        # myTrades and openOrders rejected the same symbol with -11001.
+        if not pair.get("isolatedCreated", False):
+            raise BinanceError(
+                0, pair,
+                f"No isolated margin account for {product_id} — it has never been "
+                f"created. Transfer funds in (transfer_in) to create it; its "
+                f"marginLevel/liquidatePrice are placeholders until then.",
+            )
+        return pair
 
     async def get_order(self, product_id: str, order_id: str) -> dict:
         return await self._get(
