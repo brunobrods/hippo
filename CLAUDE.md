@@ -71,7 +71,9 @@ python -m coinbase.market_scanner --week --step 6
 
 # Adapter smoke tests (live — no sandbox on either exchange)
 python -m coinbase.coinbase_adapter   # requires trade:read_write key
-python -m binance.binance_adapter     # requires margin-enabled key + funded isolated wallet
+python -m binance.binance_adapter            # defaults to BTC-USDC
+python -m binance.binance_adapter BTC-USDT   # any isolated pair
+# both need a margin-enabled key and QUOTE currency in that pair's isolated wallet
 
 # Tests
 pytest

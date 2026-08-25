@@ -161,14 +161,20 @@ these endpoints (Binance's spot testnet does not serve margin).
 ```bash
 python -m coinbase.coinbase_adapter     # requires trade:read_write
 python -m binance.binance_adapter       # requires margin trading enabled
+python -m binance.binance_adapter BTC-USDT   # or any other isolated pair
 ```
 
-The Binance smoke test needs funds in the `BTCUSDC` **isolated** wallet — an
-isolated pair starts empty and cannot trade until you move money in:
+The Binance smoke test needs **quote currency** in that pair's **isolated**
+wallet. An isolated pair starts empty and cannot trade until you move money in,
+and the test places a BUY — holding only the base asset is not enough:
 
 ```python
-await adapter.transfer_in("BTC-USDC", "USDC", "50")
+await adapter.transfer_in("BTC-USDT", "USDT", "50")
 ```
+
+A pair that was never created still answers `get_isolated_account` with a
+placeholder row whose `marginLevel` reads 999; the adapter raises on it rather
+than reporting a healthy account that does not exist.
 
 ---
 

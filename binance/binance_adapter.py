@@ -66,6 +66,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import sys
 import time
 import uuid
 from typing import Any, Optional
@@ -922,23 +923,28 @@ class SnappedValue:
 # Run (as a module, from the repo root — `python binance/binance_adapter.py`
 # directly fails with ModuleNotFoundError: No module named 'binance', since
 # Python only adds the script's own directory to sys.path, not the repo root):
-#   python -m binance.binance_adapter
+#   python -m binance.binance_adapter              # defaults to BTC-USDC
+#   python -m binance.binance_adapter BTC-USDT     # any isolated pair
 #
-# Places a passive limit BUY on BTC-USDC 2% below best bid, confirms it's
-# open, then cancels it.
+# Places a passive limit BUY 2% below best bid, confirms it's open, then
+# cancels it.
 #
 # WARNING: Binance's spot testnet does not serve margin endpoints, so this
 #          runs against live. Use a key with margin trading enabled, keep
-#          amounts tiny, and transfer funds into the BTCUSDC isolated wallet
-#          first (adapter.transfer_in) or the order will be rejected for
+#          amounts tiny, and transfer QUOTE currency into that pair's isolated
+#          wallet first (adapter.transfer_in) — the order is a BUY, so holding
+#          only the base asset is not enough and it will be rejected for
 #          insufficient balance.
 
-async def _smoke_test() -> None:
+DEFAULT_SMOKE_TEST_PRODUCT = "BTC-USDC"
+
+
+async def _smoke_test(product: str = DEFAULT_SMOKE_TEST_PRODUCT) -> None:
     from binance.credentials_file import CredentialsFile
 
     credentials = CredentialsFile().credentials()
 
-    PRODUCT = "BTC-USDC"
+    PRODUCT = product
 
     async with BinanceAdapter(credentials.api_key, credentials.api_secret) as adapter:
 
@@ -1022,4 +1028,4 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    asyncio.run(_smoke_test())
+    asyncio.run(_smoke_test(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SMOKE_TEST_PRODUCT))
