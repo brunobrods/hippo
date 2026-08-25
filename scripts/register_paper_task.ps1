@@ -55,7 +55,9 @@ New-Item -ItemType Directory -Force -Path (Split-Path $LogFile) | Out-Null
 
 # Task Scheduler captures no stdout of its own, so the tick's output is
 # redirected to a log file. `*>>` appends every stream, errors included.
-$inner = "Set-Location '$RepoRoot'; & '$Python' -m coinbase.ga.paper_trading *>> '$LogFile'"
+# PYTHONIOENCODING is set because the task's console runs under the system
+# codepage, which mangles the non-ASCII characters in the tick's output.
+$inner = "`$env:PYTHONIOENCODING='utf-8'; Set-Location '$RepoRoot'; & '$Python' -m coinbase.ga.paper_trading *>> '$LogFile'"
 $action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$inner`"" `

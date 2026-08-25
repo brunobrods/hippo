@@ -53,6 +53,7 @@ from coinbase.ga.market_data_processor import MarketDataConfig
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
     GaStrategy,
+    StrategyConfig,
     StrategyConfigFile,
     ValidatedStrategyConfig,
     ValidatedWeightKeys,
@@ -88,6 +89,37 @@ class PaperConfigFile:
                 "state_filepath", str(GA_RESULTS_ROOT / "paper_state.json"),
             ),
         )
+
+
+# ── Trained hyperparameters ────────────────────────────────────────────
+# A saved strategy carries the thresholds it was trained and scored under, and
+# those are the ones that make its recorded performance mean anything. Reading
+# them from config.yaml instead lets the two drift apart silently — a sweep
+# varies thresholds per run, so a genome lifted out of one will usually
+# disagree with whatever config.yaml happens to hold now.
+#
+# config.yaml still supplies what is genuinely a run-time choice
+# (starting_balance) and what the frame is built from (indicators,
+# weight_keys); the genome's own hyperparameters win over the rest.
+
+class TrainedStrategyConfig:
+    def __init__(self, raw_config: dict[str, Any], hyperparameters: dict[str, Any]) -> None:
+        self._raw_config      = raw_config
+        self._hyperparameters = hyperparameters
+
+    def config(self) -> StrategyConfig:
+        section = {**(self._raw_config.get("strategy") or {}), **self._hyperparameters}
+        return ValidatedStrategyConfig(StrategyConfigFile({"strategy": section}).config()).config()
+
+    # Keys where the saved strategy and config.yaml disagree — surfaced so a
+    # divergence is visible rather than silently resolved.
+    def divergences(self) -> dict[str, tuple[Any, Any]]:
+        section = self._raw_config.get("strategy") or {}
+        return {
+            key: (section[key], value)
+            for key, value in self._hyperparameters.items()
+            if key in section and section[key] != value
+        }
 
 
 # ── State ──────────────────────────────────────────────────────────────
@@ -245,9 +277,11 @@ class ConsoleTickReport:
         self._pair    = pair
 
     def emit(self) -> None:
+        # Deliberately ASCII: this goes to a log file that Task Scheduler writes
+        # under the system codepage and that any tool may read back.
         if not self._outcome.acted:
             print(
-                f"no new closed candle (last acted {self._outcome.candle_start}) — "
+                f"no new closed candle (last acted {self._outcome.candle_start}) | "
                 f"balance {self._outcome.balance:.2f} equity {self._outcome.equity:.2f}"
             )
             return
@@ -270,14 +304,20 @@ async def _main() -> None:
     paper_config    = PaperConfigFile(raw_config).config()
     market_config   = MarketDataConfig(raw_config)
     window          = market_config.window()
-    strategy_config = ValidatedStrategyConfig(StrategyConfigFile(raw_config).config()).config()
     output_config   = OutputConfigFile(raw_config).config()
     weight_keys     = ValidatedWeightKeys(
         WeightKeysConfig(raw_config).keys(), market_config.normalized_columns(),
     ).keys()
 
+    saved           = StrategyJsonFile(output_config.strategy_filepath)
+    trained         = TrainedStrategyConfig(raw_config, saved.hyperparameters())
+    strategy_config = trained.config()
+
+    for key, (from_config, from_strategy) in trained.divergences().items():
+        print(f"note: {key} config.yaml={from_config} -> using trained {from_strategy}")
+
     strategy = GaStrategy(
-        Genome(StrategyJsonFile(output_config.strategy_filepath).weights()),
+        Genome(saved.weights()),
         strategy_config,
         weight_keys + (POSITION_PNL_KEY,),
     )

@@ -299,3 +299,64 @@ def test_the_current_candle_boundary_is_a_multiple_of_the_granularity():
 
     assert boundary % 3600 == 0
     assert boundary <= int(time.time())
+
+
+# ── TrainedStrategyConfig ────────────────────────────────────────────
+
+def _raw_config(**strategy) -> dict:
+    base = {
+        "buy_threshold": 0.6,
+        "sell_threshold": 0.4,
+        "position_size_pct": 0.6,
+        "starting_balance": 10000.0,
+        "allow_short": True,
+        "short_entry_threshold": 0.25,
+        "short_exit_threshold": 0.45,
+    }
+    base.update(strategy)
+    return {"strategy": base}
+
+
+def test_the_saved_genomes_thresholds_win_over_config_yaml():
+    from coinbase.ga.paper_trading import TrainedStrategyConfig
+
+    config = TrainedStrategyConfig(_raw_config(), {"short_entry_threshold": 0.3}).config()
+
+    assert config.short_entry_threshold == pytest.approx(0.3)
+
+
+def test_config_yaml_still_supplies_the_starting_balance():
+    from coinbase.ga.paper_trading import TrainedStrategyConfig
+
+    # starting_balance is a run-time choice, not something a genome carries.
+    config = TrainedStrategyConfig(
+        _raw_config(starting_balance=250.0), {"short_entry_threshold": 0.3},
+    ).config()
+
+    assert config.starting_balance == pytest.approx(250.0)
+
+
+def test_divergences_name_both_sides():
+    from coinbase.ga.paper_trading import TrainedStrategyConfig
+
+    diverged = TrainedStrategyConfig(
+        _raw_config(), {"short_entry_threshold": 0.3, "buy_threshold": 0.6},
+    ).divergences()
+
+    assert diverged == {"short_entry_threshold": (0.25, 0.3)}
+
+
+def test_no_divergence_when_the_two_agree():
+    from coinbase.ga.paper_trading import TrainedStrategyConfig
+
+    assert TrainedStrategyConfig(_raw_config(), {"buy_threshold": 0.6}).divergences() == {}
+
+
+def test_a_trained_config_that_contradicts_itself_is_rejected():
+    from coinbase.ga.paper_trading import TrainedStrategyConfig
+
+    # short_exit below short_entry would cover a short on the candle it opened.
+    with pytest.raises(ValueError):
+        TrainedStrategyConfig(
+            _raw_config(), {"short_entry_threshold": 0.5, "short_exit_threshold": 0.1},
+        ).config()
