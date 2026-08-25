@@ -98,6 +98,9 @@ class TrainedStrategy:
                 "sell_threshold":        self._config.sell_threshold,
                 "position_size_pct":     self._config.position_size_pct,
                 "unwind_at_entry_price": self._config.unwind_at_entry_price,
+                "allow_short":           self._config.allow_short,
+                "short_entry_threshold": self._config.short_entry_threshold,
+                "short_exit_threshold":  self._config.short_exit_threshold,
             },
         }
 
@@ -234,7 +237,10 @@ class RunHeader:
             f"buy_threshold={self._strategy_config.buy_threshold:.2f} "
             f"sell_threshold={self._strategy_config.sell_threshold:.2f} "
             f"position_size_pct={self._strategy_config.position_size_pct:.2f} "
-            f"unwind_at_entry_price={self._strategy_config.unwind_at_entry_price}",
+            f"unwind_at_entry_price={self._strategy_config.unwind_at_entry_price} "
+            f"allow_short={self._strategy_config.allow_short} "
+            f"short_entry={self._strategy_config.short_entry_threshold:.2f} "
+            f"short_exit={self._strategy_config.short_exit_threshold:.2f}",
             f"population={self._ga_config.population_size} generations={self._ga_config.generations} "
             f"mutation_rate={self._ga_config.mutation_rate} crossover_rate={self._ga_config.crossover_rate} "
             f"tournament_size={self._ga_config.tournament_size} elitism_count={self._ga_config.elitism_count} "

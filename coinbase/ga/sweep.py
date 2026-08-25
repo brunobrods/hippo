@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -149,20 +150,23 @@ class Sweep:
 
 
 # ── Entry point ────────────────────────────────────────────────────────
-# Run (as a module, from the repo root — a direct script path fails with
-# ModuleNotFoundError: No module named 'coinbase'):
-#   python -m coinbase.ga.sweep
-# Trains one full GA strategy per (axis value, seed) point in sweep.yaml,
-# holding every other parameter at base_config's value (one-factor-at-a-time).
-# Each point is an ordinary TrainingRun — same experiments/<run_id>/ history
-# and experiments/index.csv leaderboard row as a single `main.py` run, so
-# comparing sweep results needs no sweep-specific tooling.
+# Run:  python coinbase/ga/sweep.py [sweep_config_path]
+# Trains one full GA strategy per (axis value, seed) point in sweep.yaml (or
+# the sweep config passed as the first CLI argument), holding every other
+# parameter at base_config's value (one-factor-at-a-time). Each point is an
+# ordinary TrainingRun — same experiments/<run_id>/ history and
+# experiments/index.csv leaderboard row as a single `main.py` run, so
+# comparing sweep results needs no sweep-specific tooling. Passing a
+# narrower sweep config (e.g. a subset of axes/values) is also how a large
+# sweep gets split into batches that finish within one process's lifetime —
+# already-recorded points in experiments/ are unaffected either way.
 
 async def _main() -> None:
     from coinbase.credentials_file import CredentialsFile
 
+    sweep_config_path = sys.argv[1] if len(sys.argv) > 1 else "coinbase/ga/sweep.yaml"
     credentials  = CredentialsFile().credentials()
-    sweep_config = SweepConfigFile(ConfigFile("coinbase/ga/sweep.yaml").raw())
+    sweep_config = SweepConfigFile(ConfigFile(sweep_config_path).raw())
     base_config  = ConfigFile(sweep_config.base_config_path()).raw()
     plan         = SweepPlan(base_config, sweep_config.axes(), sweep_config.seeds())
     plan.ensure_scratch_directory()

@@ -33,6 +33,14 @@ strategy:
   # window's last market price, so a strategy isn't penalized or credited just
   # for where the training/test window happened to cut off mid-hold.
   unwind_at_entry_price: true
+  # Shorting is modelled as a 1x isolated margin account: a position's notional
+  # is capped at the quote balance (position_size_pct <= 1.0) and is backed by
+  # exactly that much margin, so a short is liquidated if price doubles against
+  # it. Coinbase Advanced Trade has no short side — this is a Binance-style
+  # margin model, and only the backtest simulates it today.
+  allow_short: true
+  short_entry_threshold: 0.25  # signal_score below this opens a short
+  short_exit_threshold: 0.40   # signal_score above this covers an open short
   indicators:
     sma_short_period: 9
     sma_long_period: 20

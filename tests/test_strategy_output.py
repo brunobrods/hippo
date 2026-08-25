@@ -156,6 +156,9 @@ def test_trained_strategy_as_dict():
         "sell_threshold": 0.4,
         "position_size_pct": 0.10,
         "unwind_at_entry_price": True,
+        "allow_short": False,
+        "short_entry_threshold": 0.25,
+        "short_exit_threshold": 0.40,
     }
 
 
@@ -225,6 +228,9 @@ def test_strategy_json_round_trips_through_disk(tmp_path):
         "sell_threshold": 0.4,
         "position_size_pct": 0.10,
         "unwind_at_entry_price": True,
+        "allow_short": False,
+        "short_entry_threshold": 0.25,
+        "short_exit_threshold": 0.40,
     }
 
 
@@ -262,7 +268,10 @@ def test_run_header_lines_include_timestamp_window_and_config():
     lines = _run_header().lines()
     assert lines[0] == "=== run 2026-07-21T21:15:03+00:00 ==="
     assert lines[1] == "pair=FET-USDC granularity=TWO_HOUR window=2026-01-01..2026-07-01 test_split=0.5"
-    assert lines[2] == "buy_threshold=0.60 sell_threshold=0.40 position_size_pct=0.10 unwind_at_entry_price=True"
+    assert lines[2] == (
+        "buy_threshold=0.60 sell_threshold=0.40 position_size_pct=0.10 "
+        "unwind_at_entry_price=True allow_short=False short_entry=0.25 short_exit=0.40"
+    )
     assert lines[3] == (
         "population=20 generations=5 mutation_rate=0.2 crossover_rate=0.7 "
         "tournament_size=3 elitism_count=2 mutation_sigma=0.15 seed=42"
