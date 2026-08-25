@@ -8,6 +8,7 @@ from coinbase.ga.strategy_evaluator import (
     GaStrategy,
     POSITION_PNL_KEY,
     StrategyConfigFile,
+    ValidatedStrategyConfig,
     ValidatedWeightKeys,
     WeightKeysConfig,
 )
@@ -69,7 +70,7 @@ async def _main() -> None:
     raw_config      = ConfigFile("coinbase/ga/config.yaml").raw()
     market_config   = MarketDataConfig(raw_config)
     window          = market_config.window()
-    strategy_config = StrategyConfigFile(raw_config).config()
+    strategy_config = ValidatedStrategyConfig(StrategyConfigFile(raw_config).config()).config()
     output_config   = OutputConfigFile(raw_config).config()
     weight_keys     = ValidatedWeightKeys(
         WeightKeysConfig(raw_config).keys(), market_config.normalized_columns(),

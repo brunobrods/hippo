@@ -19,6 +19,7 @@ _INDEX_FIELDS = (
     "seed", "population_size", "generations", "mutation_rate", "crossover_rate",
     "tournament_size", "elitism_count", "mutation_sigma",
     "buy_threshold", "sell_threshold", "position_size_pct", "unwind_at_entry_price",
+    "allow_short", "short_entry_threshold", "short_exit_threshold",
     "gross_profit", "annualized_yield", "total_trades", "win_rate", "max_drawdown",
 )
 
@@ -124,6 +125,9 @@ class ExperimentRecord:
             "sell_threshold":        self.strategy_config.sell_threshold,
             "position_size_pct":     self.strategy_config.position_size_pct,
             "unwind_at_entry_price": self.strategy_config.unwind_at_entry_price,
+            "allow_short":           self.strategy_config.allow_short,
+            "short_entry_threshold": self.strategy_config.short_entry_threshold,
+            "short_exit_threshold":  self.strategy_config.short_exit_threshold,
             "gross_profit":          self.performance["gross_profit"],
             "annualized_yield":      self.performance["annualized_yield"],
             "total_trades":          self.performance["total_trades"],
@@ -139,11 +143,35 @@ class ExperimentIndex:
     def append(self, record: ExperimentRecord) -> None:
         ParentDirectory(self._filepath).ensure()
         is_new = self._create_exclusively()
+        if not is_new:
+            self.ensure_appendable()
         with open(self._filepath, "a", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=_INDEX_FIELDS)
             if is_new:
                 writer.writeheader()
             writer.writerow(record.as_row())
+
+    # The header is only ever written once, so appending rows built from a newer
+    # _INDEX_FIELDS would silently shift every value into the wrong column of an
+    # older file. Refuse instead, and say what to do about it. Public so a caller
+    # can check this up front rather than discovering it after a long training
+    # run has already finished — see TrainingRun.train().
+    def ensure_appendable(self) -> None:
+        if not os.path.exists(self._filepath):
+            return
+        with open(self._filepath, newline="") as handle:
+            existing = next(csv.reader(handle), [])
+        if not existing or tuple(existing) == _INDEX_FIELDS:
+            return
+        added   = [field for field in _INDEX_FIELDS if field not in existing]
+        dropped = [field for field in existing if field not in _INDEX_FIELDS]
+        raise ValueError(
+            f"{self._filepath} was written with a different set of columns "
+            f"({len(existing)} vs {len(_INDEX_FIELDS)}); appending would misalign it. "
+            f"Archive or delete it and a fresh index will be started. "
+            f"Added: {added or 'none'}. Dropped: {dropped or 'none'}. "
+            f"Reordered: {not added and not dropped}"
+        )
 
     def _create_exclusively(self) -> bool:
         # os.O_CREAT|os.O_EXCL is atomic — unlike an exists()-then-open() check,

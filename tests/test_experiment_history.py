@@ -128,3 +128,35 @@ def test_experiment_index_creates_missing_parent_directory(tmp_path):
     filepath = tmp_path / "nested" / "index.csv"
     ExperimentIndex(str(filepath)).append(_record())
     assert filepath.exists()
+
+
+def test_experiment_index_ensure_appendable_rejects_before_any_row_is_built(tmp_path):
+    # callable up front so a caller can fail fast, rather than discovering the
+    # mismatch only after a full training run has finished
+    filepath = tmp_path / "index.csv"
+    filepath.write_text("run_id,started_at,pair\nold-1,2026-01-01,BTC-USDC\n")
+
+    with pytest.raises(ValueError, match="misalign"):
+        ExperimentIndex(str(filepath)).ensure_appendable()
+
+
+def test_experiment_index_ensure_appendable_accepts_a_missing_file(tmp_path):
+    ExperimentIndex(str(tmp_path / "not-created-yet.csv")).ensure_appendable()
+
+
+def test_experiment_index_refuses_to_append_to_an_older_column_set(tmp_path):
+    # the header is only written once, so appending newer rows to an index
+    # written with fewer columns would silently shift every value sideways
+    filepath = tmp_path / "index.csv"
+    filepath.write_text("run_id,started_at,pair\nold-1,2026-01-01,BTC-USDC\n")
+
+    with pytest.raises(ValueError, match="misalign"):
+        ExperimentIndex(str(filepath)).append(_record())
+
+
+def test_experiment_index_still_appends_when_the_header_matches(tmp_path):
+    filepath = tmp_path / "index.csv"
+    index    = ExperimentIndex(str(filepath))
+    index.append(_record("run-1"))
+    index.append(_record("run-2"))  # exercises the verify path on an unchanged schema
+    assert len(list(csv.DictReader(filepath.read_text().splitlines()))) == 2

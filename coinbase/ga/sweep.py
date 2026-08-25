@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,9 +60,12 @@ class DottedPathOverride:
         target = result
         keys   = self._path.split(".")
         for key in keys[:-1]:
-            # a YAML mapping whose every child is commented out (e.g. `output:`
-            # in config.yaml) parses to None, not {} — coerce it so overriding
-            # a path under it doesn't crash on 'NoneType' item assignment.
+            # A YAML mapping whose every child is commented out (e.g. a fully
+            # optional `output:` section) parses to None, not {} — treat a
+            # *present* key with that value as an empty section so overriding
+            # one of its paths doesn't crash on a section nobody has
+            # customized. A genuinely absent key still raises KeyError below,
+            # same as before.
             if target[key] is None:
                 target[key] = {}
             target = target[key]
@@ -146,20 +150,23 @@ class Sweep:
 
 
 # ── Entry point ────────────────────────────────────────────────────────
-# Run (as a module, from the repo root — a direct script path fails with
-# ModuleNotFoundError: No module named 'coinbase'):
-#   python -m coinbase.ga.sweep
-# Trains one full GA strategy per (axis value, seed) point in sweep.yaml,
-# holding every other parameter at base_config's value (one-factor-at-a-time).
-# Each point is an ordinary TrainingRun — same experiments/<run_id>/ history
-# and experiments/index.csv leaderboard row as a single `main.py` run, so
-# comparing sweep results needs no sweep-specific tooling.
+# Run:  python coinbase/ga/sweep.py [sweep_config_path]
+# Trains one full GA strategy per (axis value, seed) point in sweep.yaml (or
+# the sweep config passed as the first CLI argument), holding every other
+# parameter at base_config's value (one-factor-at-a-time). Each point is an
+# ordinary TrainingRun — same experiments/<run_id>/ history and
+# experiments/index.csv leaderboard row as a single `main.py` run, so
+# comparing sweep results needs no sweep-specific tooling. Passing a
+# narrower sweep config (e.g. a subset of axes/values) is also how a large
+# sweep gets split into batches that finish within one process's lifetime —
+# already-recorded points in experiments/ are unaffected either way.
 
 async def _main() -> None:
     from coinbase.credentials_file import CredentialsFile
 
+    sweep_config_path = sys.argv[1] if len(sys.argv) > 1 else "coinbase/ga/sweep.yaml"
     credentials  = CredentialsFile().credentials()
-    sweep_config = SweepConfigFile(ConfigFile("coinbase/ga/sweep.yaml").raw())
+    sweep_config = SweepConfigFile(ConfigFile(sweep_config_path).raw())
     base_config  = ConfigFile(sweep_config.base_config_path()).raw()
     plan         = SweepPlan(base_config, sweep_config.axes(), sweep_config.seeds())
     plan.ensure_scratch_directory()

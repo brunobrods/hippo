@@ -14,6 +14,7 @@ Async Python toolkit for the Coinbase Advanced Trade REST API. Python 3.11+.
 python -m venv .venv
 .venv\Scripts\Activate.ps1          # Windows PowerShell
 pip install -r requirements.txt
+git config core.hooksPath .githooks  # see "Branching" below — not automatic
 ```
 
 Credentials go in `~/.coinbase/credentials.yaml` (outside the repo — shared across
@@ -27,6 +28,20 @@ api_secret: |
 ```
 Keys created at <https://portal.cdp.coinbase.com/>. Loaded via `CredentialsFile` in
 `coinbase/credentials_file.py`.
+
+## Branching
+
+**Never commit directly to `master`.** Work lands through a branch and a pull
+request — create one with `git switch -c <name>` before the first commit.
+
+`.githooks/pre-commit` enforces this, and worktrees share the common `.git`
+directory so the single hook covers every worktree at once. Two caveats worth
+knowing:
+
+- It is **not** active until `git config core.hooksPath .githooks` has been run
+  in that clone (see Setup) — git will not pick up a tracked hook by itself.
+- A tracked hook only exists on branches that contain it, so it cannot protect
+  a branch whose own tree lacks the file.
 
 ## Commands
 

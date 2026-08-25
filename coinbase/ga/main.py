@@ -18,6 +18,7 @@ from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
     StrategyConfigFile,
     StrategyEvaluator,
+    ValidatedStrategyConfig,
     ValidatedWeightKeys,
     WeightKeysConfig,
 )
@@ -89,7 +90,7 @@ class TrainingRun:
     async def train(self) -> TrainingSummary:
         market_config   = MarketDataConfig(self._raw_config)
         window          = market_config.window()
-        strategy_config = StrategyConfigFile(self._raw_config).config()
+        strategy_config = ValidatedStrategyConfig(StrategyConfigFile(self._raw_config).config()).config()
         ga_config       = GaConfigFile(self._raw_config).config()
         output_config   = OutputConfigFile(self._raw_config).config()
         data            = self._raw_config["data"]
@@ -98,6 +99,10 @@ class TrainingRun:
         # before the expensive fetch/train below, rather than after a full
         # training run has already saved its results.
         git_commit = await GitCommitHash().value()
+        # Same reasoning: the index is only appended to at the very end, so an
+        # incompatible one would otherwise surface after a full evolution — and
+        # would abort every remaining point of a sweep along with it.
+        ExperimentIndex(output_config.index_filepath).ensure_appendable()
 
         frame = await HistoricalMarketData(
             self._adapter, window.pair, window.granularity, window.start, window.end,
@@ -163,9 +168,12 @@ class TrainingRun:
             performance     = performance.as_dict(),
         ))
 
-        reloaded         = StrategyJsonFile(output_config.strategy_filepath)
-        reloaded_fitness = test_evaluator.fitness(Genome(reloaded.weights()))
-        round_trip_matches = math.isclose(reloaded_fitness, test_yield, rel_tol=1e-9)
+        # Compares yield to yield, not fitness to yield: fitness deliberately
+        # departs from realized yield for a genome that never trades, so using
+        # it here would report a mismatch for a strategy that reloaded fine.
+        reloaded        = StrategyJsonFile(output_config.strategy_filepath)
+        reloaded_yield  = test_evaluator.annualized_yield(test_evaluator.result(Genome(reloaded.weights())))
+        round_trip_matches = math.isclose(reloaded_yield, test_yield, rel_tol=1e-9)
 
         return TrainingSummary(strategy_json, output_config.strategy_filepath, run_id, round_trip_matches)
 
