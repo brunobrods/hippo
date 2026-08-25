@@ -431,7 +431,10 @@ def snap_to_increment(value: float, increment: float) -> str:
 
 
 # ── Smoke test ─────────────────────────────────────────────────────────
-# Run:  python coinbase_adapter.py
+# Run (as a module, from the repo root — `python coinbase/coinbase_adapter.py`
+# directly fails with ModuleNotFoundError: No module named 'coinbase', since
+# Python only adds the script's own directory to sys.path, not the repo root):
+#   python -m coinbase.coinbase_adapter
 #
 # Places a passive limit BUY on BTC-USDC 2% below best bid,
 # confirms it's open, then cancels it.
@@ -440,14 +443,13 @@ def snap_to_increment(value: float, increment: float) -> str:
 #          Use a key with trade:read_write and keep amounts tiny.
 
 async def _smoke_test():
-    from credentials import api_key, api_secret
+    from coinbase.credentials_file import CredentialsFile
 
-    api_key    = api_key
-    api_secret = api_secret
+    credentials = CredentialsFile().credentials()
 
     PRODUCT = "BTC-USDC"
 
-    async with CoinbaseAdapter(api_key, api_secret) as adapter:
+    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
 
         # 1. Accounts
         print("\n=== Accounts ===")

@@ -1,0 +1,20 @@
+# GA crypto trading module — sweep configuration.
+# Defines one-factor-at-a-time parameter sweeps: each axis varies a single
+# dotted config.yaml path across its listed values, holding every other
+# parameter at base_config's value. Every (axis value, seed) pair becomes one
+# full TrainingRun, tracked in experiments/ like any other run.
+
+base_config: "coinbase/ga/config.yaml"
+
+# each axis value is trained once per seed listed here, for variance control
+seeds: [1, 2, 3, 4, 5]
+
+axes:
+  - path: "genetic_algorithm.mutation_rate"
+    values: [0.05, 0.1, 0.2, 0.4]
+  - path: "genetic_algorithm.population_size"
+    values: [50, 100, 200]
+  - path: "strategy.buy_threshold"
+    values: [0.5, 0.6, 0.7]
+  - path: "strategy.sell_threshold"
+    values: [0.3, 0.4, 0.5]

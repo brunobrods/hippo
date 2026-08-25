@@ -1,0 +1,38 @@
+#!/bin/sh
+# Refuse commits made directly on a protected branch.
+#
+# Work in this repo lands through a branch and a pull request — every git
+# worktree under .claude/worktrees/ already operates that way. The main
+# checkout had no such guard, which is how four commits ended up straight on
+# master. This closes that gap for every worktree at once: worktrees share the
+# common .git directory, so one hook here covers all of them.
+#
+# Enable with (once per clone, and once per new worktree is NOT needed):
+#     git config core.hooksPath .githooks
+
+protected="master main"
+
+# A detached HEAD means a rebase, cherry-pick, bisect or merge is in flight.
+# Those legitimately commit without being "on" a branch, so let them through.
+branch=$(git symbolic-ref --short --quiet HEAD) || exit 0
+
+for name in $protected; do
+    if [ "$branch" = "$name" ]; then
+        exec >&2
+        echo
+        echo "  Refusing to commit directly on '$branch'."
+        echo
+        echo "  This repo lands work through branches and pull requests."
+        echo "  Move onto a branch and commit there:"
+        echo
+        echo "      git switch -c <branch-name>"
+        echo "      git commit ..."
+        echo
+        echo "  Already staged? The staged changes are untouched — switching"
+        echo "  branches carries them across."
+        echo
+        exit 1
+    fi
+done
+
+exit 0

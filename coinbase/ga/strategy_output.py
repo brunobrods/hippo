@@ -1,9 +1,11 @@
 import dataclasses
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from coinbase.ga.config import GA_RESULTS_ROOT
 from coinbase.ga.ga_engine import GaConfig, Genome
 from coinbase.ga.strategy_evaluator import StrategyConfig
 from coinbase.trading_strategy import BacktestResult, Decision
@@ -16,6 +18,8 @@ class OutputConfig:
     strategy_filepath:    str
     log_filepath:         str
     dry_run_log_filepath: str
+    experiments_dir:      str
+    index_filepath:       str
 
 
 class OutputConfigFile:
@@ -23,11 +27,16 @@ class OutputConfigFile:
         self._raw = raw
 
     def config(self) -> OutputConfig:
-        section = self._raw["output"]
+        # `or {}`: a YAML mapping whose every child is commented out parses to
+        # None, not {} — every path here is meant to be optional in that case.
+        section          = self._raw.get("output") or {}
+        experiments_dir  = section.get("experiments_dir", str(GA_RESULTS_ROOT / "experiments"))
         return OutputConfig(
-            strategy_filepath    = section["strategy_filepath"],
-            log_filepath         = section["log_filepath"],
-            dry_run_log_filepath = section.get("dry_run_log_filepath", "./dry_run_log.txt"),
+            strategy_filepath    = section.get("strategy_filepath", str(GA_RESULTS_ROOT / "best_strategy.json")),
+            log_filepath         = section.get("log_filepath", str(GA_RESULTS_ROOT / "ga_run_log.txt")),
+            dry_run_log_filepath = section.get("dry_run_log_filepath", str(GA_RESULTS_ROOT / "dry_run_log.txt")),
+            experiments_dir      = experiments_dir,
+            index_filepath       = section.get("index_filepath", os.path.join(experiments_dir, "index.csv")),
         )
 
 
@@ -85,9 +94,13 @@ class TrainedStrategy:
         return {
             "weights": self._genome.weights(),
             "hyperparameters": {
-                "buy_threshold":     self._config.buy_threshold,
-                "sell_threshold":    self._config.sell_threshold,
-                "position_size_pct": self._config.position_size_pct,
+                "buy_threshold":         self._config.buy_threshold,
+                "sell_threshold":        self._config.sell_threshold,
+                "position_size_pct":     self._config.position_size_pct,
+                "unwind_at_entry_price": self._config.unwind_at_entry_price,
+                "allow_short":           self._config.allow_short,
+                "short_entry_threshold": self._config.short_entry_threshold,
+                "short_exit_threshold":  self._config.short_exit_threshold,
             },
         }
 
@@ -142,6 +155,18 @@ class PerformanceReport:
 
 # ── Persistence ─────────────────────────────────────────────────────────
 
+class ParentDirectory:
+    # The various default output paths now live under GA_RESULTS_ROOT, which
+    # (unlike the old cwd-relative defaults) may not exist yet on first use.
+    def __init__(self, filepath: str) -> None:
+        self._filepath = filepath
+
+    def ensure(self) -> None:
+        directory = os.path.dirname(self._filepath)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+
 class StrategyJson:
     def __init__(
         self,
@@ -161,6 +186,7 @@ class StrategyJson:
         }
 
     def save(self, filepath: str) -> None:
+        ParentDirectory(filepath).ensure()
         with open(filepath, "w") as handle:
             json.dump(self.as_dict(), handle, indent=2)
 
@@ -210,7 +236,11 @@ class RunHeader:
             f"window={self._start_date}..{self._end_date} test_split={self._test_split}",
             f"buy_threshold={self._strategy_config.buy_threshold:.2f} "
             f"sell_threshold={self._strategy_config.sell_threshold:.2f} "
-            f"position_size_pct={self._strategy_config.position_size_pct:.2f}",
+            f"position_size_pct={self._strategy_config.position_size_pct:.2f} "
+            f"unwind_at_entry_price={self._strategy_config.unwind_at_entry_price} "
+            f"allow_short={self._strategy_config.allow_short} "
+            f"short_entry={self._strategy_config.short_entry_threshold:.2f} "
+            f"short_exit={self._strategy_config.short_exit_threshold:.2f}",
             f"population={self._ga_config.population_size} generations={self._ga_config.generations} "
             f"mutation_rate={self._ga_config.mutation_rate} crossover_rate={self._ga_config.crossover_rate} "
             f"tournament_size={self._ga_config.tournament_size} elitism_count={self._ga_config.elitism_count} "
@@ -224,12 +254,27 @@ class GaRunLog:
         self._filepath = filepath
 
     def start(self, header: RunHeader) -> None:
+        ParentDirectory(self._filepath).ensure()
         with open(self._filepath, "a") as handle:
             handle.write("\n".join(header.lines()) + "\n")
 
     def append(self, generation: int, best_fitness: float, average_fitness: float) -> None:
+        ParentDirectory(self._filepath).ensure()
         with open(self._filepath, "a") as handle:
             handle.write(f"{generation}\t{best_fitness:.6f}\t{average_fitness:.6f}\n")
+
+
+class FanOutRunLog:
+    def __init__(self, logs: tuple[GaRunLog, ...]) -> None:
+        self._logs = logs
+
+    def start(self, header: RunHeader) -> None:
+        for log in self._logs:
+            log.start(header)
+
+    def append(self, generation: int, best_fitness: float, average_fitness: float) -> None:
+        for log in self._logs:
+            log.append(generation, best_fitness, average_fitness)
 
 
 # ── Dry-run log ────────────────────────────────────────────────────────
@@ -239,6 +284,7 @@ class DryRunLog:
         self._filepath = filepath
 
     def append(self, timestamp: str, decision: Decision, balance: float, equity: float) -> None:
+        ParentDirectory(self._filepath).ensure()
         with open(self._filepath, "a") as handle:
             handle.write(
                 f"{timestamp}\t{decision.action.value}\t{decision.size:.6f}\t"

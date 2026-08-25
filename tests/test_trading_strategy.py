@@ -3,7 +3,16 @@ from typing import Optional
 import pandas as pd
 import pytest
 
-from coinbase.trading_strategy import Action, Backtest, Decision, Ledger, Position, Trade
+from coinbase.trading_strategy import (
+    Action,
+    Backtest,
+    Decision,
+    Direction,
+    IsolatedMargin,
+    Ledger,
+    Position,
+    Trade,
+)
 
 
 # ── Test double ──────────────────────────────────────────────────────
@@ -53,6 +62,99 @@ def test_position_exposes_entry_price_and_size():
 def test_position_closed_and_unrealized_agree_at_same_price():
     position = Position(entry_price=50.0, size=4.0)
     assert position.unrealized(60.0) == pytest.approx(position.closed(60.0).profit())
+
+
+def test_position_defaults_to_long():
+    assert Position(entry_price=50.0, size=1.0).direction() is Direction.LONG
+
+
+# ── Short positions ──────────────────────────────────────────────────
+
+def test_short_trade_profits_when_price_falls():
+    trade = Trade(entry_price=100.0, exit_price=80.0, size=2.0, direction=Direction.SHORT)
+    assert trade.profit() == pytest.approx(40.0)
+
+
+def test_short_trade_loses_when_price_rises():
+    trade = Trade(entry_price=100.0, exit_price=120.0, size=2.0, direction=Direction.SHORT)
+    assert trade.profit() == pytest.approx(-40.0)
+
+
+def test_short_position_unrealized_mirrors_the_long_case():
+    short = Position(entry_price=100.0, size=2.0, direction=Direction.SHORT)
+    long_ = Position(entry_price=100.0, size=2.0, direction=Direction.LONG)
+    assert short.unrealized(80.0) == pytest.approx(-long_.unrealized(80.0))
+
+
+def test_unrealized_return_is_positive_for_a_winning_position_either_way():
+    short = Position(entry_price=100.0, size=2.0, direction=Direction.SHORT)
+    long_ = Position(entry_price=100.0, size=2.0, direction=Direction.LONG)
+    assert short.unrealized_return(80.0) == pytest.approx(0.20)   # price fell 20% -> short is up
+    assert long_.unrealized_return(120.0) == pytest.approx(0.20)  # price rose 20% -> long is up
+
+
+# ── IsolatedMargin (1x) ──────────────────────────────────────────────
+
+def test_short_liquidates_at_double_the_entry_price():
+    margin = IsolatedMargin(Position(entry_price=100.0, size=1.0, direction=Direction.SHORT))
+    assert margin.liquidation_price() == pytest.approx(200.0)
+    assert margin.breached_by(high=200.0, low=90.0) is True
+    assert margin.breached_by(high=199.9, low=90.0) is False
+
+
+def test_long_is_never_liquidated_at_1x():
+    margin = IsolatedMargin(Position(entry_price=100.0, size=1.0, direction=Direction.LONG))
+    assert margin.liquidation_price() == pytest.approx(0.0)
+    assert margin.breached_by(high=100.0, low=0.01) is False
+
+
+def test_ledger_liquidates_a_short_at_its_liquidation_price_not_the_candle_high():
+    ledger = Ledger(1000.0)
+    ledger.apply(Decision(Action.SHORT, size=2.0), price=100.0)
+    ledger.liquidate(high=250.0, low=95.0)  # wick far beyond the 200.0 liquidation
+    assert ledger.position() is None
+    assert ledger.trades()[0].profit() == pytest.approx(-200.0)  # (100-200)*2, not (100-250)*2
+    assert ledger.balance() == pytest.approx(800.0)
+
+
+def test_ledger_liquidate_leaves_an_unbreached_position_open():
+    ledger = Ledger(1000.0)
+    ledger.apply(Decision(Action.SHORT, size=2.0), price=100.0)
+    ledger.liquidate(high=150.0, low=90.0)
+    assert ledger.position() is not None
+    assert ledger.trades() == []
+
+
+# ── Ledger: short lifecycle ──────────────────────────────────────────
+
+def test_ledger_short_then_cover_realizes_profit_on_a_fall():
+    ledger = Ledger(1000.0)
+    ledger.apply(Decision(Action.SHORT, size=2.0), price=100.0)
+    assert ledger.position().direction() is Direction.SHORT
+    assert ledger.equity(90.0) == pytest.approx(1020.0)  # unrealized gain as price falls
+    ledger.apply(Decision(Action.COVER), price=90.0)
+    assert ledger.position() is None
+    assert ledger.balance() == pytest.approx(1020.0)
+
+
+def test_ledger_sell_does_not_close_a_short_and_cover_does_not_close_a_long():
+    short = Ledger(1000.0)
+    short.apply(Decision(Action.SHORT, size=1.0), price=100.0)
+    short.apply(Decision(Action.SELL), price=90.0)
+    assert short.position() is not None  # SELL only closes longs
+
+    long_ = Ledger(1000.0)
+    long_.apply(Decision(Action.BUY, size=1.0), price=100.0)
+    long_.apply(Decision(Action.COVER), price=110.0)
+    assert long_.position() is not None  # COVER only closes shorts
+
+
+def test_ledger_short_while_already_positioned_is_a_no_op():
+    ledger = Ledger(1000.0)
+    ledger.apply(Decision(Action.BUY, size=1.0), price=100.0)
+    ledger.apply(Decision(Action.SHORT, size=5.0), price=100.0)
+    assert ledger.position().direction() is Direction.LONG
+    assert ledger.position().size() == pytest.approx(1.0)
 
 
 # ── Decision ─────────────────────────────────────────────────────────
@@ -134,10 +236,19 @@ def test_backtest_never_opens_a_second_overlapping_position():
     assert len(result.trades()) == 1  # never re-buys; only trade is the forced close at the end
 
 
-def test_backtest_force_closes_an_open_position_at_the_final_close():
+def test_backtest_unwinds_an_open_position_at_entry_price_by_default():
     frame    = _frame([100.0, 110.0])
     strategy = _strategy([0.7, 0.7])  # buys and never sells
     result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    trades   = result.trades()
+    assert len(trades) == 1
+    assert trades[0].profit() == pytest.approx(0.0)  # still "in flight", not judged a win or a loss
+
+
+def test_backtest_force_closes_at_the_final_market_price_when_unwind_at_entry_price_is_false():
+    frame    = _frame([100.0, 110.0])
+    strategy = _strategy([0.7, 0.7])  # buys and never sells
+    result   = Backtest(frame, strategy, starting_balance=1000.0, unwind_at_entry_price=False).run()
     trades   = result.trades()
     assert len(trades) == 1
     assert trades[0].profit() == pytest.approx((110.0 - 100.0) / 100.0 * 100.0)
@@ -170,6 +281,56 @@ def test_backtest_equity_curve_tracks_unrealized_gains_while_in_position():
     curve    = result.equity_curve()
     assert curve[0] == pytest.approx(1000.0)  # just bought, no move yet
     assert curve[1] == pytest.approx(1000.0 + (150.0 - 100.0) / 100.0 * 100.0)
+
+
+# Emits a scripted action per candle, sizing opens off the current balance.
+class _ScriptedDirectionalStrategy:
+    def __init__(self, actions: list[Action]) -> None:
+        self._actions = actions
+        self._calls   = 0
+
+    def decide(self, row: dict[str, float], position: Optional[Position], balance: float) -> Decision:
+        action = self._actions[self._calls]
+        self._calls += 1
+        if action in (Action.BUY, Action.SHORT):
+            return Decision(action, (balance * 0.10) / row["close"])
+        return Decision(action)
+
+
+def _ohlc_frame(rows: list[tuple[float, float, float]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {"close": [r[0] for r in rows], "high": [r[1] for r in rows], "low": [r[2] for r in rows]}
+    )
+
+
+def test_backtest_short_profits_as_price_falls():
+    frame    = _ohlc_frame([(100.0, 100.0, 100.0), (80.0, 100.0, 80.0), (80.0, 80.0, 80.0)])
+    strategy = _ScriptedDirectionalStrategy([Action.SHORT, Action.HOLD, Action.COVER])
+    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    trades   = result.trades()
+    assert len(trades) == 1
+    assert trades[0].direction() is Direction.SHORT
+    assert trades[0].profit() == pytest.approx(20.0)  # 1 unit shorted @100, covered @80
+
+
+def test_backtest_liquidates_a_short_before_taking_that_candles_decision():
+    # the position is opened on candle 0; candle 1 wicks above 2x entry and must
+    # liquidate it, so the scripted COVER on candle 2 finds nothing to close
+    frame    = _ohlc_frame([(100.0, 100.0, 100.0), (150.0, 210.0, 140.0), (90.0, 150.0, 90.0)])
+    strategy = _ScriptedDirectionalStrategy([Action.SHORT, Action.HOLD, Action.COVER])
+    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    trades   = result.trades()
+    assert len(trades) == 1
+    assert trades[0].profit() == pytest.approx(-100.0)  # 1 unit @100 closed at 200, not at 210 or 90
+
+
+def test_backtest_does_not_liquidate_a_short_on_the_candle_that_opened_it():
+    # candle 0's own high already exceeds 2x entry, but that range happened
+    # before the close the position is opened at
+    frame    = _ohlc_frame([(100.0, 500.0, 100.0), (95.0, 100.0, 90.0)])
+    strategy = _ScriptedDirectionalStrategy([Action.SHORT, Action.HOLD])
+    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    assert result.trades()[0].profit() == pytest.approx(0.0)  # unwound at entry, never liquidated
 
 
 def test_backtest_empty_when_signal_never_crosses_buy_threshold():

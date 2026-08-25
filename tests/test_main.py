@@ -1,3 +1,4 @@
+import csv
 import json
 import math
 
@@ -47,6 +48,7 @@ def _raw_config(output_dir) -> dict:
             "test_split": 0.3,
         },
         "market_data": {
+            "cache_dir": str(output_dir / "candle_cache"),
             "normalized_columns": ["sma_short", "sma_long", "sma_extra", "rsi", "macd"],
             "delta_columns": ["delta_1", "delta_3", "delta_5", "delta_10"],
         },
@@ -78,6 +80,8 @@ def _raw_config(output_dir) -> dict:
         "output": {
             "strategy_filepath": str(output_dir / "best_strategy.json"),
             "log_filepath":      str(output_dir / "ga_run_log.txt"),
+            "experiments_dir":   str(output_dir / "experiments"),
+            "index_filepath":    str(output_dir / "experiments" / "index.csv"),
         },
     }
 
@@ -114,10 +118,14 @@ def test_training_summary_as_text_reports_saved_path_and_metrics():
     performance = PerformanceReport(BacktestResult([Trade(100.0, 110.0, 1.0)], [1000.0, 1010.0]), annualized_yield=0.15)
     strategy_json = StrategyJson(metadata, strategy, performance)
 
-    summary = TrainingSummary(strategy_json, output_path="/tmp/best_strategy.json", round_trip_matches=True)
+    summary = TrainingSummary(
+        strategy_json, output_path="/tmp/best_strategy.json", run_id="20260718T000000Z-abcd1234",
+        round_trip_matches=True,
+    )
     text = summary.as_text()
 
     assert "Saved strategy to /tmp/best_strategy.json" in text
+    assert "Experiment run_id:      20260718T000000Z-abcd1234" in text
     assert "Test-set gross profit:  10.00" in text
     assert "Test-set annualized yield: +15.0%" in text
     assert "Reload round-trip:      OK" in text
@@ -140,7 +148,9 @@ def test_training_summary_as_text_reports_round_trip_mismatch():
     performance = PerformanceReport(BacktestResult([], [1000.0]), annualized_yield=0.0)
     strategy_json = StrategyJson(metadata, strategy, performance)
 
-    summary = TrainingSummary(strategy_json, output_path="/tmp/x.json", round_trip_matches=False)
+    summary = TrainingSummary(
+        strategy_json, output_path="/tmp/x.json", run_id="20260718T000000Z-abcd1234", round_trip_matches=False,
+    )
     assert "Reload round-trip:      MISMATCH" in summary.as_text()
 
 
@@ -167,3 +177,15 @@ async def test_training_run_trains_saves_and_round_trips(tmp_path):
     assert [line.split("\t")[0] for line in generation_lines] == ["1", "2"]  # one line per generation
 
     assert "Reload round-trip:      OK" in summary.as_text()
+
+    experiment_dir = tmp_path / "experiments" / summary.run_id()
+    assert json.loads((experiment_dir / "config.json").read_text()) == raw_config
+    assert json.loads((experiment_dir / "strategy.json").read_text()) == on_disk
+
+    experiment_log_lines = (experiment_dir / "run_log.txt").read_text().splitlines()[5:]
+    assert [line.split("\t")[0] for line in experiment_log_lines] == ["1", "2"]
+
+    index_rows = list(csv.DictReader((tmp_path / "experiments" / "index.csv").read_text().splitlines()))
+    assert len(index_rows) == 1
+    assert index_rows[0]["run_id"] == summary.run_id()
+    assert index_rows[0]["pair"] == "BTC-USDC"

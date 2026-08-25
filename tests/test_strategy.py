@@ -31,7 +31,8 @@ class _FixedActionStrategy:
         self.received_positions.append(position)
         action = self._actions[self._calls]
         self._calls += 1
-        size = (balance * 0.10) / row["close"] if action is Action.BUY else 0.0
+        opens = action in (Action.BUY, Action.SHORT)
+        size  = (balance * 0.10) / row["close"] if opens else 0.0
         return Decision(action, size)
 
 
@@ -119,6 +120,26 @@ async def test_paper_trading_run_never_calls_the_adapters_order_endpoints():
     first  = await run.on_timer()
     second = await run.on_timer()
     assert (first.action, second.action) == (Action.BUY, Action.SELL)
+
+
+@pytest.mark.asyncio
+async def test_paper_trading_run_liquidates_a_short_that_the_market_ran_through():
+    # _rising_candles climbs from 100 well past 200, so a short opened on the
+    # first tick is breached later — paper trading must apply the same 1x
+    # isolated margin rule the strategy was trained under, not carry the
+    # position indefinitely.
+    adapter    = FakeAdapter(candles=_rising_candles(80), accounts=[])
+    market_row = LiveMarketRow(adapter, "BTC-USDC", "ONE_HOUR", IndicatorPeriods(), _NORMALIZED_COLUMNS)
+    ledger     = Ledger(1000.0)
+    run        = PaperTradingRun(market_row, _FixedActionStrategy([Action.SHORT, Action.HOLD]), ledger)
+
+    await run.on_timer()
+    assert ledger.position() is not None
+    entry = ledger.position().entry_price()
+
+    ledger.liquidate(high=entry * 2.0, low=entry)  # the breach the next tick would carry in
+    assert ledger.position() is None
+    assert ledger.trades()[0].profit() < 0.0
 
 
 @pytest.mark.asyncio

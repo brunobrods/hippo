@@ -35,8 +35,11 @@ class LiveMarketRow:
     async def latest(self) -> dict[str, float]:
         end   = int(time.time())
         start = end - self._lookback_candles * GRANULARITY_SECONDS[self._granularity]
+        # cache_dir=None: this window slides every call, so disk caching would
+        # never hit and would just accumulate one throwaway file per tick.
         frame = await HistoricalMarketData(
-            self._adapter, self._pair, self._granularity, start, end, self._periods, self._normalized_columns,
+            self._adapter, self._pair, self._granularity, start, end,
+            self._periods, self._normalized_columns, cache_dir=None,
         ).dataframe()
         return frame.iloc[-1].to_dict()
 
@@ -67,6 +70,11 @@ class LiveTradingRun:
             self._market_row.latest(),
             AccountBalance(self._adapter, self._quote_currency).available(),
         )
+        # Same order as Backtest.run(): a position carried in from the previous
+        # tick is liquidation-checked against this candle's range before a new
+        # decision is taken, so a live short obeys the same 1x isolated margin
+        # model it was trained and scored under.
+        self._ledger.liquidate(row["high"], row["low"])
         decision = self._strategy.decide(row, self._ledger.position(), balance)
         self._ledger.apply(decision, row["close"])
         return decision
@@ -90,7 +98,8 @@ class PaperTradingRun:
         self._last_price: Optional[float] = None
 
     async def on_timer(self) -> Decision:
-        row      = await self._market_row.latest()
+        row = await self._market_row.latest()
+        self._ledger.liquidate(row["high"], row["low"])
         decision = self._strategy.decide(row, self._ledger.position(), self._ledger.balance())
         self._ledger.apply(decision, row["close"])
         self._last_price = row["close"]

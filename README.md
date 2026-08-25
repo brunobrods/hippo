@@ -6,7 +6,7 @@ Async Python scripts for the [Coinbase Advanced Trade REST API](https://docs.cdp
 |---|---|
 | `coinbase_adapter.py` | Async HTTP adapter — orders, accounts, market data |
 | `market_scanner.py` | Fetches OHLCV candles and prints RSI / MACD / Bollinger Bands |
-| `credentials.py` | **Your** API credentials (not committed to version control) |
+| `credentials_file.py` | Loads **your** API credentials from `~/.coinbase/credentials.yaml` (outside the repo, never committed) |
 
 ---
 
@@ -24,8 +24,11 @@ Async Python scripts for the [Coinbase Advanced Trade REST API](https://docs.cdp
 
 ```bash
 git clone <repo-url>
-cd coinbase
 ```
+
+Stay at the cloned repo's root — don't `cd` into the `coinbase/` package directory.
+Every script below is run as a module (`python -m coinbase.xxx`) *from the repo root*,
+since Python only resolves the `coinbase` package from there.
 
 ### 2. Create a virtual environment
 
@@ -49,16 +52,20 @@ pip install -r requirements.txt
 
 ### 4. Add your API credentials
 
-Create `credentials.py` in the project directory (it is intentionally excluded from version control):
+Create `~/.coinbase/credentials.yaml` (outside the project directory, so it's never
+committed and every git worktree/checkout of this repo shares the one file):
 
-```python
-# credentials.py
-api_key    = "organizations/<org_id>/apiKeys/<key_id>"
-api_secret = "-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----\n"
+```yaml
+# ~/.coinbase/credentials.yaml
+api_key: "organizations/<org_id>/apiKeys/<key_id>"
+api_secret: |
+  -----BEGIN EC PRIVATE KEY-----
+  ...
+  -----END EC PRIVATE KEY-----
 ```
 
-Keys are created at <https://portal.cdp.coinbase.com/>.  
-The secret must be the raw PEM string with literal `\n` newlines.
+Keys are created at <https://portal.cdp.coinbase.com/>. `api_secret` is a YAML block
+scalar (`|`) holding the PEM string across its real newlines, not an escaped one-liner.
 
 ---
 
@@ -67,7 +74,7 @@ The secret must be the raw PEM string with literal `\n` newlines.
 ### Market scanner
 
 ```bash
-python market_scanner.py
+python -m coinbase.market_scanner
 ```
 
 Options:
@@ -86,10 +93,10 @@ Examples:
 
 ```bash
 # 1-minute candles, last 60 bars
-python market_scanner.py --granularity ONE_MINUTE --candles 60
+python -m coinbase.market_scanner --granularity ONE_MINUTE --candles 60
 
 # Custom pair list
-python market_scanner.py --pairs BTC-USDC ETH-USDC SOL-USDC
+python -m coinbase.market_scanner --pairs BTC-USDC ETH-USDC SOL-USDC
 ```
 
 ### Adapter smoke test
@@ -98,7 +105,7 @@ Places a passive limit buy 2 % below best bid, confirms it is open, then cancels
 **Runs against live Coinbase** — requires a key with `trade:read_write`.
 
 ```bash
-python coinbase_adapter.py
+python -m coinbase.coinbase_adapter
 ```
 
 ---
@@ -117,10 +124,6 @@ All pinned in `requirements.txt`.
 
 ## Security notes
 
-- `credentials.py` must **never** be committed. Add it to `.gitignore`:
-  ```
-  credentials.py
-  .venv/
-  __pycache__/
-  ```
+- Credentials live in `~/.coinbase/credentials.yaml`, outside the repo entirely, so
+  there's nothing credential-related for `.gitignore` to protect against.
 - Coinbase Advanced Trade has no sandbox. Test with the smallest possible amounts.

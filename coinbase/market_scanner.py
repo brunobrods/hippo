@@ -9,12 +9,13 @@ prints a snapshot table of technical indicators:
   Bollinger — 20-period ±2σ bands; flags price above/below bands
   Volume   — average of the last 5 candles (normalised to base currency)
 
-Usage:
-    python market_scanner.py                        # live snapshot
-    python market_scanner.py --at 2026-05-22        # snapshot at a past date
-    python market_scanner.py --at 2026-05-22T14:30  # snapshot at a past datetime
-    python market_scanner.py --week                 # daily snapshots for last 7 days
-    python market_scanner.py --week --step 6        # every 6 hours for last 7 days
+Usage (run as a module, from the repo root — a direct script path fails with
+ModuleNotFoundError: No module named 'coinbase'):
+    python -m coinbase.market_scanner                        # live snapshot
+    python -m coinbase.market_scanner --at 2026-05-22        # snapshot at a past date
+    python -m coinbase.market_scanner --at 2026-05-22T14:30  # snapshot at a past datetime
+    python -m coinbase.market_scanner --week                 # daily snapshots for last 7 days
+    python -m coinbase.market_scanner --week --step 6        # every 6 hours for last 7 days
 """
 
 import argparse
@@ -27,7 +28,7 @@ from typing import Optional
 import pandas as pd
 
 from coinbase.coinbase_adapter import CoinbaseAdapter
-from coinbase.credentials import api_key, api_secret
+from coinbase.credentials_file import CredentialsFile
 
 
 # ── Configuration ──────────────────────────────────────────────────────
@@ -266,10 +267,11 @@ def parse_args(args_in) -> argparse.Namespace:
 
 
 async def main(args_in) -> None:
-    args      = parse_args(args_in)
-    ref_times = build_reference_times(args)
+    args        = parse_args(args_in)
+    ref_times   = build_reference_times(args)
+    credentials = CredentialsFile().credentials()
 
-    async with CoinbaseAdapter(api_key, api_secret) as adapter:
+    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
         for ref_time in ref_times:
             tasks     = [fetch_snapshot(adapter, p, args.granularity, args.candles, ref_time) for p in args.pairs]
             snapshots = await asyncio.gather(*tasks)

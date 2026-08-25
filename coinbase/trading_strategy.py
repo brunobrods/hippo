@@ -9,9 +9,16 @@ import pandas as pd
 # ── Decisions ────────────────────────────────────────────────────────────
 
 class Action(Enum):
-    BUY  = "BUY"
-    SELL = "SELL"
-    HOLD = "HOLD"
+    BUY   = "BUY"    # open a long
+    SELL  = "SELL"   # close a long
+    SHORT = "SHORT"  # open a short
+    COVER = "COVER"  # close a short
+    HOLD  = "HOLD"
+
+
+class Direction(Enum):
+    LONG  = "LONG"
+    SHORT = "SHORT"
 
 
 @dataclass(frozen=True)
@@ -23,19 +30,36 @@ class Decision:
 # ── Positions / trades ───────────────────────────────────────────────────
 
 class Trade:
-    def __init__(self, entry_price: float, exit_price: float, size: float) -> None:
+    def __init__(
+        self,
+        entry_price: float,
+        exit_price: float,
+        size: float,
+        direction: Direction = Direction.LONG,
+    ) -> None:
         self._entry_price = entry_price
         self._exit_price  = exit_price
         self._size        = size
+        self._direction   = direction
 
     def profit(self) -> float:
-        return (self._exit_price - self._entry_price) * self._size
+        move = (self._exit_price - self._entry_price) * self._size
+        return move if self._direction is Direction.LONG else -move
+
+    def direction(self) -> Direction:
+        return self._direction
 
 
 class Position:
-    def __init__(self, entry_price: float, size: float) -> None:
+    def __init__(
+        self,
+        entry_price: float,
+        size: float,
+        direction: Direction = Direction.LONG,
+    ) -> None:
         self._entry_price = entry_price
         self._size        = size
+        self._direction   = direction
 
     def entry_price(self) -> float:
         return self._entry_price
@@ -43,11 +67,42 @@ class Position:
     def size(self) -> float:
         return self._size
 
+    def direction(self) -> Direction:
+        return self._direction
+
     def closed(self, exit_price: float) -> Trade:
-        return Trade(self._entry_price, exit_price, self._size)
+        return Trade(self._entry_price, exit_price, self._size, self._direction)
 
     def unrealized(self, price: float) -> float:
-        return (price - self._entry_price) * self._size
+        move = (price - self._entry_price) * self._size
+        return move if self._direction is Direction.LONG else -move
+
+    # Signed fractional return on the entry price — direction-agnostic, so a
+    # strategy can read "how far is this position ahead" without branching.
+    def unrealized_return(self, price: float) -> float:
+        move = (price - self._entry_price) / self._entry_price
+        return move if self._direction is Direction.LONG else -move
+
+
+# ── Margin ───────────────────────────────────────────────────────────────
+# 1x isolated: the position's own notional is the entire margin backing it, so
+# an adverse move equal to the entry price wipes the position out. For a short
+# that is a 100% rise (liquidation at 2x entry); for a long it would require
+# the price to reach zero, which never happens — longs are unliquidatable here.
+
+class IsolatedMargin:
+    def __init__(self, position: Position) -> None:
+        self._position = position
+
+    def liquidation_price(self) -> float:
+        if self._position.direction() is Direction.SHORT:
+            return self._position.entry_price() * 2.0
+        return 0.0
+
+    def breached_by(self, high: float, low: float) -> bool:
+        if self._position.direction() is Direction.SHORT:
+            return high >= self.liquidation_price()
+        return low <= self.liquidation_price()
 
 
 # ── Strategy contract ────────────────────────────────────────────────────
@@ -66,9 +121,23 @@ class Ledger:
 
     def apply(self, decision: Decision, price: float) -> None:
         if decision.action is Action.BUY and self._position is None:
-            self._position = Position(price, decision.size)
-        elif decision.action is Action.SELL and self._position is not None:
+            self._position = Position(price, decision.size, Direction.LONG)
+        elif decision.action is Action.SHORT and self._position is None:
+            self._position = Position(price, decision.size, Direction.SHORT)
+        elif decision.action is Action.SELL and self._holds(Direction.LONG):
             self._close(price)
+        elif decision.action is Action.COVER and self._holds(Direction.SHORT):
+            self._close(price)
+
+    # Closes an open position at its liquidation price when the candle's range
+    # breached it. Called with the range of the candle the position is carried
+    # into, before that candle's own decision is taken.
+    def liquidate(self, high: float, low: float) -> None:
+        if self._position is None:
+            return
+        margin = IsolatedMargin(self._position)
+        if margin.breached_by(high, low):
+            self._close(margin.liquidation_price())
 
     def force_close(self, price: float) -> None:
         if self._position is not None:
@@ -85,6 +154,9 @@ class Ledger:
 
     def trades(self) -> list[Trade]:
         return list(self._trades)
+
+    def _holds(self, direction: Direction) -> bool:
+        return self._position is not None and self._position.direction() is direction
 
     def _close(self, price: float) -> None:
         trade = self._position.closed(price)
@@ -111,10 +183,17 @@ class BacktestResult:
 
 
 class Backtest:
-    def __init__(self, frame: pd.DataFrame, strategy: Strategy, starting_balance: float) -> None:
-        self._frame            = frame
-        self._strategy         = strategy
-        self._starting_balance = starting_balance
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        strategy: Strategy,
+        starting_balance: float,
+        unwind_at_entry_price: bool = True,
+    ) -> None:
+        self._frame                 = frame
+        self._strategy              = strategy
+        self._starting_balance      = starting_balance
+        self._unwind_at_entry_price = unwind_at_entry_price
 
     @functools.cached_property
     def _rows(self) -> list[dict[str, float]]:
@@ -125,11 +204,20 @@ class Backtest:
         equity_curve: list[float] = []
 
         for row in self._rows:
+            price = row["close"]
+            # A position carried in from the previous candle lives through this
+            # candle's range before any new decision is taken on its close.
+            ledger.liquidate(row.get("high", price), row.get("low", price))
             decision = self._strategy.decide(row, ledger.position(), ledger.balance())
-            price    = row["close"]
             ledger.apply(decision, price)
             equity_curve.append(ledger.equity(price))
 
         if self._rows:
-            ledger.force_close(self._rows[-1]["close"])
+            ledger.force_close(self._final_close_price(ledger, self._rows[-1]["close"]))
         return BacktestResult(ledger.trades(), equity_curve)
+
+    def _final_close_price(self, ledger: Ledger, market_price: float) -> float:
+        position = ledger.position()
+        if self._unwind_at_entry_price and position is not None:
+            return position.entry_price()
+        return market_price

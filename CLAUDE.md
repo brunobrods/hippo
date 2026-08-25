@@ -14,30 +14,55 @@ Async Python toolkit for the Coinbase Advanced Trade REST API. Python 3.11+.
 python -m venv .venv
 .venv\Scripts\Activate.ps1          # Windows PowerShell
 pip install -r requirements.txt
+git config core.hooksPath .githooks  # see "Branching" below — not automatic
 ```
 
-Credentials go in `coinbase/credentials.py` (gitignored — never commit):
-```python
-api_key    = "organizations/<org_id>/apiKeys/<key_id>"
-api_secret = "-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----\n"
+Credentials go in `~/.coinbase/credentials.yaml` (outside the repo — shared across
+every worktree of this checkout, never committed):
+```yaml
+api_key: "organizations/<org_id>/apiKeys/<key_id>"
+api_secret: |
+  -----BEGIN EC PRIVATE KEY-----
+  ...
+  -----END EC PRIVATE KEY-----
 ```
-Keys created at <https://portal.cdp.coinbase.com/>.
+Keys created at <https://portal.cdp.coinbase.com/>. Loaded via `CredentialsFile` in
+`coinbase/credentials_file.py`.
+
+## Branching
+
+**Never commit directly to `master`.** Work lands through a branch and a pull
+request — create one with `git switch -c <name>` before the first commit.
+
+`.githooks/pre-commit` enforces this, and worktrees share the common `.git`
+directory so the single hook covers every worktree at once. Two caveats worth
+knowing:
+
+- It is **not** active until `git config core.hooksPath .githooks` has been run
+  in that clone (see Setup) — git will not pick up a tracked hook by itself.
+- A tracked hook only exists on branches that contain it, so it cannot protect
+  a branch whose own tree lacks the file.
 
 ## Commands
 
+Run every script below as a module, from the repo root — a direct script path
+(`python coinbase/market_scanner.py`) fails with `ModuleNotFoundError: No module
+named 'coinbase'`, since Python only adds the script's own directory to `sys.path`,
+not the repo root.
+
 ```bash
 # Market scanner — live snapshot
-python market_scanner.py
-python market_scanner.py --granularity ONE_HOUR --candles 200 --pairs BTC-USDC ETH-USDC
-python market_scanner.py --at 2026-05-22T14:30
-python market_scanner.py --week --step 6
+python -m coinbase.market_scanner
+python -m coinbase.market_scanner --granularity ONE_HOUR --candles 200 --pairs BTC-USDC ETH-USDC
+python -m coinbase.market_scanner --at 2026-05-22T14:30
+python -m coinbase.market_scanner --week --step 6
 
 # Adapter smoke test (live — requires trade:read_write key)
-python coinbase/coinbase_adapter.py
+python -m coinbase.coinbase_adapter
 
 # Tests
 pytest
-pytest tests/test_coinbase_adapter.py   # single file
+pytest tests/test_config.py   # single file
 ```
 
 ## Architecture
@@ -45,7 +70,7 @@ pytest tests/test_coinbase_adapter.py   # single file
 - `coinbase/coinbase_adapter.py` — `CoinbaseAdapter` async context manager. Auth via per-request ES256 JWTs (2-min TTL). All order amount fields must be **strings** — Coinbase rejects floats.
 - `coinbase/market_scanner.py` — fetches OHLCV candles concurrently via `asyncio.gather`, computes RSI (EWM, 48-period) / MACD (12/26/9) / Bollinger (20-period ±2σ) using pandas, prints a snapshot table.
 - `coinbase/strategy.py` — stub; `Strategy.onTimer()` not yet implemented.
-- `coinbase/credentials.py` — gitignored. No sandbox exists for Coinbase Advanced Trade — all testing is live.
+- `coinbase/credentials_file.py` — `CredentialsFile` loads `~/.coinbase/credentials.yaml`. No sandbox exists for Coinbase Advanced Trade — all testing is live.
 
 ## Code Style
 

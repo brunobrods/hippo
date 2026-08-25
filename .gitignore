@@ -20,3 +20,9 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Cached candle data (regenerable from Coinbase)
+candle_cache/
+
+# Per-run training history and leaderboard
+experiments/

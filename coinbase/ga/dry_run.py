@@ -8,6 +8,7 @@ from coinbase.ga.strategy_evaluator import (
     GaStrategy,
     POSITION_PNL_KEY,
     StrategyConfigFile,
+    ValidatedStrategyConfig,
     ValidatedWeightKeys,
     WeightKeysConfig,
 )
@@ -52,7 +53,9 @@ class DryRun:
 
 
 # ── Entry point ────────────────────────────────────────────────────────
-# Run:  python coinbase/ga/dry_run.py
+# Run (as a module, from the repo root — a direct script path fails with
+# ModuleNotFoundError: No module named 'coinbase'):
+#   python -m coinbase.ga.dry_run
 # Reloads the last trained strategy and drives it against live market data on
 # a loop matched to its trained granularity, logging every decision it would
 # make against a simulated balance seeded from config.yaml's starting_balance.
@@ -61,12 +64,13 @@ class DryRun:
 # Ctrl+C to stop.
 
 async def _main() -> None:
-    from coinbase.credentials import api_key, api_secret
+    from coinbase.credentials_file import CredentialsFile
 
+    credentials     = CredentialsFile().credentials()
     raw_config      = ConfigFile("coinbase/ga/config.yaml").raw()
     market_config   = MarketDataConfig(raw_config)
     window          = market_config.window()
-    strategy_config = StrategyConfigFile(raw_config).config()
+    strategy_config = ValidatedStrategyConfig(StrategyConfigFile(raw_config).config()).config()
     output_config   = OutputConfigFile(raw_config).config()
     weight_keys     = ValidatedWeightKeys(
         WeightKeysConfig(raw_config).keys(), market_config.normalized_columns(),
@@ -77,7 +81,7 @@ async def _main() -> None:
     genome   = Genome(reloaded.weights())
     strategy = GaStrategy(genome, strategy_config, keys)
 
-    async with CoinbaseAdapter(api_key, api_secret) as adapter:
+    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
         market_row  = LiveMarketRow(
             adapter, window.pair, window.granularity, market_config.periods(), market_config.normalized_columns(),
         )

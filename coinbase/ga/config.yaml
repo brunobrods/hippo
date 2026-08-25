@@ -4,13 +4,27 @@
 # since CoinbaseAdapter is called directly with these values.
 
 data:
-  pair: "FET-USDC"
-  granularity: "TWO_HOUR"   # ONE_MINUTE | FIVE_MINUTE | FIFTEEN_MINUTE | THIRTY_MINUTE | ONE_HOUR | TWO_HOUR | SIX_HOUR | ONE_DAY
-  start_date: "2025-06-01"
-  end_date: "2026-07-01"
+  # BTC over 2024-04 -> 2026-08 deliberately: both halves of the split contain
+  # bull AND bear quarters (test half is 3 of each), unlike the previous
+  # FET 2025-06 -> 2026-07 window whose test half held zero bull quarters and
+  # so could only ever measure downside performance. BTC is also the most
+  # balanced of the liquid pairs over this span (+13% total, ~50% up-days), so
+  # neither direction is free money — FET returned -94% here and would simply
+  # teach the GA to stay short. Other pairs are for validating a shortlist,
+  # not for sweeping.
+  pair: "BTC-USDC"
+  granularity: "SIX_HOUR"   # ONE_MINUTE | FIVE_MINUTE | FIFTEEN_MINUTE | THIRTY_MINUTE | ONE_HOUR | TWO_HOUR | SIX_HOUR | ONE_DAY
+  start_date: "2024-04-01"
+  end_date: "2026-08-25"
   test_split: 0.5        # fraction of the window held out for testing
 
 market_data:
+  # directory where fetched candle windows are cached to disk, keyed by
+  # (pair, granularity, start, end) — repeat fetches of the same window
+  # (e.g. across a parameter sweep) read from here instead of Coinbase.
+  # Optional — defaults to ~/.coinbase/ga/candle_cache (shared across every
+  # worktree of this checkout). Uncomment to override:
+  # cache_dir: "./candle_cache"
   # columns min-max normalized into norm_<column> before scoring/training.
   normalized_columns: ["sma_short", "sma_long", "sma_extra", "rsi", "macd"]
   delta_columns: ["delta_1", "delta_3", "delta_5", "delta_10"]
@@ -20,6 +34,25 @@ strategy:
   buy_threshold: 0.60       # signal_score above this opens a position
   sell_threshold: 0.40      # signal_score below this closes an open position
   starting_balance: 10000.0  # quote-currency balance at the start of a backtest
+  # A backtest force-closes any still-open position at the end of the window so
+  # every run produces a final profit figure. When true, that forced close is
+  # priced at the position's own entry price (net-zero profit — the position is
+  # simply still "in flight", not judged a win or a loss) instead of at the
+  # window's last market price, so a strategy isn't penalized or credited just
+  # for where the training/test window happened to cut off mid-hold.
+  unwind_at_entry_price: true
+  # Shorting is modelled as a 1x isolated margin account: a position's notional
+  # is capped at the quote balance (position_size_pct <= 1.0) and is backed by
+  # exactly that much margin, so a short is liquidated if price doubles against
+  # it. Coinbase Advanced Trade has no short side — this is a Binance-style
+  # margin model, and only the backtest simulates it today.
+  allow_short: true
+  short_entry_threshold: 0.25  # signal_score below this opens a short
+  # 0.45 rather than 0.50 on the evidence of sweep 1c: +10.9% mean vs +3.4% at
+  # 0.50, seed sd 3.9%, all five seeds positive, Welch t=3.25. The only
+  # calibration result so far whose effect clearly exceeds its seed noise.
+  # Above 0.50 it degrades sharply and a -9.5%/2-trade failure mode recurs.
+  short_exit_threshold: 0.45   # signal_score above this covers an open short
   indicators:
     sma_short_period: 9
     sma_long_period: 20
@@ -43,6 +76,16 @@ genetic_algorithm:
   seed: 1                # set an int for reproducible runs (e.g. in tests)
 
 output:
-  strategy_filepath: "./best_strategy.json"
-  log_filepath: "./ga_run_log.txt"
-  dry_run_log_filepath: "./dry_run_log.txt"
+  # Every path below is optional and defaults to a fixed location under
+  # ~/.coinbase/ga/ — outside the repo, so every git worktree of this checkout
+  # shares one results/cache location instead of each accumulating its own.
+  # Uncomment any of these to override:
+  # strategy_filepath: "./best_strategy.json"
+  # log_filepath: "./ga_run_log.txt"
+  # dry_run_log_filepath: "./dry_run_log.txt"
+  # every run's resolved config + strategy + GA log, kept under its own run_id
+  # subdirectory — full history, never overwritten (unlike strategy_filepath above).
+  # experiments_dir: "./experiments"
+  # one CSV row per run (pair, hyperparameters, performance) appended here —
+  # a leaderboard for comparing runs without opening each one's strategy.json.
+  # index_filepath: "./experiments/index.csv"
