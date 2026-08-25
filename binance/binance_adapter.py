@@ -790,8 +790,12 @@ class BinanceAdapter:
     # (/sapi/v1/asset/transfer, type=MAIN_ISOLATED_MARGIN). Binance has marked
     # this one deprecated, but it still serves and — unlike the universal
     # endpoint — needs no separate "Permits Universal Transfer" key permission
-    # beyond the margin permission these orders already require. Switch if it
-    # ever starts returning an error.
+    # beyond the margin permission these orders already require.
+    #
+    # Verified live: a 2 USDT round trip out and back settled exactly, with no
+    # fee and no dust, on a key reporting permitsUniversalTransfer=false and
+    # enableInternalTransfer=false — the universal endpoint would have been
+    # rejected on that key. Revisit only if this starts erroring.
     async def transfer_in(self, product_id: str, asset: str, amount: str) -> dict:
         return await self._transfer(product_id, asset, amount, "SPOT", "ISOLATED_MARGIN")
 
