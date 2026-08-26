@@ -1,0 +1,61 @@
+# Multi-pair paper trading. Each algo drives one trained genome against one
+# pair on one venue, ticking when that pair's own candle closes.
+#
+#   python -m coinbase.ga.paper_engine
+#   python -m coinbase.ga.paper_engine --once
+#
+# Kept separate from config.yaml deliberately: that file describes a TRAINING
+# run (one pair, one window, one set of GA hyperparameters), while this one
+# describes what is being papered right now. Each algo's genome carries its own
+# thresholds, so they never need to agree with config.yaml's strategy section.
+
+# Supplies what is shared across algos and is a property of the frame rather
+# than the strategy: indicator periods, normalized/delta columns, weight_keys.
+ga_config: "coinbase/ga/config.yaml"
+
+engine:
+  granularity: "THIRTY_MINUTE"
+  # Wait this long past the boundary before fetching — a candle is not
+  # queryable the instant it closes.
+  boundary_offset_seconds: 20
+  # Mark-to-market poll. Decisions still only happen on the boundary; this only
+  # keeps unrealized PnL on the dashboard live in between. One request per
+  # venue, whatever the pair count.
+  price_refresh_seconds: 45
+  # Shared across every candle fetch on one venue, so N algos cannot multiply
+  # the bound that keeps requests inside their timeout.
+  max_concurrent_requests: 8
+  # 0 = gross, matching Backtest and every recorded strategy's performance.
+  # Set to a realistic taker rate (Coinbase is well above 10 at low volume) to
+  # see what fee drag does — at 30-minute granularity it is the largest single
+  # gap between a backtest and reality. Slippage is still not modelled.
+  fee_bps: 0.0
+  # Both default under ~/.coinbase/ga/paper/ — outside the repo, so every
+  # worktree shares one set of books instead of each keeping its own.
+  # state_dir: null
+  # log_dir: null
+
+dashboard:
+  host: "127.0.0.1"
+  port: 8787
+
+# Merged under every algo below; an algo's own key wins.
+defaults:
+  exchange: "coinbase"
+  starting_balance: 10000.0
+
+# Point strategy_filepath at a run's own experiments/<run_id>/strategy.json
+# rather than best_strategy.json — the latter is overwritten by every training
+# run, so a papered algo would silently swap strategy mid-flight.
+algos:
+  - name: "btc"
+    pair: "BTC-USDC"
+    strategy_filepath: "~/.coinbase/ga/best_strategy.json"
+  # - name: "eth"
+  #   pair: "ETH-USDC"
+  #   strategy_filepath: "~/.coinbase/ga/experiments/<run_id>/strategy.json"
+  # - name: "sol-binance"
+  #   exchange: "binance"
+  #   pair: "SOL-USDT"
+  #   starting_balance: 5000.0
+  #   strategy_filepath: "~/.coinbase/ga/experiments/<run_id>/strategy.json"

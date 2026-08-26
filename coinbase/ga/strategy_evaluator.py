@@ -120,7 +120,7 @@ class GaStrategy:
     # ever opened from flat, so a score that crosses the whole range in one
     # candle closes the current position and leaves the reversal to the next.
     def decide(self, row: dict[str, float], position: Optional[Position], balance: float) -> Decision:
-        score = self._signal_score(row, position)
+        score = self.signal_score(row, position)
         if position is None:
             if score > self._config.buy_threshold:
                 return Decision(Action.BUY, self._size(balance, row))
@@ -136,7 +136,10 @@ class GaStrategy:
     def _size(self, balance: float, row: dict[str, float]) -> float:
         return (balance * self._config.position_size_pct) / row["close"]
 
-    def _signal_score(self, row: dict[str, float], position: Optional[Position]) -> float:
+    # Public because it is the number that explains a decision: a monitor
+    # showing why a strategy is holding needs the score, not just the action.
+    # A pure query — asking for it never changes what decide() would return.
+    def signal_score(self, row: dict[str, float], position: Optional[Position]) -> float:
         total = sum(
             self._genome.weight(key) * row[f"norm_{key}"]
             for key in self._keys if key != POSITION_PNL_KEY

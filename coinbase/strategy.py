@@ -1,13 +1,17 @@
 import asyncio
+import logging
 import time
 from typing import Optional
 
+import aiohttp
 import pandas as pd
 
 from coinbase.ga.market_data_processor import AccountBalance, HistoricalMarketData, IndicatorPeriods
 from coinbase.market_scanner import GRANULARITY_SECONDS
 from coinbase.trading_strategy import Decision, Ledger, Strategy
-from exchange.adapter import ExchangeAdapter
+from exchange.adapter import ExchangeAdapter, ExchangeError
+
+logger = logging.getLogger(__name__)
 
 
 # ── Live row ─────────────────────────────────────────────────────────────
@@ -26,6 +30,7 @@ class LiveMarketRow:
         periods: IndicatorPeriods,
         normalized_columns: tuple[str, ...],
         lookback_candles: int = 200,
+        limit: Optional[asyncio.Semaphore] = None,
     ) -> None:
         self._adapter            = adapter
         self._pair               = pair
@@ -33,6 +38,7 @@ class LiveMarketRow:
         self._periods            = periods
         self._normalized_columns = normalized_columns
         self._lookback_candles   = lookback_candles
+        self._limit              = limit
 
     def pair(self) -> str:
         return self._pair
@@ -48,6 +54,7 @@ class LiveMarketRow:
         return await HistoricalMarketData(
             self._adapter, self._pair, self._granularity, start, end,
             self._periods, self._normalized_columns, cache_dir=None,
+            limit=self._limit,
         ).dataframe()
 
     async def latest(self) -> dict[str, float]:
@@ -83,6 +90,44 @@ class ClosedMarketRow:
     def current_candle_start(self) -> int:
         seconds = GRANULARITY_SECONDS[self._rows.granularity()]
         return int(time.time()) // seconds * seconds
+
+
+# ── Retrying row ─────────────────────────────────────────────────────────
+# An unattended loop must survive the exchange being briefly unavailable. Only
+# transient failures are retried: a 429 or a 5xx, or the connection dropping.
+# A 4xx other than 429 is a real rejection, and ClosedMarketRow's ValueError
+# ("no completed candle yet") is a real state — retrying either just delays the
+# same answer, so both propagate immediately.
+
+class RetriedMarketRow:
+    def __init__(self, rows: ClosedMarketRow, attempts: int = 3, base_delay: float = 2.0) -> None:
+        self._rows       = rows
+        self._attempts   = attempts
+        self._base_delay = base_delay
+
+    def pair(self) -> str:
+        return self._rows.pair()
+
+    async def latest(self) -> dict[str, float]:
+        for attempt in range(self._attempts):
+            try:
+                return await self._rows.latest()
+            except (ExchangeError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                if not self._transient(exc) or attempt == self._attempts - 1:
+                    raise
+                delay = self._base_delay * (2 ** attempt)
+                logger.warning(
+                    "%s fetch failed (%s), retrying in %.1fs", self._rows.pair(), exc, delay,
+                )
+                await asyncio.sleep(delay)
+        # Unreachable: the loop either returns or raises on its last attempt.
+        raise ValueError(f"no attempts made for {self._rows.pair()}")
+
+    @staticmethod
+    def _transient(exc: Exception) -> bool:
+        if isinstance(exc, ExchangeError):
+            return exc.status == 429 or exc.status >= 500
+        return True
 
 
 # ── Live trading loop ────────────────────────────────────────────────────
