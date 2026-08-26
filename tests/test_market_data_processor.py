@@ -3,7 +3,7 @@ import asyncio
 import pandas as pd
 import pytest
 
-from coinbase.coinbase_adapter import CoinbaseError
+from exchange.adapter import ExchangeError
 from coinbase.ga.market_data_processor import (
     AccountBalance,
     CachedHistoricalCandles,
@@ -43,6 +43,12 @@ class FakeAdapter:
 
     async def get_accounts(self, limit: int = 250) -> list[dict]:
         return self._accounts
+
+    def max_candles_per_request(self) -> int:
+        return 300
+
+    def name(self) -> str:
+        return "coinbase"
 
 
 def _candle(start: int, close: float, high: float = None, low: float = None, volume: float = 1.0) -> dict:
@@ -238,6 +244,12 @@ class _ConcurrencyRecordingAdapter:
         self.in_flight -= 1
         return [_candle(start, close=1.0)]
 
+    def max_candles_per_request(self) -> int:
+        return 300
+
+    def name(self) -> str:
+        return "coinbase"
+
 
 @pytest.mark.asyncio
 async def test_historical_candles_bounds_concurrent_requests():
@@ -282,18 +294,18 @@ async def test_historical_candles_dedupes_boundary_candle():
 # ── Candle disk cache ──────────────────────────────────────────────────
 
 def test_candle_cache_key_filename_is_stable_for_the_same_window():
-    key = CandleCacheKey("BTC-USDC", "ONE_HOUR", 0, 3600 * 80)
-    assert key.filename() == CandleCacheKey("BTC-USDC", "ONE_HOUR", 0, 3600 * 80).filename()
+    key = CandleCacheKey("coinbase", "BTC-USDC", "ONE_HOUR", 0, 3600 * 80)
+    assert key.filename() == CandleCacheKey("coinbase", "BTC-USDC", "ONE_HOUR", 0, 3600 * 80).filename()
 
 
 def test_candle_cache_key_filename_differs_for_a_different_window():
-    a = CandleCacheKey("BTC-USDC", "ONE_HOUR", 0, 3600 * 80)
-    b = CandleCacheKey("BTC-USDC", "ONE_HOUR", 0, 3600 * 90)
+    a = CandleCacheKey("coinbase", "BTC-USDC", "ONE_HOUR", 0, 3600 * 80)
+    b = CandleCacheKey("coinbase", "BTC-USDC", "ONE_HOUR", 0, 3600 * 90)
     assert a.filename() != b.filename()
 
 
 def test_candle_cache_file_round_trips_candles(tmp_path):
-    key        = CandleCacheKey("BTC-USDC", "ONE_HOUR", 0, 3600 * 80)
+    key        = CandleCacheKey("coinbase", "BTC-USDC", "ONE_HOUR", 0, 3600 * 80)
     cache_file = CandleCacheFile(str(tmp_path), key)
     candles    = _rising_candles(5)
 
@@ -311,7 +323,7 @@ async def test_cached_historical_candles_fetches_once_then_reads_disk(tmp_path):
         candles_by_window={window: _rising_candles(80, start_ts=0)},
         accounts=[],
     )
-    key        = CandleCacheKey("BTC-USDC", "ONE_HOUR", start, end)
+    key        = CandleCacheKey("coinbase", "BTC-USDC", "ONE_HOUR", start, end)
     cache_file = CandleCacheFile(str(tmp_path), key)
 
     first_raw = await CachedHistoricalCandles(
@@ -403,7 +415,7 @@ async def test_live_market_state_snapshot_uses_latest_candle_and_balances():
 @pytest.mark.asyncio
 async def test_live_market_state_raises_when_no_candles_available():
     adapter = FakeAdapter(candles_by_window={}, accounts=[])
-    with pytest.raises(CoinbaseError):
+    with pytest.raises(ExchangeError):
         await LiveMarketState(adapter, "BTC-USDC", "ONE_HOUR").snapshot()
 
 
@@ -457,3 +469,107 @@ def test_market_data_config_cache_dir_defaults_when_absent():
 
     raw = {"market_data": {"normalized_columns": [], "delta_columns": []}}
     assert MarketDataConfig(raw).cache_dir() == str(GA_RESULTS_ROOT / "candle_cache")
+
+
+# ── Exchange-agnostic behaviour ────────────────────────────────────────
+
+
+class WideAdapter(FakeAdapter):
+    """An adapter whose exchange allows far larger candle pages, as Binance does."""
+
+    def max_candles_per_request(self) -> int:
+        return 1000
+
+    def name(self) -> str:
+        return "binance"
+
+
+@pytest.mark.asyncio
+async def test_candle_windows_are_chunked_by_the_adapters_own_ceiling():
+    narrow = FakeAdapter(candles_by_window={}, accounts=[])
+    wide   = WideAdapter(candles_by_window={}, accounts=[])
+    span   = 3600 * 900   # 900 hourly candles
+
+    await HistoricalCandles(narrow, "BTC-USDC", "ONE_HOUR", 0, span).raw()
+    await HistoricalCandles(wide, "BTC-USDC", "ONE_HOUR", 0, span).raw()
+
+    assert len(narrow.candle_calls) == 3   # 300 per request
+    assert len(wide.candle_calls) == 1     # 1000 per request
+
+
+def _isolated_account(currency: str, available: str, product_id: str) -> dict:
+    return {
+        "currency":          currency,
+        "product_id":        product_id,
+        "available_balance": {"value": available, "currency": currency},
+    }
+
+
+@pytest.mark.asyncio
+async def test_account_balance_ignores_pair_scope_on_account_wide_wallets():
+    adapter = FakeAdapter(candles_by_window={}, accounts=[_account("USDC", "500")])
+
+    balance = await AccountBalance(adapter, "USDC", "BTC-USDC").available()
+
+    assert balance == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_account_balance_picks_the_requested_pairs_isolated_wallet():
+    adapter = FakeAdapter(candles_by_window={}, accounts=[
+        _isolated_account("USDC", "100", "ETH-USDC"),
+        _isolated_account("USDC", "700", "BTC-USDC"),
+    ])
+
+    balance = await AccountBalance(adapter, "USDC", "BTC-USDC").available()
+
+    assert balance == pytest.approx(700.0)
+
+
+@pytest.mark.asyncio
+async def test_an_unscoped_lookup_takes_the_first_matching_isolated_wallet():
+    adapter = FakeAdapter(candles_by_window={}, accounts=[
+        _isolated_account("USDC", "100", "ETH-USDC"),
+        _isolated_account("USDC", "700", "BTC-USDC"),
+    ])
+
+    balance = await AccountBalance(adapter, "USDC").available()
+
+    assert balance == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_a_pair_with_no_wallet_for_that_asset_reads_as_zero():
+    adapter = FakeAdapter(candles_by_window={}, accounts=[
+        _isolated_account("USDC", "100", "ETH-USDC"),
+    ])
+
+    balance = await AccountBalance(adapter, "USDC", "BTC-USDC").available()
+
+    assert balance == pytest.approx(0.0)
+
+
+def test_candle_cache_key_filename_differs_per_exchange():
+    coinbase = CandleCacheKey("coinbase", "BTC-USDC", "SIX_HOUR", 0, 3600 * 80)
+    binance  = CandleCacheKey("binance", "BTC-USDC", "SIX_HOUR", 0, 3600 * 80)
+
+    assert coinbase.filename() != binance.filename()
+
+
+@pytest.mark.asyncio
+async def test_one_exchanges_cached_window_is_never_served_to_the_other(tmp_path):
+    start, end = 0, 3600 * 80
+    candles    = _rising_candles(80)
+    coinbase   = FakeAdapter(candles_by_window={(start, end): candles}, accounts=[])
+    binance    = WideAdapter(candles_by_window={(start, end): candles}, accounts=[])
+    periods    = IndicatorPeriods()
+
+    await HistoricalMarketData(
+        coinbase, "BTC-USDC", "ONE_HOUR", start, end, periods, (), str(tmp_path),
+    ).dataframe()
+    await HistoricalMarketData(
+        binance, "BTC-USDC", "ONE_HOUR", start, end, periods, (), str(tmp_path),
+    ).dataframe()
+
+    # The second run must have hit its own exchange, not Coinbase's cache file.
+    assert len(binance.candle_calls) == 1

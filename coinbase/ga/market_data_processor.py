@@ -9,10 +9,12 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from coinbase.coinbase_adapter import CoinbaseAdapter, CoinbaseError
 from coinbase.ga.config import GA_RESULTS_ROOT, ConfigFile
 from coinbase.market_scanner import GRANULARITY_SECONDS
+from exchange.adapter import ExchangeAdapter, ExchangeError
 
+# Fallback only — the window is normally chunked by the adapter's own ceiling
+# (adapter.max_candles_per_request()), which differs per exchange.
 MAX_CANDLES_PER_REQUEST = 300
 
 
@@ -252,7 +254,7 @@ class ChunkedTimeRange:
 class ThrottledCandlePage:
     def __init__(
         self,
-        adapter: CoinbaseAdapter,
+        adapter: ExchangeAdapter,
         product_id: str,
         granularity: str,
         limit: asyncio.Semaphore,
@@ -278,7 +280,7 @@ class HistoricalCandles:
     # inside its timeout while still overlapping enough to stay quick.
     def __init__(
         self,
-        adapter: CoinbaseAdapter,
+        adapter: ExchangeAdapter,
         product_id: str,
         granularity: str,
         start: int,
@@ -296,7 +298,8 @@ class HistoricalCandles:
     async def raw(self) -> list[dict]:
         if self._cache is None:
             windows = ChunkedTimeRange(
-                self._start, self._end, GRANULARITY_SECONDS[self._granularity]
+                self._start, self._end, GRANULARITY_SECONDS[self._granularity],
+                self._adapter.max_candles_per_request(),
             ).windows()
             page = ThrottledCandlePage(
                 self._adapter, self._product_id, self._granularity,
@@ -317,15 +320,20 @@ class HistoricalCandles:
 # Deliberately not used by LiveMarketState, which needs the true latest
 # candle on every call.
 
+# Keyed by exchange first: "BTC-USDC"/"SIX_HOUR" name the same window on
+# either venue but not the same prices, and a cached file is returned without
+# ever consulting the adapter. Without this, flipping data.exchange and
+# retraining would silently score Binance runs on Coinbase candles.
 class CandleCacheKey:
-    def __init__(self, pair: str, granularity: str, start: int, end: int) -> None:
+    def __init__(self, exchange: str, pair: str, granularity: str, start: int, end: int) -> None:
+        self._exchange    = exchange
         self._pair        = pair
         self._granularity = granularity
         self._start       = start
         self._end         = end
 
     def filename(self) -> str:
-        return f"{self._pair}_{self._granularity}_{self._start}_{self._end}.json"
+        return f"{self._exchange}_{self._pair}_{self._granularity}_{self._start}_{self._end}.json"
 
 
 class CandleCacheFile:
@@ -364,17 +372,35 @@ class CachedHistoricalCandles:
         return raw
 
 
+# Coinbase wallets are account-wide, so a currency names exactly one balance.
+# Binance isolated margin holds a separate wallet per pair, so the same asset
+# appears once per pair and its accounts carry a "product_id". Passing one
+# scopes the lookup to that pair; accounts without the key match regardless,
+# which leaves Coinbase's behaviour unchanged.
 class AccountBalance:
-    def __init__(self, adapter: CoinbaseAdapter, currency: str) -> None:
-        self._adapter  = adapter
-        self._currency = currency
+    def __init__(
+        self,
+        adapter: ExchangeAdapter,
+        currency: str,
+        product_id: Optional[str] = None,
+    ) -> None:
+        self._adapter    = adapter
+        self._currency   = currency
+        self._product_id = product_id
 
     async def available(self) -> float:
         accounts = await self._adapter.get_accounts(limit=250)
         for account in accounts:
-            if account["currency"] == self._currency:
-                return float(account.get("available_balance", {}).get("value", 0.0) or 0.0)
+            if account["currency"] != self._currency:
+                continue
+            if not self._in_scope(account):
+                continue
+            return float(account.get("available_balance", {}).get("value", 0.0) or 0.0)
         return 0.0
+
+    def _in_scope(self, account: dict) -> bool:
+        scope = account.get("product_id")
+        return scope is None or self._product_id is None or scope == self._product_id
 
 
 # ── Entry points ───────────────────────────────────────────────────────
@@ -382,7 +408,7 @@ class AccountBalance:
 class HistoricalMarketData:
     def __init__(
         self,
-        adapter: CoinbaseAdapter,
+        adapter: ExchangeAdapter,
         product_id: str,
         granularity: str,
         start: int,
@@ -406,7 +432,10 @@ class HistoricalMarketData:
             base,
             CandleCacheFile(
                 self._cache_dir,
-                CandleCacheKey(self._product_id, self._granularity, self._start, self._end),
+                CandleCacheKey(
+                    self._adapter.name(), self._product_id, self._granularity,
+                    self._start, self._end,
+                ),
             ),
         )
         raw   = await candles.raw()
@@ -415,7 +444,7 @@ class HistoricalMarketData:
 
 
 class LiveMarketState:
-    def __init__(self, adapter: CoinbaseAdapter, product_id: str, granularity: str) -> None:
+    def __init__(self, adapter: ExchangeAdapter, product_id: str, granularity: str) -> None:
         self._adapter     = adapter
         self._product_id  = product_id
         self._granularity = granularity
@@ -426,11 +455,11 @@ class LiveMarketState:
         start       = end - GRANULARITY_SECONDS[self._granularity] * 2
         candles, base_balance, quote_balance = await asyncio.gather(
             HistoricalCandles(self._adapter, self._product_id, self._granularity, start, end).raw(),
-            AccountBalance(self._adapter, base).available(),
-            AccountBalance(self._adapter, quote).available(),
+            AccountBalance(self._adapter, base, self._product_id).available(),
+            AccountBalance(self._adapter, quote, self._product_id).available(),
         )
         if not candles:
-            raise CoinbaseError(0, {"product_id": self._product_id}, f"No recent candles for {self._product_id}")
+            raise ExchangeError(0, {"product_id": self._product_id}, f"No recent candles for {self._product_id}")
         latest = max(candles, key=lambda c: int(c["start"]))
         return LiveSnapshot(
             close         = float(latest["close"]),
@@ -449,13 +478,13 @@ class LiveMarketState:
 # Fetches a small BTC-USDC window and prints the indicator frame's tail.
 
 async def _main() -> None:
-    from coinbase.credentials_file import CredentialsFile
+    from exchange.selection import ConfiguredExchange
 
-    credentials = CredentialsFile().credentials()
-    config      = MarketDataConfig(ConfigFile("coinbase/ga/config.yaml").raw())
-    window      = config.window()
+    raw_config = ConfigFile("coinbase/ga/config.yaml").raw()
+    config     = MarketDataConfig(raw_config)
+    window     = config.window()
 
-    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
+    async with ConfiguredExchange(raw_config).adapter() as adapter:
         market_data = HistoricalMarketData(
             adapter, window.pair, window.granularity, window.start, window.end,
             config.periods(), config.columns(), config.cache_dir(),

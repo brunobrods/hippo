@@ -1,6 +1,6 @@
 import asyncio
 
-from coinbase.coinbase_adapter import CoinbaseAdapter
+from exchange.selection import ConfiguredExchange
 from coinbase.ga.config import ConfigFile
 from coinbase.ga.ga_engine import Genome
 from coinbase.ga.market_data_processor import MarketDataConfig
@@ -60,13 +60,11 @@ class DryRun:
 # a loop matched to its trained granularity, logging every decision it would
 # make against a simulated balance seeded from config.yaml's starting_balance.
 # Never places a real order — safe to leave running against live prices.
-# Requires only a read-scoped Coinbase key (candles, no account/order calls).
+# Requires only a read-scoped key for the configured exchange (candles only,
+# no account or order calls).
 # Ctrl+C to stop.
 
 async def _main() -> None:
-    from coinbase.credentials_file import CredentialsFile
-
-    credentials     = CredentialsFile().credentials()
     raw_config      = ConfigFile("coinbase/ga/config.yaml").raw()
     market_config   = MarketDataConfig(raw_config)
     window          = market_config.window()
@@ -81,7 +79,7 @@ async def _main() -> None:
     genome   = Genome(reloaded.weights())
     strategy = GaStrategy(genome, strategy_config, keys)
 
-    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
+    async with ConfiguredExchange(raw_config).adapter() as adapter:
         market_row  = LiveMarketRow(
             adapter, window.pair, window.granularity, market_config.periods(), market_config.normalized_columns(),
         )

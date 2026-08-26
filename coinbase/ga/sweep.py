@@ -5,10 +5,10 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from coinbase.coinbase_adapter import CoinbaseAdapter
 from coinbase.ga.config import ConfigFile
 from coinbase.ga.main import TrainingRun, TrainingSummary
 from coinbase.ga.strategy_output import OutputConfigFile, ParentDirectory
+from exchange.adapter import ExchangeAdapter
 
 # genetic_algorithm.seed is overridden per seed repeat regardless of which
 # axis is varying, so every axis value gets trained once per configured seed.
@@ -134,7 +134,7 @@ class Sweep:
     # the first point populating market_data_processor's candle disk cache
     # before the rest read it. Running points concurrently would race several
     # cold fetches of the same window instead of reusing one.
-    def __init__(self, adapter: CoinbaseAdapter, points: tuple[SweepPoint, ...], progress: ConsoleSweepProgress) -> None:
+    def __init__(self, adapter: ExchangeAdapter, points: tuple[SweepPoint, ...], progress: ConsoleSweepProgress) -> None:
         self._adapter  = adapter
         self._points   = points
         self._progress = progress
@@ -162,10 +162,9 @@ class Sweep:
 # already-recorded points in experiments/ are unaffected either way.
 
 async def _main() -> None:
-    from coinbase.credentials_file import CredentialsFile
+    from exchange.selection import ConfiguredExchange
 
     sweep_config_path = sys.argv[1] if len(sys.argv) > 1 else "coinbase/ga/sweep.yaml"
-    credentials  = CredentialsFile().credentials()
     sweep_config = SweepConfigFile(ConfigFile(sweep_config_path).raw())
     base_config  = ConfigFile(sweep_config.base_config_path()).raw()
     plan         = SweepPlan(base_config, sweep_config.axes(), sweep_config.seeds())
@@ -175,7 +174,7 @@ async def _main() -> None:
     print(f"Sweeping {len(points)} points across {len(sweep_config.axes())} axes, "
           f"{len(sweep_config.seeds())} seeds each")
 
-    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
+    async with ConfiguredExchange(base_config).adapter() as adapter:
         await Sweep(adapter, points, ConsoleSweepProgress(len(points))).run()
 
 

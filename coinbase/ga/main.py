@@ -2,7 +2,8 @@ import asyncio
 import math
 from typing import Any
 
-from coinbase.coinbase_adapter import CoinbaseAdapter
+from exchange.adapter import ExchangeAdapter
+from exchange.selection import ConfiguredExchange
 from coinbase.ga.config import ConfigFile
 from coinbase.ga.experiment_history import (
     ExperimentDirectory,
@@ -83,7 +84,7 @@ class TrainingSummary:
 # ── Orchestration ────────────────────────────────────────────────────────
 
 class TrainingRun:
-    def __init__(self, adapter: CoinbaseAdapter, raw_config: dict[str, Any]) -> None:
+    def __init__(self, adapter: ExchangeAdapter, raw_config: dict[str, Any]) -> None:
         self._adapter    = adapter
         self._raw_config = raw_config
 
@@ -182,17 +183,15 @@ class TrainingRun:
 # Run (as a module, from the repo root — a direct script path fails with
 # ModuleNotFoundError: No module named 'coinbase'):
 #   python -m coinbase.ga.main
-# Trains a GA strategy on live Coinbase historical data, evaluates it on the
+# Trains a GA strategy on live historical data from the exchange named by
+# `data.exchange` in config.yaml, evaluates it on the
 # held-out test split, saves it to output.strategy_filepath, and verifies
 # the saved JSON reloads into an identical backtest result.
 
 async def _main() -> None:
-    from coinbase.credentials_file import CredentialsFile
+    raw_config = ConfigFile("coinbase/ga/config.yaml").raw()
 
-    credentials = CredentialsFile().credentials()
-    raw_config  = ConfigFile("coinbase/ga/config.yaml").raw()
-
-    async with CoinbaseAdapter(credentials.api_key, credentials.api_secret) as adapter:
+    async with ConfiguredExchange(raw_config).adapter() as adapter:
         summary = await TrainingRun(adapter, raw_config).train()
 
     print()

@@ -1,6 +1,8 @@
 from typing import Optional
 
 import pandas as pd
+import math
+
 import pytest
 
 from coinbase.trading_strategy import (
@@ -93,17 +95,70 @@ def test_unrealized_return_is_positive_for_a_winning_position_either_way():
     assert long_.unrealized_return(120.0) == pytest.approx(0.20)  # price rose 20% -> long is up
 
 
-# ── IsolatedMargin (1x) ──────────────────────────────────────────────
+# ── IsolatedMargin ───────────────────────────────────────────────────
 
-def test_short_liquidates_at_double_the_entry_price():
-    margin = IsolatedMargin(Position(entry_price=100.0, size=1.0, direction=Direction.SHORT))
-    assert margin.liquidation_price() == pytest.approx(200.0)
-    assert margin.breached_by(high=200.0, low=90.0) is True
-    assert margin.breached_by(high=199.9, low=90.0) is False
+def test_short_liquidation_is_collateral_plus_proceeds_over_the_margin_level():
+    # 100 collateral, 1 unit shorted at 100 -> (100 + 100) / (1.05 * 1)
+    margin = IsolatedMargin(
+        Position(entry_price=100.0, size=1.0, direction=Direction.SHORT), collateral=100.0,
+    )
+    assert margin.liquidation_price() == pytest.approx(190.476190, rel=1e-6)
+    assert margin.breached_by(high=191.0, low=90.0) is True
+    assert margin.breached_by(high=190.0, low=90.0) is False
 
 
-def test_long_is_never_liquidated_at_1x():
-    margin = IsolatedMargin(Position(entry_price=100.0, size=1.0, direction=Direction.LONG))
+def test_a_full_size_short_liquidates_near_but_below_double_the_entry():
+    # The old flat rule said exactly 2x. A short whose notional is the entire
+    # wallet is the ONE case it approximated, and even there it was generous:
+    # the level is really hit at 2x / 1.05.
+    margin = IsolatedMargin(
+        Position(entry_price=100.0, size=1.0, direction=Direction.SHORT), collateral=100.0,
+    )
+    assert margin.liquidation_price() < 200.0
+    assert margin.liquidation_price() == pytest.approx(200.0 / 1.05, rel=1e-9)
+
+
+def test_more_collateral_pushes_the_liquidation_price_further_away():
+    def liquidation(collateral: float) -> float:
+        return IsolatedMargin(
+            Position(entry_price=100.0, size=1.0, direction=Direction.SHORT), collateral,
+        ).liquidation_price()
+
+    assert liquidation(100.0) < liquidation(200.0) < liquidation(1000.0)
+
+
+def test_a_sixty_percent_sized_short_liquidates_around_two_and_a_half_times_entry():
+    # position_size_pct 0.60 against a 1000 balance: 6 units at 100 = 600 notional.
+    margin = IsolatedMargin(
+        Position(entry_price=100.0, size=6.0, direction=Direction.SHORT), collateral=1000.0,
+    )
+    # (1000 + 600) / (1.05 * 6) = 253.97 -> the flat 2x rule fired at 200.0
+    assert margin.liquidation_price() == pytest.approx(253.968254, rel=1e-6)
+
+
+def test_matches_the_live_binance_liquidation_price():
+    # Measured on BTCUSDT: 0.00019022 BTC borrowed at entry 78266.0 against
+    # quote assets of 57.92954995 reported liquidatePrice 290022.60.
+    size, entry = 0.00019022, 78266.0
+    margin = IsolatedMargin(
+        Position(entry_price=entry, size=size, direction=Direction.SHORT),
+        collateral=57.92954995 - size * entry,   # collateral before the sale proceeds
+    )
+    assert margin.liquidation_price() == pytest.approx(290022.60, rel=1e-4)
+
+
+def test_a_zero_size_short_borrows_nothing_and_is_never_liquidated():
+    margin = IsolatedMargin(
+        Position(entry_price=100.0, size=0.0, direction=Direction.SHORT), collateral=1000.0,
+    )
+    assert margin.liquidation_price() == math.inf
+    assert margin.breached_by(high=1e12, low=0.0) is False
+
+
+def test_long_is_never_liquidated_because_it_borrows_nothing():
+    margin = IsolatedMargin(
+        Position(entry_price=100.0, size=1.0, direction=Direction.LONG), collateral=100.0,
+    )
     assert margin.liquidation_price() == pytest.approx(0.0)
     assert margin.breached_by(high=100.0, low=0.01) is False
 
@@ -111,10 +166,11 @@ def test_long_is_never_liquidated_at_1x():
 def test_ledger_liquidates_a_short_at_its_liquidation_price_not_the_candle_high():
     ledger = Ledger(1000.0)
     ledger.apply(Decision(Action.SHORT, size=2.0), price=100.0)
-    ledger.liquidate(high=250.0, low=95.0)  # wick far beyond the 200.0 liquidation
+    # (1000 + 200) / (1.05 * 2) = 571.428...
+    ledger.liquidate(high=600.0, low=95.0)
     assert ledger.position() is None
-    assert ledger.trades()[0].profit() == pytest.approx(-200.0)  # (100-200)*2, not (100-250)*2
-    assert ledger.balance() == pytest.approx(800.0)
+    assert ledger.trades()[0].profit() == pytest.approx((100.0 - 1200.0 / 2.1) * 2.0)
+    assert ledger.balance() == pytest.approx(1000.0 + (100.0 - 1200.0 / 2.1) * 2.0)
 
 
 def test_ledger_liquidate_leaves_an_unbreached_position_open():
@@ -123,6 +179,19 @@ def test_ledger_liquidate_leaves_an_unbreached_position_open():
     ledger.liquidate(high=150.0, low=90.0)
     assert ledger.position() is not None
     assert ledger.trades() == []
+
+
+def test_ledger_liquidation_uses_the_balance_backing_the_position():
+    # Same short, different wallets: the thinner one is liquidated by a wick
+    # that the richer one survives.
+    thin = Ledger(100.0)
+    rich = Ledger(10000.0)
+    for ledger in (thin, rich):
+        ledger.apply(Decision(Action.SHORT, size=1.0), price=100.0)
+        ledger.liquidate(high=400.0, low=95.0)
+
+    assert thin.position() is None       # liquidates at (100+100)/1.05 = 190.5
+    assert rich.position() is not None   # liquidates at (10000+100)/1.05 = 9619.0
 
 
 # ── Ledger: short lifecycle ──────────────────────────────────────────
@@ -314,20 +383,22 @@ def test_backtest_short_profits_as_price_falls():
 
 
 def test_backtest_liquidates_a_short_before_taking_that_candles_decision():
-    # the position is opened on candle 0; candle 1 wicks above 2x entry and must
-    # liquidate it, so the scripted COVER on candle 2 finds nothing to close
-    frame    = _ohlc_frame([(100.0, 100.0, 100.0), (150.0, 210.0, 140.0), (90.0, 150.0, 90.0)])
+    # the position is opened on candle 0; candle 1 wicks past the liquidation
+    # price and must close it, so the scripted COVER on candle 2 finds nothing.
+    # 1 unit @100 against a 1000 balance liquidates at (1000+100)/1.05 = 1047.6
+    frame    = _ohlc_frame([(100.0, 100.0, 100.0), (150.0, 1100.0, 140.0), (90.0, 150.0, 90.0)])
     strategy = _ScriptedDirectionalStrategy([Action.SHORT, Action.HOLD, Action.COVER])
     result   = Backtest(frame, strategy, starting_balance=1000.0).run()
     trades   = result.trades()
     assert len(trades) == 1
-    assert trades[0].profit() == pytest.approx(-100.0)  # 1 unit @100 closed at 200, not at 210 or 90
+    # closed at the liquidation price, not at the 1100.0 wick or the 90.0 close
+    assert trades[0].profit() == pytest.approx(100.0 - 1100.0 / 1.05)
 
 
 def test_backtest_does_not_liquidate_a_short_on_the_candle_that_opened_it():
-    # candle 0's own high already exceeds 2x entry, but that range happened
-    # before the close the position is opened at
-    frame    = _ohlc_frame([(100.0, 500.0, 100.0), (95.0, 100.0, 90.0)])
+    # candle 0's own high already exceeds the liquidation price, but that range
+    # happened before the close the position is opened at
+    frame    = _ohlc_frame([(100.0, 5000.0, 100.0), (95.0, 100.0, 90.0)])
     strategy = _ScriptedDirectionalStrategy([Action.SHORT, Action.HOLD])
     result   = Backtest(frame, strategy, starting_balance=1000.0).run()
     assert result.trades()[0].profit() == pytest.approx(0.0)  # unwound at entry, never liquidated

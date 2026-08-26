@@ -47,10 +47,13 @@ from typing import Any, Optional
 import aiohttp
 import jwt as pyjwt      # pip install "PyJWT[crypto]"
 
+from exchange.adapter import ExchangeError
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.coinbase.com"
 _JWT_TTL = 120  # seconds — Coinbase rejects JWTs older than 2 minutes
+MAX_CANDLES_PER_REQUEST = 300  # Coinbase truncates a candles response past this
 
 
 # ── JWT helpers ────────────────────────────────────────────────────────
@@ -404,6 +407,12 @@ class CoinbaseAdapter:
         )
         return result.get("candles", result)
 
+    def max_candles_per_request(self) -> int:
+        return MAX_CANDLES_PER_REQUEST
+
+    def name(self) -> str:
+        return "coinbase"
+
     async def get_market_trades(self, product_id: str, limit: int = 10) -> list[dict]:
         """Recent public trades for a product."""
         result = await self._get(
@@ -415,12 +424,8 @@ class CoinbaseAdapter:
 
 # ── Exception ──────────────────────────────────────────────────────────
 
-class CoinbaseError(Exception):
-    def __init__(self, status: int, raw: Any, message: str = ""):
-        msg = message or str(raw)
-        super().__init__(f"[HTTP {status}] {msg} | raw={raw}")
-        self.status = status
-        self.raw    = raw
+class CoinbaseError(ExchangeError):
+    pass
 
 
 # ── Utility ────────────────────────────────────────────────────────────
