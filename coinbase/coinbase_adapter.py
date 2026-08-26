@@ -145,7 +145,15 @@ class CoinbaseAdapter:
 
     @staticmethod
     async def _parse(resp: aiohttp.ClientResponse) -> Any:
-        data = await resp.json()
+        # Status is checked against a body that may not be JSON at all: a 429
+        # or a gateway 5xx often comes back as plain text or HTML from an edge
+        # proxy, and decoding that first raises aiohttp's ContentTypeError
+        # instead of CoinbaseError — throwing away the status code that says
+        # what actually went wrong.
+        try:
+            data = await resp.json()
+        except aiohttp.ContentTypeError:
+            data = {"body": (await resp.text())[:500]}
         if not resp.ok:
             raise CoinbaseError(resp.status, data)
         # Some endpoints wrap in {"order": ...}, others return directly
