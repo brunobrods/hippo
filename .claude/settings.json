@@ -1,0 +1,34 @@
+{
+  "autoMode": {
+    "soft_deny": [
+      "$defaults",
+      "Bash(python coinbase/coinbase_adapter.py:*) — live smoke test against real Coinbase trading API, requires trade:read_write key and places/queries real orders"
+    ],
+    "environment": [
+      "### Org-wide",
+      "**Organization**: None configured",
+      "**Cloud provider(s)**: None configured",
+      "**Repository visibility**: not queryable here — assume private per shipped default (no evidence of public visibility)",
+      "**Internal sharing / snippet hosting**: None configured — treat public paste/gist services as outside the trust boundary",
+      "**Secrets management**: None configured — live credentials are read from `~/.coinbase/credentials.yaml`, outside the repo and shared across every worktree, via `CredentialsFile` in `coinbase/credentials_file.py`; a legacy `coinbase/credentials.py` (gitignored, never committed) still holds an api_key/api_secret pair on this machine",
+      "**Default / protected branches**: not queryable here (gh visibility/rulesets/branch checks returned not queryable); `master` is the PR base and must never be committed to directly (enforced by `.githooks/pre-commit`)",
+      "**CI/CD deploy targets**: None configured",
+      "**Network posture**: None configured",
+      "**Source control**: The trusted repo (github.com/brunobrods/hippo) and its remote(s) only — no additional orgs configured",
+      "**Trusted internal domains**: None configured",
+      "**Trusted cloud buckets**: None configured",
+      "**Key internal services**: None configured",
+      "**Internal package registry**: None configured",
+      "**Sensitive data locations & audiences**: `~/.coinbase/credentials.yaml` (outside the repo — Coinbase Advanced Trade API key/secret, live trading credentials) and the gitignored `coinbase/credentials.py`; share only with audiences cleared at the [named+specifics] bar",
+      "**Data retention / declassification**: None configured",
+      "**Sensitive remote targets**: any namespace, host, or container whose name carries `prod` or `production` as a whole word or name segment; note this project's Coinbase Advanced Trade API has no sandbox — all order placement and adapter smoke tests are live against real funds",
+      "**Protected deployment namespaces / environments**: None configured — fall back to the Sensitive remote targets heuristic",
+      "**Protected IaC scopes**: IAM, RBAC, networking, quota, and node-pool resources; anything whose name or tag carries `prod` or `production` as a whole word or name segment",
+      "### User-specific",
+      "**Primary use of Claude Code**: software development (async Python toolkit for the Coinbase Advanced Trade REST API)",
+      "**Trusted repo**: This repo (github.com/brunobrods/hippo) and its configured remote — visibility not queryable here, treat as private per shipped default; confidential material scoped accordingly, but credentials (`~/.coinbase/credentials.yaml`, the gitignored `coinbase/credentials.py`) are never cleared into the repo regardless of visibility",
+      "**Org-specific CLIs**: None configured",
+      "routine under the repo's `.claude/worktrees/model_development/` prefix"
+    ]
+  }
+}
