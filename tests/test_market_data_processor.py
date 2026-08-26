@@ -1,3 +1,5 @@
+import asyncio
+
 import pandas as pd
 import pytest
 
@@ -217,6 +219,47 @@ async def test_historical_candles_pages_across_chunks_and_caches():
 
     await candles.raw()  # second call must not re-fetch
     assert len(adapter.candle_calls) == 3
+
+
+class _ConcurrencyRecordingAdapter:
+    # Records how many candle requests are ever in flight at once. Each call
+    # yields to the loop, so an unbounded gather would drive `peak` to the
+    # number of windows.
+    def __init__(self) -> None:
+        self.in_flight = 0
+        self.peak      = 0
+        self.calls     = 0
+
+    async def get_product_candles(self, product_id: str, start: int, end: int, granularity: str) -> list[dict]:
+        self.in_flight += 1
+        self.peak       = max(self.peak, self.in_flight)
+        self.calls     += 1
+        await asyncio.sleep(0)
+        self.in_flight -= 1
+        return [_candle(start, close=1.0)]
+
+
+@pytest.mark.asyncio
+async def test_historical_candles_bounds_concurrent_requests():
+    # 40 windows of ONE_HOUR candles at 300 per request
+    adapter = _ConcurrencyRecordingAdapter()
+    start, end = 0, 3600 * 300 * 40
+    await HistoricalCandles(
+        adapter, "BTC-USDC", "ONE_HOUR", start, end, max_concurrent_requests=8,
+    ).raw()
+    assert adapter.calls == 40      # every window still fetched
+    assert adapter.peak <= 8        # but never more than 8 at once
+    assert adapter.in_flight == 0   # and all released
+
+
+@pytest.mark.asyncio
+async def test_historical_candles_still_overlaps_requests():
+    # bounded is not serial — with a limit above 1 it must still pipeline
+    adapter = _ConcurrencyRecordingAdapter()
+    await HistoricalCandles(
+        adapter, "BTC-USDC", "ONE_HOUR", 0, 3600 * 300 * 10, max_concurrent_requests=4,
+    ).raw()
+    assert adapter.peak > 1
 
 
 @pytest.mark.asyncio

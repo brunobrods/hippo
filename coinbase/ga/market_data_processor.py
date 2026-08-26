@@ -249,7 +249,33 @@ class ChunkedTimeRange:
         return windows
 
 
+class ThrottledCandlePage:
+    def __init__(
+        self,
+        adapter: CoinbaseAdapter,
+        product_id: str,
+        granularity: str,
+        limit: asyncio.Semaphore,
+    ) -> None:
+        self._adapter     = adapter
+        self._product_id  = product_id
+        self._granularity = granularity
+        self._limit       = limit
+
+    async def fetch(self, start: int, end: int) -> list[dict]:
+        async with self._limit:
+            return await self._adapter.get_product_candles(
+                self._product_id, start, end, self._granularity
+            )
+
+
 class HistoricalCandles:
+    # A fine granularity over a long window chunks into hundreds of requests —
+    # 876 days of THIRTY_MINUTE candles is 141 of them. Awaiting all of those at
+    # once does not fetch faster; they queue against the adapter's connection
+    # pool and the exchange's rate limit until each exceeds its own request
+    # timeout, so the whole fetch fails. Bounded concurrency keeps every request
+    # inside its timeout while still overlapping enough to stay quick.
     def __init__(
         self,
         adapter: CoinbaseAdapter,
@@ -257,12 +283,14 @@ class HistoricalCandles:
         granularity: str,
         start: int,
         end: int,
+        max_concurrent_requests: int = 8,
     ) -> None:
-        self._adapter     = adapter
-        self._product_id  = product_id
-        self._granularity = granularity
-        self._start       = start
-        self._end         = end
+        self._adapter                 = adapter
+        self._product_id              = product_id
+        self._granularity             = granularity
+        self._start                   = start
+        self._end                     = end
+        self._max_concurrent_requests = max_concurrent_requests
         self._cache: Optional[list[dict]] = None
 
     async def raw(self) -> list[dict]:
@@ -270,11 +298,14 @@ class HistoricalCandles:
             windows = ChunkedTimeRange(
                 self._start, self._end, GRANULARITY_SECONDS[self._granularity]
             ).windows()
+            page = ThrottledCandlePage(
+                self._adapter, self._product_id, self._granularity,
+                asyncio.Semaphore(self._max_concurrent_requests),
+            )
             pages = await asyncio.gather(*(
-                self._adapter.get_product_candles(self._product_id, w_start, w_end, self._granularity)
-                for w_start, w_end in windows
+                page.fetch(w_start, w_end) for w_start, w_end in windows
             ))
-            by_start = {candle["start"]: candle for page in pages for candle in page}
+            by_start = {candle["start"]: candle for page_ in pages for candle in page_}
             self._cache = list(by_start.values())
         return self._cache
 
