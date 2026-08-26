@@ -254,7 +254,7 @@ class ChunkedTimeRange:
 class ThrottledCandlePage:
     def __init__(
         self,
-        adapter: CoinbaseAdapter,
+        adapter: ExchangeAdapter,
         product_id: str,
         granularity: str,
         limit: asyncio.Semaphore,

@@ -244,6 +244,12 @@ class _ConcurrencyRecordingAdapter:
         self.in_flight -= 1
         return [_candle(start, close=1.0)]
 
+    def max_candles_per_request(self) -> int:
+        return 300
+
+    def name(self) -> str:
+        return "coinbase"
+
 
 @pytest.mark.asyncio
 async def test_historical_candles_bounds_concurrent_requests():
