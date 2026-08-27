@@ -1,10 +1,19 @@
+import functools
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import pandas as pd
 
 from coinbase.ga.ga_engine import Genome
-from coinbase.trading_strategy import Action, Backtest, BacktestResult, Decision, Direction, Position
+from coinbase.trading_strategy import (
+    Action,
+    Backtest,
+    BacktestResult,
+    Decision,
+    Direction,
+    MarketRows,
+    Position,
+)
 
 
 # ── Config ─────────────────────────────────────────────────────────────
@@ -184,6 +193,12 @@ class StrategyEvaluator:
         self._config = config
         self._keys   = keys
 
+    # One conversion of the window shared by every genome scored against it.
+    # Backtest is rebuilt per genome, so this cannot live there — see MarketRows.
+    @functools.cached_property
+    def _rows(self) -> MarketRows:
+        return MarketRows(self._frame)
+
     # Selection score, not a reported metric: annualized_yield() below still
     # reports the honest 0.0 for a no-trade run in the performance report.
     def fitness(self, genome: Genome) -> float:
@@ -195,7 +210,7 @@ class StrategyEvaluator:
     def result(self, genome: Genome) -> BacktestResult:
         strategy = GaStrategy(genome, self._config, self._keys)
         return Backtest(
-            self._frame, strategy, self._config.starting_balance, self._config.unwind_at_entry_price,
+            self._rows, strategy, self._config.starting_balance, self._config.unwind_at_entry_price,
         ).run()
 
     def annualized_yield(self, result: BacktestResult) -> float:
