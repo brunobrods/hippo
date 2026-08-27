@@ -1,0 +1,32 @@
+# Cross-pair sweep at SIX_HOUR candles — the control arm of the trade-frequency
+# experiment. Identical to sweep_pairs_30m.yaml but for data.granularity.
+#
+# This arm is what makes the other two readable. experiments/index.csv already
+# holds 161 SIX_HOUR runs, but every one of them is BTC-USDC on Coinbase — so
+# comparing a 30-minute XRP run against that history would confound granularity
+# with pair AND with venue. Re-running SIX_HOUR here, on the same pairs, seeds,
+# window and exchange, isolates granularity as the only thing that differs.
+# It is also the cheapest arm by far (~40 s a point), so it doubles as a
+# pipeline smoke test: run it first.
+#
+# See sweep_pairs_30m.yaml for the full rationale.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "BTC-USDT"
+      - "ETH-USDT"
+      - "SOL-USDT"
+      - "XRP-USDT"
+      - "DOGE-USDT"
+      - "LINK-USDT"
+      - "AVAX-USDT"
+      - "FET-USDT"

@@ -1,0 +1,24 @@
+# Cross-pair sweep at TWO_HOUR candles — the middle arm of the trade-frequency
+# experiment. Identical to sweep_pairs_30m.yaml but for data.granularity, so
+# the difference in trade count between the two is attributable to candle size.
+# See sweep_pairs_30m.yaml for the full rationale.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  data.exchange: "binance"
+  data.granularity: "TWO_HOUR"
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "BTC-USDT"
+      - "ETH-USDT"
+      - "SOL-USDT"
+      - "XRP-USDT"
+      - "DOGE-USDT"
+      - "LINK-USDT"
+      - "AVAX-USDT"
+      - "FET-USDT"
