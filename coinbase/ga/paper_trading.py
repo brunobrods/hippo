@@ -44,8 +44,8 @@ Run (as a module, from the repo root):
 import asyncio
 import json
 import os
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional, Protocol
 
 from coinbase.ga.config import GA_RESULTS_ROOT, ConfigFile
 from coinbase.ga.ga_engine import Genome
@@ -130,6 +130,10 @@ class PaperState:
     position:           Optional[Position]
     last_candle_start:  int
     realized_trades:    int
+    # Realized profit is folded straight into balance, so the closed trades
+    # themselves are not recoverable from a resumed book — a running win count
+    # is the only way a win rate survives a restart.
+    realized_wins:      int = 0
 
 
 class PaperStateFile:
@@ -147,6 +151,7 @@ class PaperStateFile:
             position          = self._position(raw.get("position")),
             last_candle_start = int(raw.get("last_candle_start", 0)),
             realized_trades   = int(raw.get("realized_trades", 0)),
+            realized_wins     = int(raw.get("realized_wins", 0)),
         )
 
     def write(self, state: PaperState, pair: str) -> None:
@@ -157,6 +162,7 @@ class PaperStateFile:
             "position":          self._serialized(state.position),
             "last_candle_start": state.last_candle_start,
             "realized_trades":   state.realized_trades,
+            "realized_wins":     state.realized_wins,
             "updated_at":        UtcNow().iso(),
         }
         # Atomic: a crash mid-write must never leave a truncated book behind.
@@ -186,6 +192,18 @@ class PaperStateFile:
         }
 
 
+# Where a tick's book comes from and goes back to. PaperStateFile satisfies it
+# by reading and writing disk on every tick; a long-lived engine substitutes an
+# in-memory store that only touches disk when it chooses to snapshot.
+
+class StateStore(Protocol):
+    def exists(self) -> bool: ...
+
+    def read(self) -> PaperState: ...
+
+    def write(self, state: PaperState, pair: str) -> None: ...
+
+
 class InitialPaperState:
     def __init__(self, starting_balance: float) -> None:
         self._starting_balance = starting_balance
@@ -196,7 +214,38 @@ class InitialPaperState:
             position          = None,
             last_candle_start = 0,
             realized_trades   = 0,
+            realized_wins     = 0,
         )
+
+
+# ── Fees ───────────────────────────────────────────────────────────────
+# Trade.profit() stays gross: every saved strategy's recorded performance, and
+# every row in experiments/index.csv, is denominated in it, so charging fees
+# there would silently invalidate comparisons across the whole history.
+# A paper run charges on top instead, leaving the backtest arithmetic alone.
+#
+# Charged on notional, not on a Decision: a closing decision (SELL/COVER)
+# carries size 0.0 because the Ledger closes whatever is open, so pricing off
+# decision.size would silently charge entries only and halve the real cost.
+#
+# Approximations worth knowing: a liquidation close is not charged, and
+# slippage is not modelled at all.
+
+class FeeSchedule(Protocol):
+    def charge(self, notional: float) -> float: ...
+
+
+class NoFees:
+    def charge(self, notional: float) -> float:
+        return 0.0
+
+
+class BasisPointFee:
+    def __init__(self, basis_points: float) -> None:
+        self._basis_points = basis_points
+
+    def charge(self, notional: float) -> float:
+        return notional * self._basis_points / 10_000.0
 
 
 # ── Tick ───────────────────────────────────────────────────────────────
@@ -209,6 +258,13 @@ class TickOutcome:
     balance:      float
     equity:       float
     closed_trades: int
+    # The candle row the decision was taken on — carried so a caller can report
+    # the indicator values behind a decision without fetching them again.
+    row:          dict[str, float] = field(default_factory=dict)
+    fee:          float = 0.0
+    # The position the decision was taken AGAINST, not the one it produced —
+    # what a strategy scored, and so what explains the action it chose.
+    position_before: Optional[Position] = None
 
 
 class PaperTick:
@@ -216,13 +272,15 @@ class PaperTick:
         self,
         rows: ClosedMarketRow,
         strategy: Strategy,
-        state_file: PaperStateFile,
+        state_file: StateStore,
         starting_balance: float,
+        fees: FeeSchedule = NoFees(),
     ) -> None:
         self._rows             = rows
         self._strategy         = strategy
         self._state_file       = state_file
         self._starting_balance = starting_balance
+        self._fees             = fees
 
     async def run(self) -> TickOutcome:
         state = (
@@ -236,30 +294,47 @@ class PaperTick:
             return TickOutcome(
                 acted=False, candle_start=candle_start, decision=None,
                 balance=state.balance, equity=self._equity(state, row["close"]),
-                closed_trades=0,
+                closed_trades=0, row=row, position_before=state.position,
             )
 
         ledger = Ledger(state.balance, state.position)
         # Same order as Backtest.run(): a position carried in is liquidation
         # checked against this candle's range before a new decision is taken.
         ledger.liquidate(row["high"], row["low"])
+        before   = ledger.position()
         decision = self._strategy.decide(row, ledger.position(), ledger.balance())
         ledger.apply(decision, row["close"])
 
+        fee     = self._fees.charge(self._notional(before, ledger.position(), row["close"]))
+        balance = ledger.balance() - fee
         self._state_file.write(
             PaperState(
-                balance           = ledger.balance(),
+                balance           = balance,
                 position          = ledger.position(),
                 last_candle_start = candle_start,
                 realized_trades   = state.realized_trades + len(ledger.trades()),
+                realized_wins     = state.realized_wins + sum(
+                    1 for trade in ledger.trades() if trade.profit() > 0.0
+                ),
             ),
             self._rows.pair(),
         )
         return TickOutcome(
             acted=True, candle_start=candle_start, decision=decision,
-            balance=ledger.balance(), equity=ledger.equity(row["close"]),
-            closed_trades=len(ledger.trades()),
+            balance=balance, equity=ledger.equity(row["close"]) - fee,
+            closed_trades=len(ledger.trades()), row=row, fee=fee,
+            position_before=before,
         )
+
+    # What actually changed hands this tick: the size opened, or the size
+    # closed. A tick that neither opened nor closed anything trades nothing.
+    @staticmethod
+    def _notional(before: Optional[Position], after: Optional[Position], price: float) -> float:
+        if before is None and after is not None:
+            return after.size() * price
+        if before is not None and after is None:
+            return before.size() * price
+        return 0.0
 
     @staticmethod
     def _equity(state: PaperState, price: float) -> float:

@@ -275,6 +275,41 @@ async def test_historical_candles_still_overlaps_requests():
 
 
 @pytest.mark.asyncio
+async def test_a_shared_limit_bounds_several_fetches_together():
+    # The semaphore built inside raw() bounds ONE fetch object. Several pairs
+    # fetched concurrently would each get their own, so the real ceiling would
+    # be N x max_concurrent_requests — the exact pile-up the bound exists to
+    # prevent. A shared semaphore is what holds the budget across all of them.
+    adapter = _ConcurrencyRecordingAdapter()
+    limit   = asyncio.Semaphore(4)
+    fetches = [
+        HistoricalCandles(
+            adapter, pair, "ONE_HOUR", 0, 3600 * 300 * 10,
+            max_concurrent_requests=8, limit=limit,
+        )
+        for pair in ("BTC-USDC", "ETH-USDC", "SOL-USDC")
+    ]
+
+    await asyncio.gather(*(fetch.raw() for fetch in fetches))
+
+    assert adapter.calls == 30     # 10 windows each, all fetched
+    assert adapter.peak <= 4       # shared budget, not 3 x 8
+    assert adapter.in_flight == 0
+
+
+@pytest.mark.asyncio
+async def test_without_a_shared_limit_a_fetch_keeps_its_own_budget():
+    # Passing no limit must behave exactly as before.
+    adapter = _ConcurrencyRecordingAdapter()
+    await HistoricalCandles(
+        adapter, "BTC-USDC", "ONE_HOUR", 0, 3600 * 300 * 40, max_concurrent_requests=8,
+    ).raw()
+
+    assert adapter.calls == 40
+    assert adapter.peak <= 8
+
+
+@pytest.mark.asyncio
 async def test_historical_candles_dedupes_boundary_candle():
     start, end = 0, 3600 * 600
     window_1   = (0, 3600 * 300)

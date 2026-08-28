@@ -278,6 +278,11 @@ class HistoricalCandles:
     # pool and the exchange's rate limit until each exceeds its own request
     # timeout, so the whole fetch fails. Bounded concurrency keeps every request
     # inside its timeout while still overlapping enough to stay quick.
+    # `limit` shares one budget across several fetches. The semaphore built here
+    # bounds this instance alone, so N pairs fetched concurrently would each get
+    # their own — N x max_concurrent_requests in flight, which is the very
+    # failure this class exists to prevent. A caller running many pairs passes
+    # one semaphore for all of them; a lone fetch keeps the private default.
     def __init__(
         self,
         adapter: ExchangeAdapter,
@@ -286,6 +291,7 @@ class HistoricalCandles:
         start: int,
         end: int,
         max_concurrent_requests: int = 8,
+        limit: Optional[asyncio.Semaphore] = None,
     ) -> None:
         self._adapter                 = adapter
         self._product_id              = product_id
@@ -293,6 +299,7 @@ class HistoricalCandles:
         self._start                   = start
         self._end                     = end
         self._max_concurrent_requests = max_concurrent_requests
+        self._limit                   = limit
         self._cache: Optional[list[dict]] = None
 
     async def raw(self) -> list[dict]:
@@ -303,7 +310,7 @@ class HistoricalCandles:
             ).windows()
             page = ThrottledCandlePage(
                 self._adapter, self._product_id, self._granularity,
-                asyncio.Semaphore(self._max_concurrent_requests),
+                self._limit or asyncio.Semaphore(self._max_concurrent_requests),
             )
             pages = await asyncio.gather(*(
                 page.fetch(w_start, w_end) for w_start, w_end in windows
@@ -416,6 +423,7 @@ class HistoricalMarketData:
         periods: IndicatorPeriods,
         normalized_columns: tuple[str, ...],
         cache_dir: Optional[str] = None,
+        limit: Optional[asyncio.Semaphore] = None,
     ) -> None:
         self._adapter            = adapter
         self._product_id         = product_id
@@ -425,9 +433,13 @@ class HistoricalMarketData:
         self._periods            = periods
         self._normalized_columns = normalized_columns
         self._cache_dir          = cache_dir
+        self._limit              = limit
 
     async def dataframe(self) -> pd.DataFrame:
-        base    = HistoricalCandles(self._adapter, self._product_id, self._granularity, self._start, self._end)
+        base    = HistoricalCandles(
+            self._adapter, self._product_id, self._granularity, self._start, self._end,
+            limit=self._limit,
+        )
         candles = base if self._cache_dir is None else CachedHistoricalCandles(
             base,
             CandleCacheFile(
