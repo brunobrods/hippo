@@ -185,27 +185,39 @@ def test_sweep_plan_overrides_seed_per_point():
     assert {p.seed for p in points} == {7, 8}
 
 
-def test_sweep_plan_redirects_strategy_filepath_to_a_shared_scratch_file():
+def test_sweep_plan_redirects_strategy_filepath_to_a_scratch_file():
     # TrainingRun.train() unconditionally overwrites output.strategy_filepath —
     # a sweep must never let that clobber the base config's canonical file.
     base   = _minimal_base(experiments_dir="/tmp/experiments")
     axes   = (SweepAxis(path="strategy.buy_threshold", values=(0.5, 0.7)),)
     points = SweepPlan(base, axes, seeds=(1, 2)).points()
 
-    expected_scratch_path = os.path.join("/tmp/experiments", "_sweep_scratch", "best_strategy.json")
+    scratch_dir = os.path.join("/tmp/experiments", "_sweep_scratch")
     for point in points:
-        assert point.raw_config["output"]["strategy_filepath"] == expected_scratch_path
+        assert point.raw_config["output"]["strategy_filepath"].startswith(scratch_dir)
         assert point.raw_config["output"]["strategy_filepath"] != base["output"]["strategy_filepath"]
 
 
-def test_sweep_plan_scratch_path_uses_shared_default_when_experiments_dir_absent():
+# One path PER POINT. Every run writes its best strategy there and reads it
+# straight back to verify the reload matches; points running concurrently on a
+# shared path would each verify whichever run happened to write last.
+def test_every_point_gets_its_own_scratch_file():
+    base   = _minimal_base(experiments_dir="/tmp/experiments")
+    axes   = (SweepAxis(path="strategy.buy_threshold", values=(0.5, 0.7)),)
+    points = SweepPlan(base, axes, seeds=(1, 2)).points()
+
+    paths = [point.raw_config["output"]["strategy_filepath"] for point in points]
+    assert len(set(paths)) == len(points) == 4
+
+
+def test_sweep_plan_scratch_path_uses_the_default_when_experiments_dir_absent():
     from coinbase.ga.config import GA_RESULTS_ROOT
 
     base   = {"strategy": {"buy_threshold": 0.6}, "genetic_algorithm": {"seed": 1}, "output": {}}
     axes   = (SweepAxis(path="strategy.buy_threshold", values=(0.5,)),)
     points = SweepPlan(base, axes, seeds=(1,)).points()
 
-    expected = os.path.join(str(GA_RESULTS_ROOT / "experiments"), "_sweep_scratch", "best_strategy.json")
+    expected = os.path.join(str(GA_RESULTS_ROOT / "experiments"), "_sweep_scratch", "best_strategy_0.json")
     assert points[0].raw_config["output"]["strategy_filepath"] == expected
 
 
@@ -254,7 +266,7 @@ async def test_sweep_runs_one_training_run_per_point_and_records_history(tmp_pat
 
     # the base config's canonical strategy_filepath must never be touched by a sweep
     assert not (tmp_path / "best_strategy.json").exists()
-    assert (tmp_path / "experiments" / "_sweep_scratch" / "best_strategy.json").exists()
+    assert (tmp_path / "experiments" / "_sweep_scratch" / "best_strategy_0.json").exists()
 
 
 # ── ConsoleSweepProgress ─────────────────────────────────────────────
