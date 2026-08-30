@@ -1,4 +1,5 @@
 import csv
+import json
 
 import pandas as pd
 import pytest
@@ -6,6 +7,7 @@ import yaml
 
 from coinbase.ga.results import (
     ConsoleTable,
+    ExperimentConfigs,
     ExperimentIndexFile,
     GroupedComparison,
     Leaderboard,
@@ -199,3 +201,60 @@ def test_main_run_log_mode(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "best_fitness" in out
     assert "1.0" in out
+
+
+# ── ExperimentConfigs ────────────────────────────────────────────────
+# index.csv has a fixed header and ExperimentIndex refuses rows built from a
+# different one, so a knob like weight_keys can only be recovered from each
+# run's own config.json.
+
+def _run_config(experiments_dir, run_id: str, keys: list, index_pairs: list = None) -> None:
+    directory = experiments_dir / run_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text(json.dumps({
+        "strategy":    {"weight_keys": keys},
+        "market_data": {"index_pairs": index_pairs or []},
+    }))
+
+
+def test_weight_keys_are_read_back_from_each_runs_config(tmp_path):
+    experiments = tmp_path / "experiments"
+    _run_config(experiments, "run-1", ["rsi", "macd"])
+    _run_config(experiments, "run-2", ["rsi", "macd", "index_z"], ["BTC-USDT"])
+    frame = pd.DataFrame({"run_id": ["run-1", "run-2"]})
+
+    enriched = ExperimentConfigs(frame, str(experiments)).enriched()
+    assert list(enriched["weight_keys"]) == ["rsi,macd", "rsi,macd,index_z"]
+    assert list(enriched["index_pairs"]) == [0, 1]
+
+
+# A run recorded before ResolvedConfigFile existed, or a directory pruned by
+# hand, must not take the whole leaderboard down.
+def test_a_run_with_no_saved_config_is_marked_unknown(tmp_path):
+    frame    = pd.DataFrame({"run_id": ["ghost"]})
+    enriched = ExperimentConfigs(frame, str(tmp_path / "experiments")).enriched()
+    assert enriched.loc[0, "weight_keys"] == "unknown"
+    assert enriched.loc[0, "index_pairs"] == 0
+
+
+def test_enriching_leaves_the_original_frame_alone(tmp_path):
+    experiments = tmp_path / "experiments"
+    _run_config(experiments, "run-1", ["rsi"])
+    frame = pd.DataFrame({"run_id": ["run-1"]})
+    ExperimentConfigs(frame, str(experiments)).enriched()
+    assert "weight_keys" not in frame.columns
+
+
+# The point of the class: it makes a feature ablation groupable with the
+# existing GroupedComparison, without touching index.csv's schema.
+def test_the_enriched_column_groups_an_ablation(tmp_path):
+    experiments = tmp_path / "experiments"
+    _run_config(experiments, "a", ["rsi"])
+    _run_config(experiments, "b", ["rsi"])
+    _run_config(experiments, "c", ["rsi", "index_z"])
+    frame = pd.DataFrame({"run_id": ["a", "b", "c"], "annualized_yield": [0.1, 0.3, 0.9]})
+
+    enriched = ExperimentConfigs(frame, str(experiments)).enriched()
+    summary  = GroupedComparison(enriched, "weight_keys", "annualized_yield").summary()
+    assert summary.loc["rsi,index_z", "mean"] == pytest.approx(0.9)
+    assert summary.loc["rsi", "mean"] == pytest.approx(0.2)
