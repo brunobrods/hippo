@@ -991,8 +991,9 @@ async def _main(argv: list[str]) -> None:
     # The report rules its sections with box-drawing characters, and a Windows
     # console (or any redirected pipe) defaults to cp1252, which cannot encode
     # them — the scan would finish and then die printing its own results.
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     config   = ScreenerArguments(argv).config()

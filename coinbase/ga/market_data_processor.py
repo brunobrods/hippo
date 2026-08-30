@@ -255,6 +255,22 @@ class MarketIndex:
 # against its OWN recent spread makes the number mean the same thing
 # everywhere — roughly, +2 is a divergence well outside this pair's normal
 # relationship to the market, 0 is moving with it.
+#
+# Two limits worth knowing before reading anything into it:
+#
+#   It measures ONE candle's divergence, with the pair's recent mean excess
+#   subtracted. A pair that quietly decouples by 1% a candle for a month never
+#   reads much above 1 — the rolling mean absorbs the drift. Sustained
+#   decoupling needs a z of the CUMULATIVE excess, which this is not.
+#
+#   It is signed, not magnitude. A genome can learn "unusually up" or
+#   "unusually down", never "unusual in either direction", because the score
+#   is a weighted sum and norm_index_z is monotone in the signed value.
+#
+# And note what the GA actually sees is norm_index_z, which MinMaxColumn
+# rescales against each pair's own window — so the cross-pair comparability
+# this class establishes is then partly undone downstream, the same way it is
+# for every other normalized column.
 class RelativeStrength:
     def __init__(
         self,
@@ -276,11 +292,19 @@ class RelativeStrength:
     @functools.cached_property
     def z_score(self) -> pd.Series:
         excess = self.excess
-        spread = excess.rolling(self._period).std()
-        # A window with no dispersion at all has no scale to divide by; the
-        # honest reading of "unusual" there is "not unusual".
-        return ((excess - excess.rolling(self._period).mean())
-                / spread.mask(spread == 0)).fillna(0.0)
+        # Scored against the window BEFORE this candle, not one containing it.
+        # Including the point being measured caps |z| at (n-1)/sqrt(n) — 5.29
+        # at n=30 — and lets every genuine outlier inflate the very spread it
+        # is divided by, damping exactly the readings this exists to detect.
+        # shift(1) is not look-ahead: it uses strictly older data.
+        mean   = excess.rolling(self._period).mean().shift(1)
+        spread = excess.rolling(self._period).std().shift(1)
+        # NaN, not 0.0, wherever there is no scale to divide by — warm-up, a
+        # gap in the basket, or a genuinely flat window. Filling those with
+        # zero would state "moving exactly with the market" where nothing was
+        # measured, and IndicatorFrame's dropna() would keep the fabrication
+        # instead of trimming the row like it does for every other indicator.
+        return (excess - mean) / spread.mask(spread == 0)
 
 
 class MinMaxColumn:
@@ -628,6 +652,47 @@ class MarketBasket:
             ),
         )
         return OhlcFrame(await candles.raw()).dataframe
+
+
+# The basket for a LIVE window, shared by every row that reads it.
+#
+# A live window slides, so each row computing its own would refetch the whole
+# basket per pair — 12 pairs against a 5-pair basket is 60 fetches a tick
+# instead of 5, the exact waste MarketBasket exists to avoid. Flooring the
+# window to the candle boundary makes every row in the same candle ask for the
+# identical window, so one memoized fetch serves them all and it refreshes by
+# itself when the candle turns.
+class LiveBasket:
+    def __init__(
+        self,
+        adapter: ExchangeAdapter,
+        pairs: tuple[str, ...],
+        granularity: str,
+        lookback_candles: int = 200,
+        limit: Optional[asyncio.Semaphore] = None,
+    ) -> None:
+        self._adapter          = adapter
+        self._pairs            = pairs
+        self._granularity      = granularity
+        self._lookback_candles = lookback_candles
+        self._limit            = limit
+        self._window: Optional[tuple[int, int]] = None
+        self._returns: Optional[pd.Series] = None
+
+    def pairs(self) -> tuple[str, ...]:
+        return self._pairs
+
+    async def returns(self) -> pd.Series:
+        seconds = GRANULARITY_SECONDS[self._granularity]
+        end     = int(time.time()) // seconds * seconds
+        window  = (end - self._lookback_candles * seconds, end)
+        if window != self._window or self._returns is None:
+            self._returns = await MarketBasket(
+                self._adapter, self._pairs, self._granularity,
+                window[0], window[1], cache_dir=None, limit=self._limit,
+            ).returns()
+            self._window = window
+        return self._returns
 
 
 class HistoricalMarketData:

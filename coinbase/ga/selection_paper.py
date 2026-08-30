@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from coinbase.ga.config import GA_RESULTS_ROOT, ConfigFile
-from coinbase.ga.market_data_processor import MarketDataConfig
+from coinbase.ga.market_data_processor import LiveBasket, MarketDataConfig
 from coinbase.ga.pair_selector import (
     Candidate,
     Conviction,
@@ -47,7 +47,6 @@ from coinbase.ga.pair_selector import (
 )
 from coinbase.ga.paper_trading import BasisPointFee, FeeSchedule, NoFees
 from coinbase.ga.strategy_output import ParentDirectory
-from coinbase.market_scanner import GRANULARITY_SECONDS
 from coinbase.strategy import ClosedMarketRow, LiveMarketRow, RetriedMarketRow
 from coinbase.trading_strategy import Action, Direction, Ledger, Position
 from exchange.pool import ExchangePool
@@ -170,11 +169,35 @@ class SelectionTick:
 
     async def run(self) -> SelectionOutcome:
         state  = self._state()
-        latest = await self._latest()
+        # A book holding a pair no longer in the universe cannot be exited —
+        # its genome and its price are both gone. Raised rather than skipped:
+        # the old code fell through both branches, so the position could never
+        # close on any future tick while the console kept printing an equity
+        # figure that silently excluded it.
+        if state.held_pair is not None and state.held_pair not in self._rows:
+            raise ValueError(
+                f"the book is holding {state.held_pair}, which is not in this run's "
+                f"universe ({', '.join(sorted(self._rows))}). Include it so the "
+                f"position can be managed, or close the book first."
+            )
 
-        # Only timestamps every pair has closed. One lagging pair holds the
-        # whole tick rather than letting a stale score into the ranking.
-        candle_start = min(int(row["timestamp"]) for row in latest.values())
+        latest = await self._latest()
+        stamps = {pair: int(row["timestamp"]) for pair, row in latest.items()}
+
+        # Every pair must be on the SAME closed candle. Acting on the minimum
+        # while ranking each pair's own newest row would compare a score from
+        # this candle against one from the last — the staleness this is meant
+        # to prevent. A lagging pair is transient, and the tick is scheduled
+        # far more often than the granularity, so waiting costs nothing.
+        candle_start = min(stamps.values())
+        if len(set(stamps.values())) > 1:
+            behind = [pair for pair, stamp in stamps.items() if stamp == candle_start]
+            return SelectionOutcome(
+                False, candle_start, state.held_pair, None, None, Action.HOLD,
+                state.balance, self._equity(state, latest), (),
+                f"pairs are on different candles; waiting for {', '.join(behind)}",
+            )
+
         if candle_start <= state.last_candle_start:
             return SelectionOutcome(
                 False, candle_start, state.held_pair, None, None, Action.HOLD,
@@ -207,7 +230,12 @@ class SelectionTick:
                     ledger.charge(self._fees.charge(size * price))
                     exited, held, action = held, None, decision.action
 
-        if held is None and ledger.position() is None:
+        # The balance guard mirrors SelectionRun._entered, and is not
+        # cosmetic: a negative balance yields a negative size, whose
+        # Trade.profit() has its sign flipped, so the book would print
+        # fabricated profits and "recover". A liquidation plus entry fees can
+        # reach it.
+        if held is None and ledger.position() is None and ledger.balance() > 0.0:
             ranking = self._ranked(latest)
             best    = PairRanking(ranking).best()
             if best is not None:
@@ -286,18 +314,27 @@ class ConsoleSelectionReport:
         print(f"balance   {outcome.balance:,.2f}")
         print(f"equity    {outcome.equity:,.2f}   "
               f"({(outcome.equity / self._starting_balance - 1) * 100:+.2f}%)")
-        if outcome.ranking:
-            print("\nranking this candle:")
-            for candidate in PairRanking(outcome.ranking).ranked()[:5]:
-                print(f"  {candidate.pair:14s} {candidate.action.name:6s} "
-                      f"conviction {candidate.conviction:.3f}  score {candidate.score:.3f}")
+        if not outcome.ranking:
+            return
+        # ranked() drops the pairs that are not signalling, so a candle where
+        # every genome says hold leaves it empty — say that rather than
+        # printing a heading with nothing under it.
+        signalling = PairRanking(outcome.ranking).ranked()
+        if not signalling:
+            print(f"\nno pair signalled this candle ({len(outcome.ranking)} scored, all holding)")
+            return
+        print("\nranking this candle:")
+        for candidate in signalling[:5]:
+            print(f"  {candidate.pair:14s} {candidate.action.name:6s} "
+                  f"conviction {candidate.conviction:.3f}  score {candidate.score:.3f}")
 
 
 # ── Entry point ────────────────────────────────────────────────────────
 
 async def _main(argv: list[str]) -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     p = argparse.ArgumentParser(description="One paper tick of the cross-sectional selector")
@@ -337,19 +374,30 @@ async def _main(argv: list[str]) -> None:
             f"{window.granularity}. Train them with a `data.pair` sweep axis first."
         )
 
-    balance    = args.starting_balance or next(iter(trained.values())).config.starting_balance
+    # `is None`, not `or`: --starting-balance 0 is a deliberate instruction and
+    # would otherwise fall through to the genome's own figure.
+    balance = (
+        args.starting_balance if args.starting_balance is not None
+        else next(iter(trained.values())).config.starting_balance
+    )
     state_file = SelectionStateFile(
         args.state or str(GA_RESULTS_ROOT / "selection_state.json"),
     )
 
     async with ExchangePool((exchange,), args.max_concurrent) as pool:
         lane = pool.lane(exchange)
+        # ONE basket for every row. Each building its own would refetch the
+        # whole basket per pair — 12 pairs against a 5-pair basket is 60
+        # fetches a tick instead of 5.
+        basket = LiveBasket(
+            lane.adapter(), market.index_pairs(), window.granularity, limit=lane.limit(),
+        ) if market.index_pairs() else None
         rows = {
             pair: RetriedMarketRow(ClosedMarketRow(LiveMarketRow(
                 lane.adapter(), pair, window.granularity,
                 market.periods(), market.normalized_columns(),
                 limit=lane.limit(),
-                index_pairs=market.index_pairs(), index_period=market.index_period(),
+                basket=basket, index_period=market.index_period(),
             )))
             for pair in trained
         }

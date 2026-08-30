@@ -423,9 +423,13 @@ async def _main() -> None:
     # genome was trained on — ConfiguredExchange is asked for that exchange
     # rather than data.exchange.
     async with ConfiguredExchange({"data": {"exchange": paper_config.exchange}}).adapter() as adapter:
+        basket = LiveBasket(
+            adapter, market_config.index_pairs(), window.granularity,
+        ) if market_config.index_pairs() else None
         rows = ClosedMarketRow(LiveMarketRow(
             adapter, paper_config.pair, window.granularity,
             market_config.periods(), market_config.normalized_columns(),
+            basket=basket, index_period=market_config.index_period(),
         ))
         outcome = await PaperTick(
             rows, strategy,

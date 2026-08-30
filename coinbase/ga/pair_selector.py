@@ -54,7 +54,12 @@ import pandas as pd
 from coinbase.ga.config import GA_RESULTS_ROOT, ConfigFile
 from coinbase.ga.experiment_history import ExperimentDirectory
 from coinbase.ga.ga_engine import BackfilledGenome, Genome
-from coinbase.ga.market_data_processor import HistoricalMarketData, IsoDate, MarketDataConfig
+from coinbase.ga.market_data_processor import (
+    HistoricalMarketData,
+    IsoDate,
+    MarketBasket,
+    MarketDataConfig,
+)
 from coinbase.ga.paper_trading import BasisPointFee, FeeSchedule, NoFees
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
@@ -724,6 +729,16 @@ class SelectorMarketData:
         window = market.window()
         async with ExchangePool((self._exchange,), self._max) as pool:
             lane = pool.lane(self._exchange)
+            # Fetched once for the whole run and handed to every pair. Without
+            # it, a config that lists index_z in normalized_columns produces no
+            # such column and NormalizedIndicators dies on KeyError before a
+            # single candle is scored.
+            index_returns = None
+            if market.index_pairs():
+                index_returns = await MarketBasket(
+                    lane.adapter(), market.index_pairs(), window.granularity,
+                    self._start, self._end, market.cache_dir(), lane.limit(),
+                ).returns()
             # One shared semaphore across every pair, for the reason
             # HistoricalCandles' own docstring gives.
             frames = await asyncio.gather(*(
@@ -731,6 +746,7 @@ class SelectorMarketData:
                     lane.adapter(), pair, window.granularity, self._start, self._end,
                     market.periods(), market.normalized_columns(),
                     cache_dir=market.cache_dir(), limit=lane.limit(),
+                    index_returns=index_returns, index_period=market.index_period(),
                 ).dataframe()
                 for pair in self._pairs
             ))
@@ -791,8 +807,11 @@ class SelectorArguments:
 
 
 async def _main(argv: list[str]) -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # stderr too: warnings carry the same box-drawing and dash characters the
+    # report does, and a cp1252 console mangles them there just as readily.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     arguments  = SelectorArguments(argv)
@@ -830,7 +849,10 @@ async def _main(argv: list[str]) -> None:
     if not aligned.timestamps:
         raise ValueError("no timestamp is shared by every pair — windows do not overlap")
 
-    balance = args.starting_balance or next(iter(trained.values())).config.starting_balance
+    balance = (
+        args.starting_balance if args.starting_balance is not None
+        else next(iter(trained.values())).config.starting_balance
+    )
     run     = SelectionRun(
         aligned,
         {pair: item.strategy() for pair, item in trained.items()},

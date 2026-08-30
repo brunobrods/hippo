@@ -123,14 +123,50 @@ async def test_a_new_candle_is_acted_on(tmp_path):
     assert later.acted is True
 
 
-# One lagging pair holds the whole tick — comparing a fresh score against a
-# stale one would rank on staleness rather than strength.
-async def test_the_candle_is_the_oldest_every_pair_has_closed(tmp_path):
+# One lagging pair holds the whole tick. Acting on the minimum while ranking
+# each pair's own newest row would compare a fresh score against a stale one —
+# and would let the leading pair's candle be decided twice.
+async def test_a_tick_is_refused_while_pairs_sit_on_different_candles(tmp_path):
     store   = SelectionStateFile(str(tmp_path / "s.json"))
     outcome = await _tick(
-        {"A-USDT": _row(2000, 100.0, 0.5), "B-USDT": _row(1000, 100.0, 0.5)}, store,
+        {"A-USDT": _row(2000, 100.0, 0.9), "B-USDT": _row(1000, 100.0, 0.5)}, store,
     ).run()
-    assert outcome.candle_start == 1000
+    assert outcome.acted is False
+    assert "different candles" in outcome.note
+    assert not store.exists()          # nothing recorded, so nothing to replay
+
+
+async def test_the_tick_proceeds_once_the_lagging_pair_catches_up(tmp_path):
+    store = SelectionStateFile(str(tmp_path / "s.json"))
+    await _tick({"A-USDT": _row(2000, 100.0, 0.9), "B-USDT": _row(1000, 100.0, 0.5)}, store).run()
+    outcome = await _tick(
+        {"A-USDT": _row(2000, 100.0, 0.9), "B-USDT": _row(2000, 100.0, 0.5)}, store,
+    ).run()
+    assert outcome.acted is True
+    assert outcome.entered == "A-USDT"
+
+
+# A negative balance yields a negative size, whose Trade.profit() has its sign
+# flipped — the book would print fabricated profits and "recover".
+async def test_a_wiped_book_opens_nothing(tmp_path):
+    store = SelectionStateFile(str(tmp_path / "s.json"))
+    store.write(SelectionState(-25.0, None, None, 500, 0, 0))
+    outcome = await _tick({"A-USDT": _row(1000, 100.0, 0.9)}, store).run()
+    assert outcome.entered is None
+    assert store.read().position is None
+
+
+# The old code fell through both branches, so the position could never close
+# on any future tick while the console kept reporting the book as flat.
+async def test_holding_a_pair_that_left_the_universe_is_refused_loudly(tmp_path):
+    store = SelectionStateFile(str(tmp_path / "s.json"))
+    store.write(SelectionState(
+        balance=500.0, held_pair="GONE-USDT",
+        position=Position(100.0, 5.0, Direction.LONG),
+        last_candle_start=900, realized_trades=0, realized_wins=0,
+    ))
+    with pytest.raises(ValueError, match="GONE-USDT"):
+        await _tick({"A-USDT": _row(1000, 100.0, 0.9)}, store).run()
 
 
 # ── Selection ──────────────────────────────────────────────────────────

@@ -747,12 +747,36 @@ def test_an_unusual_divergence_scores_far_from_zero():
     assert z.iloc[-1] > 2.0
 
 
-def test_a_flat_spread_scores_zero_rather_than_dividing_by_zero():
+# NaN, not 0.0. Zero would state "moving exactly with the market" where
+# nothing was measured, and dropna() would keep the fabrication.
+def test_a_flat_spread_is_not_a_number_rather_than_a_fabricated_zero():
     closes     = pd.Series([100.0] * 40)
     timestamps = pd.Series([i * 86400 for i in range(40)])
     index      = pd.Series({i * 86400: 0.0 for i in range(40)})
     z          = RelativeStrength(closes, timestamps, index, period=10).z_score
-    assert z.iloc[-1] == 0.0
+    assert pd.isna(z.iloc[-1])
+
+
+def test_a_gap_in_the_basket_is_not_a_number_rather_than_a_fabricated_zero():
+    closes     = pd.Series([100.0 * (1.01 ** i) for i in range(40)])
+    timestamps = pd.Series([i * 86400 for i in range(40)])
+    # The basket is missing one timestamp the pair has.
+    index      = pd.Series({i * 86400: 0.005 for i in range(40) if i != 20})
+    z          = RelativeStrength(closes, timestamps, index, period=10).z_score
+    assert pd.isna(z.iloc[20])
+    # And it must not silently mute the following window to zero either.
+    assert not (z.iloc[21:31] == 0.0).any()
+
+
+def test_the_window_excludes_the_candle_being_scored():
+    # Scoring a point against a window containing it caps |z| at
+    # (n-1)/sqrt(n); excluding it leaves a violent day genuinely unbounded.
+    prices = [100.0 * (1.01 ** i) for i in range(39)]
+    prices.append(prices[-1] * 1.6)
+    timestamps = pd.Series([i * 86400 for i in range(40)])
+    index      = pd.Series({i * 86400: 0.01 for i in range(40)})
+    z          = RelativeStrength(pd.Series(prices), timestamps, index, period=10).z_score
+    assert z.iloc[-1] > 5.3
 
 
 # Every genome trained before the index existed expects the old columns, so
