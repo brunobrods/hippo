@@ -51,9 +51,13 @@ algos:
   - name: "btc"
     pair: "BTC-USDC"
     strategy_filepath: "~/.coinbase/ga/best_strategy.json"
-  # - name: "eth"
-  #   pair: "ETH-USDC"
-  #   strategy_filepath: "~/.coinbase/ga/experiments/<run_id>/strategy.json"
+  # Trained on Binance ETH-USDT, so it is papered against that same pair on the
+  # same venue — its thresholds were tuned against this book, not Coinbase's.
+  # There is no ETH-USDC genome; every ETH run in the index is ETH-USDT.
+  - name: "eth"
+    exchange: "binance"
+    pair: "ETH-USDT"
+    strategy_filepath: "~/.coinbase/ga/experiments/20260827T093359504374Z-1efd6fed/strategy.json"
   # - name: "sol-binance"
   #   exchange: "binance"
   #   pair: "SOL-USDT"
