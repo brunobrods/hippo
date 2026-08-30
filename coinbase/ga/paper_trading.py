@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
 from coinbase.ga.config import GA_RESULTS_ROOT, ConfigFile
-from coinbase.ga.ga_engine import Genome
+from coinbase.ga.ga_engine import BackfilledGenome, Genome
 from coinbase.ga.market_data_processor import MarketDataConfig
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
@@ -408,11 +408,16 @@ async def _main() -> None:
     for key, (from_config, from_strategy) in trained.divergences().items():
         print(f"note: {key} config.yaml={from_config} -> using trained {from_strategy}")
 
-    strategy = GaStrategy(
-        Genome(saved.weights()),
-        strategy_config,
-        weight_keys + (POSITION_PNL_KEY,),
-    )
+    keys       = weight_keys + (POSITION_PNL_KEY,)
+    # A genome saved before a weight key existed carries no weight for it, and
+    # Genome.weight raises rather than guessing. Backfilling at zero keeps a
+    # book already running against an older genome from breaking the moment
+    # config.yaml grows a column.
+    backfilled = BackfilledGenome(Genome(saved.weights()), keys)
+    for key in backfilled.missing():
+        print(f"note: genome predates {key} — running it weighted zero; retrain to use it")
+
+    strategy = GaStrategy(backfilled.filled(), strategy_config, keys)
 
     # The paper run follows its own market, which need not be the one the
     # genome was trained on — ConfiguredExchange is asked for that exchange

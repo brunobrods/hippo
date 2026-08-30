@@ -93,6 +93,10 @@ python -m coinbase.ga.pair_selector --pairs FET-USDT ETH-USDT --exchange binance
 python -m coinbase.ga.pair_selector --from-shortlist binance --fee-bps 10
 python -m coinbase.ga.pair_selector --pairs FET-USDT --no-fees   # gross, like Backtest
 
+# Selector paper trading — ONE tick per invocation, then exits (Task Scheduler)
+python -m coinbase.ga.selection_paper --pairs FET-USDT ETH-USDT --exchange binance
+python -m coinbase.ga.selection_paper --from-shortlist binance
+
 # Tests
 pytest
 pytest tests/test_config.py   # single file
@@ -193,6 +197,30 @@ is no resting-order state and no way to express a non-fill. `MakerTakerFee` in
 that assumes the order filled, which is exactly what a resting order does not
 guarantee.
 
+## Wider-market context (`index_z`)
+
+`market_data.index_pairs` sets an equal-weight basket standing in for "the
+market". With it set, every frame gains an **`index_z`** column: the pair's
+return minus the basket's, scored against its own recent spread. So +2 means
+this pair is diverging from the market by more than it normally does, and 0
+means it is going along with it.
+
+Equal weight, not volume weight — the basket is meant to be the menu a
+strategy picked from, so every item gets the same say. The z-score rather than
+the raw excess because 2% of excess is ordinary on a wild pair and
+extraordinary on a quiet one; scaling by each pair's own spread makes the
+number mean the same thing everywhere. `MarketIndex` is keyed by **timestamp**,
+not row order, because the pairs it averages list at different dates and drop
+candles independently.
+
+**Off by default, and that is load-bearing.** Turning it on changes the frame
+every genome is scored on. To use it: set the basket, add `index_z` to *both*
+`market_data.normalized_columns` and `strategy.weight_keys`, then retrain.
+Genomes saved before it existed carry no such weight — `BackfilledGenome` runs
+them with it at zero (the honest reading: they could not have used it) and
+logs which keys it filled. Training still fails loudly on an unknown key,
+because there a missing weight is a bug rather than history.
+
 ## Cross-sectional pair selection
 
 `coinbase/ga/pair_selector.py` asks the question one level above a genome:
@@ -228,6 +256,16 @@ pair carries more than 60% of net profit. On the first real run the selector
 returned +60% against −11.9% for holding everything equally — but FET-USDT
 alone accounted for 134% of net profit, and stripping it left −20.7%. That is
 one pair moving, not selection skill.
+
+**Paper trading it** — `coinbase/ga/selection_paper.py`, one tick per
+invocation like `paper_trading.py`, with the same two safety properties. The
+state file adds one field that matters: **which pair the position is in**. A
+size and an entry price restored against the wrong market would be marked at
+an unrelated price and exited using a different pair's genome. A tick acts on
+the oldest candle *every* pair has closed — one lagging pair holds the whole
+tick rather than letting a stale score into the ranking. A single tick can
+both exit one pair and enter another, so the outcome reports `exited` and
+`entered` separately rather than one action field that would hide a leg.
 
 `BestRunPerPair` picks each pair's highest-scoring run out of
 `experiments/index.csv`, filtered to the **same granularity** — a genome

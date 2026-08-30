@@ -35,6 +35,22 @@ market_data:
   normalized_columns: ["sma_short", "sma_long", "sma_extra", "rsi", "macd"]
   delta_columns: ["delta_1", "delta_3", "delta_5", "delta_10"]
 
+  # Wider-market context. `index_pairs` is an equal-weight basket standing in
+  # for "the market"; with it set, every frame gains an `index_z` column — the
+  # pair's return minus the basket's, scored against its own recent spread. So
+  # +2 means this pair is diverging from the market by more than it normally
+  # does, and 0 means it is simply going along with it.
+  #
+  # Equal weight, not volume weight: this is meant to be the menu a strategy
+  # picked from, so every item on it gets the same say.
+  #
+  # OFF by default, and that matters — turning it on changes the frame every
+  # genome is scored on. To use it, set the basket, add "index_z" to BOTH
+  # normalized_columns and strategy.weight_keys, and retrain. Genomes saved
+  # before it existed carry no such weight and are run with it at zero.
+  # index_pairs: ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "DOGE-USDT"]
+  # index_period: 30      # candles of spread history the z-score is scaled by
+
 # Paper trading — `python -m coinbase.ga.paper_trading` runs ONE tick and exits,
 # so it can be driven by Windows Task Scheduler instead of a process left open.
 # It acts on the last CLOSED candle and refuses to act on the same candle twice,

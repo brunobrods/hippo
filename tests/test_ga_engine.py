@@ -3,6 +3,7 @@ import random
 import pytest
 
 from coinbase.ga.ga_engine import (
+    BackfilledGenome,
     Elitism,
     FitnessEvaluation,
     GaConfig,
@@ -216,3 +217,39 @@ def test_evolve_is_reproducible_with_a_fixed_seed():
     best_b = GeneticAlgorithm(config, _KEYS).evolve(fitness_function)
     assert best_a.weights() == pytest.approx(best_b.weights())
     assert best_a.fitness() == pytest.approx(best_b.fitness())
+
+
+# ── BackfilledGenome ───────────────────────────────────────────────────
+# A genome saved before a weight key existed, run against a config that now
+# has it. Genome.weight raises on a missing key, so without this every one of
+# the genomes trained before index_z would fail the moment it was added.
+
+def test_a_genome_missing_a_new_key_reports_it():
+    backfilled = BackfilledGenome(Genome({"rsi": 0.6, "macd": 0.4}), ("rsi", "macd", "index_z"))
+    assert backfilled.missing() == ("index_z",)
+
+
+def test_a_missing_key_is_backfilled_at_zero():
+    # Zero is the honest reading: the genome could not have used the key, so
+    # the score stays exactly what it was scored on during training.
+    filled = BackfilledGenome(Genome({"rsi": 0.6, "macd": 0.4}), ("rsi", "macd", "index_z")).filled()
+    assert filled.weight("index_z") == 0.0
+    assert filled.weight("rsi") == 0.6
+
+
+def test_a_complete_genome_is_left_alone():
+    genome     = Genome({"rsi": 0.6, "macd": 0.4})
+    backfilled = BackfilledGenome(genome, ("rsi", "macd"))
+    assert backfilled.missing() == ()
+    assert backfilled.filled().weights() == genome.weights()
+
+
+def test_backfilling_never_overwrites_a_weight_the_genome_has():
+    filled = BackfilledGenome(Genome({"rsi": 0.9, "index_z": 0.1}), ("rsi", "index_z")).filled()
+    assert filled.weight("index_z") == 0.1
+
+
+def test_a_genome_knows_which_keys_it_carries():
+    genome = Genome({"rsi": 1.0})
+    assert genome.has("rsi") is True
+    assert genome.has("index_z") is False

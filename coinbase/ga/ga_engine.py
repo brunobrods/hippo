@@ -48,6 +48,9 @@ class Genome:
     def weight(self, key: str) -> float:
         return self._weights[key]
 
+    def has(self, key: str) -> bool:
+        return key in self._weights
+
     def fitness(self) -> float:
         if self._fitness is None:
             raise ValueError(f"Genome has not been evaluated yet: {self._weights}")
@@ -58,6 +61,29 @@ class Genome:
 
     def scored(self, fitness: float) -> "Genome":
         return Genome(self._weights, fitness)
+
+
+# A genome saved before a weight key existed, run against a config that now
+# has it. The genome assigned that key no weight — it could not — so zero is
+# the honest reading, and it leaves the score exactly what the genome was
+# scored on when it was trained.
+#
+# Deliberately a decorator on the LOAD path rather than a softening of
+# Genome.weight: training must still fail loudly on a key it does not know,
+# because there a missing weight is a bug, not history.
+class BackfilledGenome:
+    def __init__(self, genome: Genome, keys: tuple[str, ...]) -> None:
+        self._genome = genome
+        self._keys   = keys
+
+    def missing(self) -> tuple[str, ...]:
+        return tuple(key for key in self._keys if not self._genome.has(key))
+
+    def weights(self) -> dict[str, float]:
+        return {**{key: 0.0 for key in self.missing()}, **self._genome.weights()}
+
+    def filled(self) -> Genome:
+        return Genome(self.weights())
 
 
 class NormalizedWeights:

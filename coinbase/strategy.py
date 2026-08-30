@@ -6,7 +6,12 @@ from typing import Optional
 import aiohttp
 import pandas as pd
 
-from coinbase.ga.market_data_processor import AccountBalance, HistoricalMarketData, IndicatorPeriods
+from coinbase.ga.market_data_processor import (
+    AccountBalance,
+    HistoricalMarketData,
+    IndicatorPeriods,
+    MarketBasket,
+)
 from coinbase.market_scanner import GRANULARITY_SECONDS
 from coinbase.trading_strategy import Decision, Ledger, Strategy
 from exchange.adapter import ExchangeAdapter, ExchangeError
@@ -31,6 +36,8 @@ class LiveMarketRow:
         normalized_columns: tuple[str, ...],
         lookback_candles: int = 200,
         limit: Optional[asyncio.Semaphore] = None,
+        index_pairs: tuple[str, ...] = (),
+        index_period: int = 30,
     ) -> None:
         self._adapter            = adapter
         self._pair               = pair
@@ -39,6 +46,8 @@ class LiveMarketRow:
         self._normalized_columns = normalized_columns
         self._lookback_candles   = lookback_candles
         self._limit              = limit
+        self._index_pairs        = index_pairs
+        self._index_period       = index_period
 
     def pair(self) -> str:
         return self._pair
@@ -51,10 +60,19 @@ class LiveMarketRow:
         start = end - self._lookback_candles * GRANULARITY_SECONDS[self._granularity]
         # cache_dir=None: this window slides every call, so disk caching would
         # never hit and would just accumulate one throwaway file per tick.
+        # The basket is fetched over the same sliding window for the same
+        # reason, and only when a genome was actually trained against one.
+        index_returns = None
+        if self._index_pairs:
+            index_returns = await MarketBasket(
+                self._adapter, self._index_pairs, self._granularity, start, end,
+                cache_dir=None, limit=self._limit,
+            ).returns()
         return await HistoricalMarketData(
             self._adapter, self._pair, self._granularity, start, end,
             self._periods, self._normalized_columns, cache_dir=None,
             limit=self._limit,
+            index_returns=index_returns, index_period=self._index_period,
         ).dataframe()
 
     async def latest(self) -> dict[str, float]:

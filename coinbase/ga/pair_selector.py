@@ -53,7 +53,7 @@ import pandas as pd
 
 from coinbase.ga.config import GA_RESULTS_ROOT, ConfigFile
 from coinbase.ga.experiment_history import ExperimentDirectory
-from coinbase.ga.ga_engine import Genome
+from coinbase.ga.ga_engine import BackfilledGenome, Genome
 from coinbase.ga.market_data_processor import HistoricalMarketData, IsoDate, MarketDataConfig
 from coinbase.ga.paper_trading import BasisPointFee, FeeSchedule, NoFees
 from coinbase.ga.strategy_evaluator import (
@@ -520,6 +520,46 @@ class BestRunPerPair:
         return chosen
 
 
+# Resolves a list of pairs to their trained genomes, shared by the backtest
+# and the paper runner so the two can never disagree about which genome drives
+# which pair.
+class TrainedPairs:
+    def __init__(
+        self,
+        raw_config: dict[str, Any],
+        pairs: tuple[str, ...],
+        metric: str,
+        granularity: str,
+    ) -> None:
+        self._raw_config  = raw_config
+        self._pairs       = pairs
+        self._metric      = metric
+        self._granularity = granularity
+
+    @functools.cached_property
+    def resolved(self) -> dict[str, "TrainedPair"]:
+        output      = OutputConfigFile(self._raw_config).config()
+        index       = pd.read_csv(output.index_filepath)
+        run_ids     = BestRunPerPair(index, self._pairs, self._metric, self._granularity).run_ids()
+        market      = MarketDataConfig(self._raw_config)
+        weight_keys = ValidatedWeightKeys(
+            WeightKeysConfig(self._raw_config).keys(), market.normalized_columns(),
+        ).keys() + (POSITION_PNL_KEY,)
+        return {
+            pair: TrainedPair(
+                pair,
+                ExperimentDirectory(output.experiments_dir, run_ids[pair]).strategy_path(),
+                self._raw_config, weight_keys,
+            )
+            for pair in self._pairs if pair in run_ids
+        }
+
+    # Named rather than silently dropped: a selector quietly running over three
+    # of twelve pairs looks like a result, not a misconfiguration.
+    def missing(self) -> tuple[str, ...]:
+        return tuple(pair for pair in self._pairs if pair not in self.resolved)
+
+
 class TrainedPair:
     def __init__(
         self,
@@ -544,7 +584,18 @@ class TrainedPair:
         return TrainedStrategyConfig(self._raw_config, self._saved.hyperparameters()).config()
 
     def strategy(self) -> GaStrategy:
-        return GaStrategy(Genome(self._saved.weights()), self.config, self._weight_keys)
+        # A genome saved before a weight key existed carries no weight for it,
+        # and Genome.weight raises rather than guessing. Backfilling at zero
+        # keeps every pre-existing genome runnable against a config that has
+        # since grown a column, scored on exactly what it was trained on.
+        backfilled = BackfilledGenome(Genome(self._saved.weights()), self._weight_keys)
+        if backfilled.missing():
+            logger.warning(
+                "%s: genome predates %s — running it with those weighted zero; "
+                "retrain to let the GA actually use them",
+                self._pair, ", ".join(backfilled.missing()),
+            )
+        return GaStrategy(backfilled.filled(), self.config, self._weight_keys)
 
 
 # ── Report ─────────────────────────────────────────────────────────────
@@ -752,37 +803,20 @@ async def _main(argv: list[str]) -> None:
     exchange   = args.exchange or (raw_config.get("data") or {}).get("exchange", "coinbase")
     pairs      = arguments.pairs(exchange)
 
-    output      = OutputConfigFile(raw_config).config()
-    index       = pd.read_csv(output.index_filepath)
-    run_ids     = BestRunPerPair(index, pairs, args.metric, window.granularity).run_ids()
-    missing     = [pair for pair in pairs if pair not in run_ids]
-    if missing:
-        # Named rather than silently dropped: a selector quietly running over
-        # three of twelve pairs looks like a result, not a misconfiguration.
+    catalogue = TrainedPairs(raw_config, pairs, args.metric, window.granularity)
+    trained   = catalogue.resolved
+    if catalogue.missing():
         logger.warning(
             "no %s genome for %s — train them first with a data.pair sweep axis",
-            window.granularity, ", ".join(missing),
+            window.granularity, ", ".join(catalogue.missing()),
         )
-    pairs = tuple(pair for pair in pairs if pair in run_ids)
+    pairs = tuple(trained)
     if not pairs:
         raise ValueError(
-            f"none of the requested pairs have a trained genome in {output.index_filepath}. "
-            f"Train them first: add a `data.pair` axis to sweep.yaml and run "
-            f"`python -m coinbase.ga.sweep`."
+            "none of the requested pairs have a trained genome for "
+            f"{window.granularity}. Train them first: add a `data.pair` axis to "
+            "sweep.yaml and run `python -m coinbase.ga.sweep`."
         )
-
-    weight_keys = ValidatedWeightKeys(
-        WeightKeysConfig(raw_config).keys(), market.normalized_columns(),
-    ).keys() + (POSITION_PNL_KEY,)
-
-    trained = {
-        pair: TrainedPair(
-            pair,
-            ExperimentDirectory(output.experiments_dir, run_ids[pair]).strategy_path(),
-            raw_config, weight_keys,
-        )
-        for pair in pairs
-    }
 
     data = SelectorMarketData(
         pairs, exchange, raw_config,
