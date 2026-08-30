@@ -153,6 +153,20 @@ class GaStrategy:
             return 0.0
         return position.unrealized_return(row["close"])
 
+    # The highest score reachable with no position open. Every norm_* column
+    # is in [0, 1] and NormalizedWeights forces the weights to sum to 1.0
+    # INCLUDING position_pnl — which contributes exactly 0 when flat — so the
+    # ceiling is the weight mass on the indicator keys, not 1.0.
+    #
+    # It matters: a genome carrying 0.49 on position_pnl tops out at 0.51 and
+    # can never cross a 0.6 buy_threshold, so it is structurally short-only.
+    # Anything ranking scores across genomes has to measure against this rather
+    # than against 1.0, or it ranks on whose position_pnl weight is smallest.
+    def flat_score_ceiling(self) -> float:
+        return sum(
+            self._genome.weight(key) for key in self._keys if key != POSITION_PNL_KEY
+        )
+
 
 # ── Yield ────────────────────────────────────────────────────────────────
 

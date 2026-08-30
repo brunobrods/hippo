@@ -6,7 +6,10 @@ import pytest
 
 from coinbase.ga.market_data_processor import IndicatorPeriods
 from coinbase.ga.paper_trading import (
+    BasisPointFee,
     InitialPaperState,
+    MakerTakerFee,
+    NoFees,
     PaperConfigFile,
     PaperState,
     PaperStateFile,
@@ -360,3 +363,28 @@ def test_a_trained_config_that_contradicts_itself_is_rejected():
         TrainedStrategyConfig(
             _raw_config(), {"short_entry_threshold": 0.5, "short_exit_threshold": 0.1},
         ).config()
+
+
+# ── Fee schedules ────────────────────────────────────────────────────
+
+def test_maker_taker_fee_charges_the_rate_for_the_side_it_was_filled_on():
+    fees = MakerTakerFee(maker_bps=60.0, taker_bps=120.0)
+    assert fees.charge(1000.0, maker=True)  == pytest.approx(6.0)
+    assert fees.charge(1000.0, maker=False) == pytest.approx(12.0)
+
+
+# Binance charges both sides alike at base tier, so resting an order saves the
+# spread, not the fee — a distinction worth keeping visible in the model.
+def test_maker_taker_fee_can_price_both_sides_the_same():
+    fees = MakerTakerFee(maker_bps=10.0, taker_bps=10.0)
+    assert fees.charge(1000.0, maker=True) == fees.charge(1000.0, maker=False)
+
+
+def test_maker_taker_fee_defaults_to_the_taker_rate():
+    assert MakerTakerFee(10.0, 120.0).charge(1000.0) == pytest.approx(12.0)
+
+
+# The existing schedules must keep working unchanged — paper_engine imports both.
+def test_flat_schedules_ignore_the_maker_flag():
+    assert BasisPointFee(20.0).charge(1000.0, maker=True) == pytest.approx(2.0)
+    assert NoFees().charge(1000.0, maker=True) == 0.0

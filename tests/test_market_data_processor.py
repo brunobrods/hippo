@@ -6,11 +6,15 @@ import pytest
 from exchange.adapter import ExchangeError
 from coinbase.ga.market_data_processor import (
     AccountBalance,
+    AverageTrueRange,
     CachedHistoricalCandles,
     CandleCacheFile,
     CandleCacheKey,
+    CandleRange,
     ChunkedTimeRange,
     Delta,
+    OhlcFrame,
+    TrueRange,
     HistoricalCandles,
     HistoricalMarketData,
     IndicatorFrame,
@@ -608,3 +612,68 @@ async def test_one_exchanges_cached_window_is_never_served_to_the_other(tmp_path
 
     # The second run must have hit its own exchange, not Coinbase's cache file.
     assert len(binance.candle_calls) == 1
+
+
+# ── TrueRange / AverageTrueRange / CandleRange / OhlcFrame ─────────────
+
+def _ohlc(start: int, open_: float, high: float, low: float, close: float, volume: float = 1.0) -> dict:
+    return {
+        "start":  str(start),
+        "open":   str(open_),
+        "high":   str(high),
+        "low":    str(low),
+        "close":  str(close),
+        "volume": str(volume),
+    }
+
+
+def test_true_range_is_high_minus_low_on_the_first_bar():
+    # No previous close exists, so both gap terms are NaN and only the body is
+    # defined — the bar must keep its own span rather than drop out.
+    true_range = TrueRange(pd.Series([110.0]), pd.Series([90.0]), pd.Series([100.0]))
+    assert true_range.series.iloc[0] == 20.0
+
+
+def test_true_range_uses_the_previous_close_when_the_bar_gaps():
+    highs  = pd.Series([100.0, 105.0])
+    lows   = pd.Series([100.0, 104.0])
+    closes = pd.Series([100.0, 104.5])
+    # The body is only 1.0, but the bar opened 5.0 above the previous close.
+    assert TrueRange(highs, lows, closes).series.iloc[1] == 5.0
+
+
+def test_average_true_range_percent_is_the_range_relative_to_close():
+    highs  = pd.Series([102.0] * 10)
+    lows   = pd.Series([98.0] * 10)
+    closes = pd.Series([100.0] * 10)
+    atr    = AverageTrueRange(TrueRange(highs, lows, closes).series, closes, period=3)
+    assert atr.percent.dropna().iloc[-1] == pytest.approx(0.04)
+
+
+def test_candle_range_fraction_is_the_span_over_the_open():
+    fraction = CandleRange(pd.Series([110.0]), pd.Series([90.0]), pd.Series([100.0])).fraction
+    assert fraction.iloc[0] == pytest.approx(0.20)
+
+
+def test_candle_range_fraction_is_zero_for_a_doji():
+    fraction = CandleRange(pd.Series([100.0]), pd.Series([100.0]), pd.Series([100.0])).fraction
+    assert fraction.iloc[0] == 0.0
+
+
+def test_ohlc_frame_carries_the_open_column_indicator_frame_discards():
+    frame   = OhlcFrame([_ohlc(0, 100.0, 110.0, 90.0, 105.0)]).dataframe
+    periods = IndicatorPeriods(2, 3, 4, 5, 12, 26, 9)
+    assert frame.loc[0, "open"] == 100.0
+    assert "open" not in IndicatorFrame([], periods).dataframe.columns
+
+
+def test_ohlc_frame_keeps_every_candle_and_drops_no_warmup_rows():
+    # IndicatorFrame would dropna() away every row here — its shortest SMA
+    # alone needs a warm-up. OhlcFrame computes nothing, so it drops nothing.
+    candles = [_ohlc(i * 86400, 100.0, 101.0, 99.0, 100.0) for i in range(40)]
+    assert len(OhlcFrame(candles).dataframe) == 40
+
+
+def test_ohlc_frame_sorts_candles_oldest_first():
+    candles = [_ohlc(2 * 86400, 3.0, 3.0, 3.0, 3.0), _ohlc(0, 1.0, 1.0, 1.0, 1.0)]
+    assert list(OhlcFrame(candles).dataframe["open"]) == [1.0, 3.0]

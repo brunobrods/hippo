@@ -153,6 +153,67 @@ class Delta:
         return self._closes.pct_change(periods=self._period)
 
 
+# True range, not just high-low: a candle that gaps away from the previous
+# close moved further than its own body shows, and that gap is real movement a
+# holder lived through.
+class TrueRange:
+    def __init__(self, highs: pd.Series, lows: pd.Series, closes: pd.Series) -> None:
+        self._highs  = highs
+        self._lows   = lows
+        self._closes = closes
+
+    @functools.cached_property
+    def series(self) -> pd.Series:
+        previous = self._closes.shift(1)
+        spans    = pd.concat(
+            [
+                self._highs - self._lows,
+                (self._highs - previous).abs(),
+                (self._lows - previous).abs(),
+            ],
+            axis=1,
+        )
+        # The first bar has no previous close, so both gap terms are NaN and
+        # only high-low is defined. skipna leaves that bar its own span rather
+        # than dropping it — on the short windows the screener uses, one row is
+        # a meaningful share of the sample.
+        return spans.max(axis=1, skipna=True)
+
+
+class AverageTrueRange:
+    # Wilder's smoothing is exactly the EWM form Rsi already uses above, so the
+    # two indicators stay consistent rather than one quietly using a simple mean.
+    def __init__(self, true_range: pd.Series, closes: pd.Series, period: int = 14) -> None:
+        self._true_range = true_range
+        self._closes     = closes
+        self._period     = period
+
+    @functools.cached_property
+    def series(self) -> pd.Series:
+        return self._true_range.ewm(
+            alpha=1 / self._period, min_periods=self._period, adjust=False,
+        ).mean()
+
+    @functools.cached_property
+    def percent(self) -> pd.Series:
+        return self.series / self._closes.mask(self._closes == 0)
+
+
+# The share of its own opening price a candle travelled between its extremes.
+# This is the perfect-timing bound — capturing it means buying the low and
+# selling the high — so it is reported alongside, never instead of, the
+# close-to-close move a directional hold can actually take.
+class CandleRange:
+    def __init__(self, highs: pd.Series, lows: pd.Series, opens: pd.Series) -> None:
+        self._highs = highs
+        self._lows  = lows
+        self._opens = opens
+
+    @functools.cached_property
+    def fraction(self) -> pd.Series:
+        return (self._highs - self._lows) / self._opens.mask(self._opens == 0)
+
+
 class MinMaxColumn:
     def __init__(self, series: pd.Series) -> None:
         self._series = series
@@ -165,6 +226,30 @@ class MinMaxColumn:
 
 
 # ── Frame builders ─────────────────────────────────────────────────────
+
+# Raw OHLCV in frame form, with nothing computed and nothing dropped.
+#
+# IndicatorFrame below cannot serve this purpose: it has no `open` column at
+# all, and it ends in .dropna() after a 50-period SMA, so on a 180-row daily
+# window it would silently discard the first 50 rows and compute statistics on
+# 130 days while reporting 180 — and on any window shorter than the longest
+# indicator period it returns nothing whatsoever.
+class OhlcFrame:
+    def __init__(self, raw_candles: list[dict]) -> None:
+        self._raw = raw_candles
+
+    @functools.cached_property
+    def dataframe(self) -> pd.DataFrame:
+        candles = sorted(self._raw, key=lambda c: int(c["start"]))
+        return pd.DataFrame({
+            "timestamp": pd.Series([int(c["start"])    for c in candles], dtype="int64"),
+            "open":      pd.Series([float(c["open"])   for c in candles], dtype="float64"),
+            "high":      pd.Series([float(c["high"])   for c in candles], dtype="float64"),
+            "low":       pd.Series([float(c["low"])    for c in candles], dtype="float64"),
+            "close":     pd.Series([float(c["close"])  for c in candles], dtype="float64"),
+            "volume":    pd.Series([float(c["volume"]) for c in candles], dtype="float64"),
+        })
+
 
 class IndicatorFrame:
     def __init__(self, raw_candles: list[dict], periods: IndicatorPeriods) -> None:

@@ -1,7 +1,7 @@
 import aiohttp
 import pytest
 
-from coinbase.coinbase_adapter import CoinbaseAdapter, CoinbaseError
+from coinbase.coinbase_adapter import CoinbaseAdapter, CoinbaseError, CoinbaseProduct
 
 
 # ── Test double ──────────────────────────────────────────────────────
@@ -65,3 +65,67 @@ async def test_parse_truncates_a_huge_non_json_error_body():
     with pytest.raises(CoinbaseError) as caught:
         await CoinbaseAdapter._parse(resp)
     assert len(caught.value.raw["body"]) == 500
+
+
+# ── CoinbaseProduct ──────────────────────────────────────────────────
+
+def _product(**overrides) -> dict:
+    raw = {
+        "product_id":                  "BTC-USDC",
+        "base_currency_id":            "BTC",
+        "quote_currency_id":           "USDC",
+        "price":                       "50000",
+        "volume_24h":                  "100",
+        "price_percentage_change_24h": "2.5",
+        "base_increment":              "0.00000001",
+        "quote_increment":             "0.01",
+        "base_min_size":               "0.0001",
+        "quote_min_size":              "1",
+        "status":                      "online",
+        "trading_disabled":            False,
+    }
+    raw.update(overrides)
+    return raw
+
+
+def test_coinbase_product_keeps_the_canonical_dashed_product_id():
+    assert CoinbaseProduct(_product()).normalized()["product_id"] == "BTC-USDC"
+
+
+# Coinbase reports volume_24h in BASE units while Binance's quoteVolume is
+# already in quote — unconverted, a liquidity filter would compare a BTC count
+# against a USDT count and rank on nothing at all.
+def test_coinbase_product_reports_quote_volume_as_base_volume_times_price():
+    product = CoinbaseProduct(_product(volume_24h="100", price="50000")).normalized()
+    assert product["volume_24h_quote"] == pytest.approx(5_000_000.0)
+
+
+def test_coinbase_product_is_not_tradable_when_trading_is_disabled():
+    assert CoinbaseProduct(_product(trading_disabled=True)).normalized()["tradable"] is False
+
+
+def test_coinbase_product_is_not_tradable_when_it_is_offline():
+    assert CoinbaseProduct(_product(status="offline")).normalized()["tradable"] is False
+
+
+def test_coinbase_product_is_not_tradable_in_cancel_only_mode():
+    assert CoinbaseProduct(_product(cancel_only=True)).normalized()["tradable"] is False
+
+
+# Coinbase Advanced Trade has no borrow, so no strategy can be shorted here.
+def test_coinbase_product_can_never_short():
+    assert CoinbaseProduct(_product()).normalized()["can_short"] is False
+
+
+def test_coinbase_product_tolerates_a_missing_price_without_raising():
+    assert CoinbaseProduct(_product(price="")).normalized()["volume_24h_quote"] == 0.0
+
+
+def test_coinbase_product_matches_the_binance_normalized_key_set():
+    product = CoinbaseProduct(_product()).normalized()
+    assert {
+        "product_id", "base_currency", "quote_currency", "quote_increment",
+        "base_increment", "base_min_size", "min_market_funds", "status",
+        "tradable", "can_long", "can_short", "volume_24h_quote",
+        "price_change_24h_pct",
+    } <= set(product)

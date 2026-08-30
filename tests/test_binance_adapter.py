@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import math
 from collections import deque
 from urllib.parse import parse_qs, urlparse
 
@@ -15,6 +16,8 @@ from binance.binance_adapter import (
     BinanceSymbol,
     HmacSignature,
     IsolatedAccounts,
+    IsolatedCatalog,
+    IsolatedPair,
     IsolatedRisk,
     KlineRow,
     LimitOrder,
@@ -22,6 +25,8 @@ from binance.binance_adapter import (
     OrderStatuses,
     SignedQuery,
     SnappedValue,
+    TradeFeeRates,
+    TwentyFourHourStats,
 )
 from exchange.adapter import ExchangeError
 
@@ -803,3 +808,181 @@ async def test_an_error_code_on_a_200_response_still_raises():
 
 def test_binance_errors_are_exchange_errors():
     assert issubclass(BinanceError, ExchangeError)
+
+
+# ── Universe ───────────────────────────────────────────────────────────
+
+def _margin_pair(symbol: str, base: str, quote: str, buy: bool = True, sell: bool = True) -> dict:
+    return {
+        "symbol": symbol, "base": base, "quote": quote,
+        "isMarginTrade": True, "isBuyAllowed": buy, "isSellAllowed": sell,
+    }
+
+
+def _info_symbol(symbol: str, base: str, quote: str, status: str = "TRADING") -> dict:
+    return {
+        "symbol": symbol, "baseAsset": base, "quoteAsset": quote, "status": status,
+        "filters": [
+            {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+            {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "9000"},
+            {"filterType": "NOTIONAL", "minNotional": "5"},
+        ],
+    }
+
+
+def _ticker(symbol: str, volume: str = "1000000", change: str = "2.5",
+            bid: str = "99", ask: str = "101") -> dict:
+    return {
+        "symbol": symbol, "quoteVolume": volume, "priceChangePercent": change,
+        "bidPrice": bid, "askPrice": ask,
+    }
+
+
+def test_twenty_four_hour_stats_index_is_keyed_by_wire_symbol():
+    stats = TwentyFourHourStats([_ticker("BTCUSDT"), _ticker("ETHUSDT")])
+    assert set(stats.by_symbol) == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_twenty_four_hour_stats_spread_is_in_basis_points():
+    stats = TwentyFourHourStats([_ticker("BTCUSDT", bid="99", ask="101")])
+    assert stats.spread_bps("BTCUSDT") == pytest.approx(200.0)
+
+
+# NaN rather than 0.0: an unquoted book has no spread to measure, and zero
+# would read as a perfectly tight one and understate that pair's cost floor.
+def test_twenty_four_hour_stats_spread_is_not_a_number_for_an_unquoted_book():
+    stats = TwentyFourHourStats([_ticker("DEADUSDT", bid="0", ask="0")])
+    assert math.isnan(stats.spread_bps("DEADUSDT"))
+
+
+def test_twenty_four_hour_stats_spread_is_not_a_number_for_an_unknown_symbol():
+    assert math.isnan(TwentyFourHourStats([]).spread_bps("NOSUCHUSDT"))
+
+
+def test_isolated_pair_reports_the_canonical_dashed_product_id():
+    pair = IsolatedPair(_margin_pair("BTCUSDT", "BTC", "USDT"))
+    assert pair.product_id() == "BTC-USDT"
+    assert pair.symbol() == "BTCUSDT"
+
+
+def test_isolated_pair_marks_a_sell_disabled_pair_as_short_disabled():
+    pair = IsolatedPair(_margin_pair("XUSDT", "X", "USDT", sell=False))
+    assert pair.can_long() is True
+    assert pair.can_short() is False
+
+
+def test_isolated_catalog_merges_pairs_with_filters_and_volume():
+    catalog = IsolatedCatalog(
+        [_margin_pair("BTCUSDT", "BTC", "USDT")],
+        [_info_symbol("BTCUSDT", "BTC", "USDT")],
+        TwentyFourHourStats([_ticker("BTCUSDT", volume="4200000")]),
+    )
+    product = catalog.products()[0]
+    assert product["product_id"]       == "BTC-USDT"
+    assert product["quote_currency"]   == "USDT"
+    assert product["base_increment"]   == "0.001"
+    assert product["volume_24h_quote"] == 4_200_000.0
+    assert product["can_short"] is True
+    assert product["tradable"] is True
+
+
+# A pair listed as isolated but already gone from exchangeInfo is mid-delisting,
+# not a bug — it must not take the other rows down with it.
+def test_isolated_catalog_skips_a_pair_missing_from_exchange_info():
+    catalog = IsolatedCatalog(
+        [_margin_pair("GONEUSDT", "GONE", "USDT"), _margin_pair("BTCUSDT", "BTC", "USDT")],
+        [_info_symbol("BTCUSDT", "BTC", "USDT")],
+        TwentyFourHourStats([_ticker("BTCUSDT")]),
+    )
+    assert [product["product_id"] for product in catalog.products()] == ["BTC-USDT"]
+
+
+def test_a_halted_symbol_is_not_tradable():
+    catalog = IsolatedCatalog(
+        [_margin_pair("HALTUSDT", "HALT", "USDT")],
+        [_info_symbol("HALTUSDT", "HALT", "USDT", status="BREAK")],
+        TwentyFourHourStats([_ticker("HALTUSDT")]),
+    )
+    assert catalog.products()[0]["tradable"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_products_joins_the_three_universe_endpoints():
+    session = FakeSession(
+        [_margin_pair("BTCUSDT", "BTC", "USDT")],
+        {"symbols": [_info_symbol("BTCUSDT", "BTC", "USDT")]},
+        [_ticker("BTCUSDT", volume="9000000")],
+    )
+    products = await _adapter(session).list_products()
+
+    paths = [urlparse(url).path for _, url, _ in session.requests]
+    assert paths == [
+        "/sapi/v1/margin/isolated/allPairs",
+        "/api/v3/exchangeInfo",
+        "/api/v3/ticker/24hr",
+    ]
+    assert products[0]["product_id"] == "BTC-USDT"
+    assert products[0]["volume_24h_quote"] == 9_000_000.0
+
+
+# ── Fee rates ──────────────────────────────────────────────────────────
+
+# Binance rejects the WHOLE symbols-array request with -1121 if one symbol is
+# unknown to spot — an isolated pair mid-delisting is exactly that — so without
+# bisection one bad symbol takes the entire ~200-pair scan down.
+@pytest.mark.asyncio
+async def test_one_unknown_symbol_does_not_kill_the_whole_universe_fetch():
+    class Selective:
+        def __init__(self) -> None:
+            self.requests: list[tuple[str, str, dict]] = []
+
+        def get(self, url, headers=None):
+            self.requests.append(("GET", url, headers or {}))
+            symbols = parse_qs(urlparse(url).query).get("symbols", ["[]"])[0]
+            if "GONEUSDT" in symbols:
+                return FakeResponse({"code": -1121, "msg": "Invalid symbol."}, status=400)
+            names = [s.strip('"') for s in symbols.strip("[]").split(",") if s]
+            return FakeResponse({"symbols": [_info_symbol(n, n[:-4], "USDT") for n in names]})
+
+    session  = Selective()
+    products = await _adapter(session)._filtered(
+        "/api/v3/exchangeInfo", "symbols", ["AUSDT", "GONEUSDT", "BUSDT"],
+    )
+    kept = [entry["symbol"] for page in products for entry in page["symbols"]]
+    assert "GONEUSDT" not in kept
+    assert set(kept) == {"AUSDT", "BUSDT"}
+
+
+@pytest.mark.asyncio
+async def test_a_clean_symbol_list_is_fetched_in_one_request():
+    session = FakeSession({"symbols": [_info_symbol("BTCUSDT", "BTC", "USDT")]})
+    await _adapter(session)._filtered("/api/v3/exchangeInfo", "symbols", ["BTCUSDT"])
+    assert len(session.requests) == 1
+
+
+def test_trade_fee_rates_convert_fractions_to_basis_points():
+    fees = TradeFeeRates([{"symbol": "BTCUSDT", "makerCommission": "0.001", "takerCommission": "0.001"}])
+    assert fees.maker_bps() == pytest.approx(10.0)
+    assert fees.taker_bps() == pytest.approx(10.0)
+
+
+def test_trade_fee_rates_take_the_median_across_symbols():
+    fees = TradeFeeRates([
+        {"symbol": "A", "makerCommission": "0.001", "takerCommission": "0.001"},
+        {"symbol": "B", "makerCommission": "0.001", "takerCommission": "0.001"},
+        {"symbol": "C", "makerCommission": "0.009", "takerCommission": "0.009"},
+    ])
+    assert fees.maker_bps() == pytest.approx(10.0)
+
+
+def test_trade_fee_rates_raise_rather_than_return_a_silent_zero():
+    with pytest.raises(BinanceError):
+        TradeFeeRates([]).maker_bps()
+
+
+@pytest.mark.asyncio
+async def test_fee_rates_reads_the_accounts_own_tier():
+    session = FakeSession([{"symbol": "BTCUSDT", "makerCommission": "0.0002", "takerCommission": "0.0004"}])
+    maker, taker = await _adapter(session).fee_rates()
+    assert urlparse(session.requests[0][1]).path == "/sapi/v1/asset/tradeFee"
+    assert (maker, taker) == (pytest.approx(2.0), pytest.approx(4.0))

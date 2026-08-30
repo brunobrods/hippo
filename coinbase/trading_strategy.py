@@ -179,6 +179,14 @@ class Ledger:
         if self._position is not None:
             self._close(price)
 
+    # Takes a cost out of the book without touching the position. Trade.profit()
+    # deliberately stays gross — every saved genome's recorded performance and
+    # every row of experiments/index.csv is denominated in it, so folding fees
+    # in there would invalidate comparisons across the whole history. A caller
+    # that wants a net book charges on top, here.
+    def charge(self, amount: float) -> None:
+        self._balance -= amount
+
     def balance(self) -> float:
         return self._balance
 
