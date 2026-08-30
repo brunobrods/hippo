@@ -12,6 +12,7 @@ from coinbase.trading_strategy import (
     Direction,
     IsolatedMargin,
     Ledger,
+    MarketRows,
     Position,
     Trade,
 )
@@ -287,12 +288,29 @@ def test_ledger_force_close_while_flat_is_a_no_op():
     assert ledger.trades() == []
 
 
+# ── MarketRows ───────────────────────────────────────────────────────
+
+def test_market_rows_exposes_the_frame_as_records():
+    rows = MarketRows(_frame([100.0, 120.0]))
+    assert [row["close"] for row in rows.records] == [100.0, 120.0]
+
+
+def test_market_rows_converts_only_once():
+    rows  = MarketRows(_frame([100.0, 120.0]))
+    first = rows.records
+    assert rows.records is first
+
+
+def test_market_rows_of_an_empty_frame_has_no_records():
+    assert MarketRows(_frame([])).records == []
+
+
 # ── Backtest ─────────────────────────────────────────────────────────
 
 def test_backtest_opens_and_closes_a_single_position_on_threshold_crossing():
     frame    = _frame([100.0, 100.0, 120.0, 120.0])
     strategy = _strategy([0.5, 0.7, 0.7, 0.3])  # flat, buy, hold, sell
-    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    result   = Backtest(MarketRows(frame), strategy, starting_balance=1000.0).run()
     trades   = result.trades()
     assert len(trades) == 1
     assert trades[0].profit() == pytest.approx((120.0 - 100.0) / 100.0 * 100.0)  # 10% of 1000 @100 -> 1 unit
@@ -301,14 +319,14 @@ def test_backtest_opens_and_closes_a_single_position_on_threshold_crossing():
 def test_backtest_never_opens_a_second_overlapping_position():
     frame    = _frame([100.0, 100.0, 100.0, 100.0])
     strategy = _strategy([0.7, 0.7, 0.7, 0.7])  # stays above buy_threshold throughout
-    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    result   = Backtest(MarketRows(frame), strategy, starting_balance=1000.0).run()
     assert len(result.trades()) == 1  # never re-buys; only trade is the forced close at the end
 
 
 def test_backtest_unwinds_an_open_position_at_entry_price_by_default():
     frame    = _frame([100.0, 110.0])
     strategy = _strategy([0.7, 0.7])  # buys and never sells
-    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    result   = Backtest(MarketRows(frame), strategy, starting_balance=1000.0).run()
     trades   = result.trades()
     assert len(trades) == 1
     assert trades[0].profit() == pytest.approx(0.0)  # still "in flight", not judged a win or a loss
@@ -317,7 +335,7 @@ def test_backtest_unwinds_an_open_position_at_entry_price_by_default():
 def test_backtest_force_closes_at_the_final_market_price_when_unwind_at_entry_price_is_false():
     frame    = _frame([100.0, 110.0])
     strategy = _strategy([0.7, 0.7])  # buys and never sells
-    result   = Backtest(frame, strategy, starting_balance=1000.0, unwind_at_entry_price=False).run()
+    result   = Backtest(MarketRows(frame), strategy, starting_balance=1000.0, unwind_at_entry_price=False).run()
     trades   = result.trades()
     assert len(trades) == 1
     assert trades[0].profit() == pytest.approx((110.0 - 100.0) / 100.0 * 100.0)
@@ -326,7 +344,7 @@ def test_backtest_force_closes_at_the_final_market_price_when_unwind_at_entry_pr
 def test_backtest_holds_position_between_thresholds_without_selling():
     frame    = _frame([100.0, 100.0, 100.0])
     strategy = _strategy([0.7, 0.5, 0.5])  # buy, then sits in the hold band
-    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    result   = Backtest(MarketRows(frame), strategy, starting_balance=1000.0).run()
     assert len(result.trades()) == 1  # only force-closed at the end, not sold mid-run
 
 
@@ -336,7 +354,7 @@ def test_backtest_position_size_compounds_on_current_balance():
     # would size 0.5 units) -> the two hypotheses diverge to 55.0 vs 50.0 profit on the @300 exit
     frame    = _frame([100.0, 200.0, 200.0, 300.0])
     strategy = _strategy([0.7, 0.3, 0.7, 0.3])
-    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    result   = Backtest(MarketRows(frame), strategy, starting_balance=1000.0).run()
     trades   = result.trades()
     assert len(trades) == 2
     assert trades[0].profit() == pytest.approx(100.0)
@@ -346,7 +364,7 @@ def test_backtest_position_size_compounds_on_current_balance():
 def test_backtest_equity_curve_tracks_unrealized_gains_while_in_position():
     frame    = _frame([100.0, 150.0])
     strategy = _strategy([0.7, 0.7])
-    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    result   = Backtest(MarketRows(frame), strategy, starting_balance=1000.0).run()
     curve    = result.equity_curve()
     assert curve[0] == pytest.approx(1000.0)  # just bought, no move yet
     assert curve[1] == pytest.approx(1000.0 + (150.0 - 100.0) / 100.0 * 100.0)
@@ -375,7 +393,7 @@ def _ohlc_frame(rows: list[tuple[float, float, float]]) -> pd.DataFrame:
 def test_backtest_short_profits_as_price_falls():
     frame    = _ohlc_frame([(100.0, 100.0, 100.0), (80.0, 100.0, 80.0), (80.0, 80.0, 80.0)])
     strategy = _ScriptedDirectionalStrategy([Action.SHORT, Action.HOLD, Action.COVER])
-    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    result   = Backtest(MarketRows(frame), strategy, starting_balance=1000.0).run()
     trades   = result.trades()
     assert len(trades) == 1
     assert trades[0].direction() is Direction.SHORT
@@ -388,7 +406,7 @@ def test_backtest_liquidates_a_short_before_taking_that_candles_decision():
     # 1 unit @100 against a 1000 balance liquidates at (1000+100)/1.05 = 1047.6
     frame    = _ohlc_frame([(100.0, 100.0, 100.0), (150.0, 1100.0, 140.0), (90.0, 150.0, 90.0)])
     strategy = _ScriptedDirectionalStrategy([Action.SHORT, Action.HOLD, Action.COVER])
-    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    result   = Backtest(MarketRows(frame), strategy, starting_balance=1000.0).run()
     trades   = result.trades()
     assert len(trades) == 1
     # closed at the liquidation price, not at the 1100.0 wick or the 90.0 close
@@ -400,13 +418,13 @@ def test_backtest_does_not_liquidate_a_short_on_the_candle_that_opened_it():
     # happened before the close the position is opened at
     frame    = _ohlc_frame([(100.0, 5000.0, 100.0), (95.0, 100.0, 90.0)])
     strategy = _ScriptedDirectionalStrategy([Action.SHORT, Action.HOLD])
-    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    result   = Backtest(MarketRows(frame), strategy, starting_balance=1000.0).run()
     assert result.trades()[0].profit() == pytest.approx(0.0)  # unwound at entry, never liquidated
 
 
 def test_backtest_empty_when_signal_never_crosses_buy_threshold():
     frame    = _frame([100.0, 100.0, 100.0])
     strategy = _strategy([0.5, 0.5, 0.5])
-    result   = Backtest(frame, strategy, starting_balance=1000.0).run()
+    result   = Backtest(MarketRows(frame), strategy, starting_balance=1000.0).run()
     assert result.trades() == []
     assert result.gross_profit() == 0.0

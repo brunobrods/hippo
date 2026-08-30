@@ -9,7 +9,16 @@ from coinbase.ga.ga_engine import GaConfig, Genome
 from coinbase.ga.main import TrainingSummary
 from coinbase.ga.strategy_evaluator import StrategyConfig
 from coinbase.ga.strategy_output import PerformanceReport, StrategyJson, StrategyMetadata, TrainedStrategy, TrainingPeriod
-from coinbase.ga.sweep import ConsoleSweepProgress, DottedPathOverride, Sweep, SweepAxis, SweepConfigFile, SweepPlan, SweepPoint
+from coinbase.ga.sweep import (
+    ConsoleSweepProgress,
+    DottedPathOverride,
+    FixedOverrides,
+    Sweep,
+    SweepAxis,
+    SweepConfigFile,
+    SweepPlan,
+    SweepPoint,
+)
 from coinbase.trading_strategy import BacktestResult
 
 
@@ -116,6 +125,91 @@ def test_sweep_config_file_reads_axes():
     )
 
 
+def test_sweep_config_file_reads_fixed_overrides_in_order():
+    raw = {
+        "base_config": "x.yaml",
+        "fixed": {"data.exchange": "binance", "data.granularity": "THIRTY_MINUTE"},
+        "seeds": [1],
+        "axes": [{"path": "data.pair", "values": ["BTC-USDT"]}],
+    }
+    assert SweepConfigFile(raw).fixed() == (
+        ("data.exchange", "binance"),
+        ("data.granularity", "THIRTY_MINUTE"),
+    )
+
+
+def test_sweep_config_file_fixed_is_empty_when_the_section_is_absent():
+    raw = {"base_config": "x.yaml", "seeds": [1], "axes": [{"path": "a.b", "values": [1]}]}
+    assert SweepConfigFile(raw).fixed() == ()
+
+
+def test_sweep_config_file_fixed_is_empty_when_the_section_is_commented_out():
+    # A YAML mapping whose every child is commented out parses to None, not {}.
+    raw = {"base_config": "x.yaml", "fixed": None, "seeds": [1], "axes": [{"path": "a.b", "values": [1]}]}
+    assert SweepConfigFile(raw).fixed() == ()
+
+
+# ── FixedOverrides ───────────────────────────────────────────────────
+
+def test_fixed_overrides_applies_every_path():
+    base   = {"data": {"exchange": "coinbase", "granularity": "SIX_HOUR", "pair": "BTC-USDC"}}
+    result = FixedOverrides(base, (
+        ("data.exchange", "binance"),
+        ("data.granularity", "THIRTY_MINUTE"),
+    )).applied()
+    assert result["data"]["exchange"] == "binance"
+    assert result["data"]["granularity"] == "THIRTY_MINUTE"
+    assert result["data"]["pair"] == "BTC-USDC"  # untouched
+
+
+def test_fixed_overrides_does_not_mutate_the_original():
+    base = {"data": {"exchange": "coinbase"}}
+    FixedOverrides(base, (("data.exchange", "binance"),)).applied()
+    assert base["data"]["exchange"] == "coinbase"
+
+
+def test_fixed_overrides_with_nothing_fixed_returns_an_equal_but_separate_config():
+    base   = {"data": {"exchange": "coinbase"}}
+    result = FixedOverrides(base, ()).applied()
+    assert result == base
+    result["data"]["exchange"] = "binance"
+    assert base["data"]["exchange"] == "coinbase"  # never an alias of the input
+
+
+def test_fixed_overrides_reach_every_sweep_point():
+    # The whole point of `fixed:` — SweepPlan is built from the already-fixed
+    # base, so a pinned path shows up on every point without being an axis.
+    base   = FixedOverrides(
+        {"data": {"granularity": "SIX_HOUR"}, "strategy": {"buy_threshold": 0.6, "sell_threshold": 0.4},
+         "genetic_algorithm": {"seed": 1}, "output": {"experiments_dir": "/tmp/e", "strategy_filepath": "/tmp/s.json"}},
+        (("data.granularity", "THIRTY_MINUTE"),),
+    ).applied()
+    axes   = (SweepAxis(path="strategy.buy_threshold", values=(0.5, 0.7)),)
+    points = SweepPlan(base, axes, seeds=(1, 2)).points()
+
+    assert len(points) == 4
+    assert all(point.raw_config["data"]["granularity"] == "THIRTY_MINUTE" for point in points)
+
+
+def test_shipped_pair_sweep_configs_pin_exchange_and_granularity():
+    # Regression guard: the three arms must differ ONLY in granularity, or the
+    # trade-count comparison between them is not attributable to candle size.
+    arms = {
+        "coinbase/ga/sweep_pairs_30m.yaml": "THIRTY_MINUTE",
+        "coinbase/ga/sweep_pairs_2h.yaml":  "TWO_HOUR",
+        "coinbase/ga/sweep_pairs_6h.yaml":  "SIX_HOUR",
+    }
+    seen_pairs = set()
+    for path, granularity in arms.items():
+        config = SweepConfigFile(ConfigFile(path).raw())
+        assert dict(config.fixed()) == {"data.exchange": "binance", "data.granularity": granularity}
+        assert config.seeds() == (1, 2, 3)
+        axes = config.axes()
+        assert len(axes) == 1 and axes[0].path == "data.pair"
+        seen_pairs.add(axes[0].values)
+    assert len(seen_pairs) == 1  # all three arms sweep the identical pair list
+
+
 # ── DottedPathOverride ───────────────────────────────────────────────
 
 def test_dotted_path_override_sets_a_nested_value():
@@ -185,14 +279,14 @@ def test_sweep_plan_overrides_seed_per_point():
     assert {p.seed for p in points} == {7, 8}
 
 
-def test_sweep_plan_redirects_strategy_filepath_to_a_shared_scratch_file():
+def test_sweep_plan_redirects_strategy_filepath_to_a_scratch_file():
     # TrainingRun.train() unconditionally overwrites output.strategy_filepath —
     # a sweep must never let that clobber the base config's canonical file.
     base   = _minimal_base(experiments_dir="/tmp/experiments")
     axes   = (SweepAxis(path="strategy.buy_threshold", values=(0.5, 0.7)),)
-    points = SweepPlan(base, axes, seeds=(1, 2)).points()
+    points = SweepPlan(base, axes, seeds=(1, 2), process_id=4242).points()
 
-    expected_scratch_path = os.path.join("/tmp/experiments", "_sweep_scratch", "best_strategy.json")
+    expected_scratch_path = os.path.join("/tmp/experiments", "_sweep_scratch", "best_strategy_4242.json")
     for point in points:
         assert point.raw_config["output"]["strategy_filepath"] == expected_scratch_path
         assert point.raw_config["output"]["strategy_filepath"] != base["output"]["strategy_filepath"]
@@ -203,10 +297,34 @@ def test_sweep_plan_scratch_path_uses_shared_default_when_experiments_dir_absent
 
     base   = {"strategy": {"buy_threshold": 0.6}, "genetic_algorithm": {"seed": 1}, "output": {}}
     axes   = (SweepAxis(path="strategy.buy_threshold", values=(0.5,)),)
-    points = SweepPlan(base, axes, seeds=(1,)).points()
+    points = SweepPlan(base, axes, seeds=(1,), process_id=4242).points()
 
-    expected = os.path.join(str(GA_RESULTS_ROOT / "experiments"), "_sweep_scratch", "best_strategy.json")
+    expected = os.path.join(
+        str(GA_RESULTS_ROOT / "experiments"), "_sweep_scratch", "best_strategy_4242.json",
+    )
     assert points[0].raw_config["output"]["strategy_filepath"] == expected
+
+
+def test_sweep_plan_scratch_path_defaults_to_the_running_process():
+    base   = _minimal_base(experiments_dir="/tmp/experiments")
+    axes   = (SweepAxis(path="strategy.buy_threshold", values=(0.5,)),)
+    points = SweepPlan(base, axes, seeds=(1,)).points()
+    assert points[0].raw_config["output"]["strategy_filepath"].endswith(
+        "best_strategy_%d.json" % os.getpid()
+    )
+
+
+def test_two_concurrent_sweeps_do_not_share_one_scratch_file():
+    # TrainingRun writes strategy_filepath then reads it straight back for its
+    # round-trip check, so two sweeps sharing the path would verify against
+    # each other's strategy — or against a half-written file.
+    base = _minimal_base(experiments_dir="/tmp/experiments")
+    axes = (SweepAxis(path="strategy.buy_threshold", values=(0.5,)),)
+    first  = SweepPlan(base, axes, seeds=(1,), process_id=111).points()
+    second = SweepPlan(base, axes, seeds=(1,), process_id=222).points()
+
+    assert (first[0].raw_config["output"]["strategy_filepath"]
+            != second[0].raw_config["output"]["strategy_filepath"])
 
 
 def test_sweep_plan_works_against_the_real_shipped_config_yaml():
@@ -254,7 +372,8 @@ async def test_sweep_runs_one_training_run_per_point_and_records_history(tmp_pat
 
     # the base config's canonical strategy_filepath must never be touched by a sweep
     assert not (tmp_path / "best_strategy.json").exists()
-    assert (tmp_path / "experiments" / "_sweep_scratch" / "best_strategy.json").exists()
+    scratch = tmp_path / "experiments" / "_sweep_scratch"
+    assert [path.name for path in scratch.iterdir()] == ["best_strategy_%d.json" % os.getpid()]
 
 
 # ── ConsoleSweepProgress ─────────────────────────────────────────────

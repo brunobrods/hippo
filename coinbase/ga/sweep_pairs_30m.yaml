@@ -1,0 +1,49 @@
+# Cross-pair sweep at THIRTY_MINUTE candles — the fine-granularity arm of the
+# trade-frequency experiment (MODEL_DEVELOPMENT_PLAN.md §3, "cross-pair sweep").
+#
+# The question it answers: does a genome trained on 30-minute candles actually
+# take more trades than the SIX_HOUR baseline, and does that hold across pairs
+# or only on BTC? Trade count is the metric of interest here, not yield —
+# `total_trades` is already a column in experiments/index.csv, so comparing
+# arms needs no sweep-specific tooling.
+#
+# Run alongside sweep_pairs_2h.yaml and sweep_pairs_6h.yaml, which are identical
+# but for data.granularity: three arms over the same pairs, seeds and window
+# make trade count attributable to candle size rather than to the pair.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_pairs_6h.yaml    # ~16 min
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_pairs_2h.yaml    # ~50 min
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_pairs_30m.yaml   # ~3.5 h
+#
+# Cost is dominated by Backtest's per-row Python loop, so it scales with candle
+# count: the full window is ~3.5k candles at SIX_HOUR and ~42k at THIRTY_MINUTE.
+
+base_config: "coinbase/ga/config.yaml"
+
+# Pinned for every point, so config.yaml itself stays untouched — it is the
+# canonical file paper_trading.py reloads, and a sweep must not edit it.
+# data.exchange has to be pinned here rather than in an axis: the sweep runner
+# builds its adapter from the fixed base config, so an axis would leave the
+# adapter on config.yaml's exchange while the points claimed another.
+fixed:
+  data.exchange: "binance"
+  data.granularity: "THIRTY_MINUTE"
+
+# Three rather than the usual five: trade count is far less seed-sensitive than
+# yield, and at ~9 minutes a point the 30-minute arm would otherwise run 6 hours.
+seeds: [1, 2, 3]
+
+axes:
+  # USDT rather than USDC — this is the Binance arm, and USDT is where the
+  # liquidity and the isolated-margin pairs are. All eight verified to serve
+  # 30-minute klines back to the window's 2024-04-01 start.
+  - path: "data.pair"
+    values:
+      - "BTC-USDT"
+      - "ETH-USDT"
+      - "SOL-USDT"
+      - "XRP-USDT"
+      - "DOGE-USDT"
+      - "LINK-USDT"
+      - "AVAX-USDT"
+      - "FET-USDT"
