@@ -208,12 +208,14 @@ def test_main_run_log_mode(tmp_path, capsys):
 # different one, so a knob like weight_keys can only be recovered from each
 # run's own config.json.
 
-def _run_config(experiments_dir, run_id: str, keys: list, index_pairs: list = None) -> None:
+def _run_config(experiments_dir, run_id: str, keys: list, index_pairs: list = None,
+                negatives: bool = False, confidence: float = 0.0) -> None:
     directory = experiments_dir / run_id
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "config.json").write_text(json.dumps({
-        "strategy":    {"weight_keys": keys},
-        "market_data": {"index_pairs": index_pairs or []},
+        "strategy":          {"weight_keys": keys, "fitness_confidence": confidence},
+        "market_data":       {"index_pairs": index_pairs or []},
+        "genetic_algorithm": {"allow_negative_weights": negatives},
     }))
 
 
@@ -247,6 +249,26 @@ def test_enriching_leaves_the_original_frame_alone(tmp_path):
 
 # The point of the class: it makes a feature ablation groupable with the
 # existing GroupedComparison, without touching index.csv's schema.
+# Averaging across a change in what the model can express, or in what the GA
+# optimizes, produces a meaningless number — so both have to be groupable.
+def test_the_model_and_objective_knobs_are_recovered(tmp_path):
+    experiments = tmp_path / "experiments"
+    _run_config(experiments, "old", ["rsi"], negatives=False, confidence=0.0)
+    _run_config(experiments, "new", ["rsi"], negatives=True, confidence=1.0)
+    frame = pd.DataFrame({"run_id": ["old", "new"]})
+
+    enriched = ExperimentConfigs(frame, str(experiments)).enriched()
+    assert list(enriched["negative_weights"]) == [False, True]
+    assert list(enriched["fitness_confidence"]) == [0.0, 1.0]
+
+
+def test_a_run_predating_both_knobs_reads_as_the_historical_defaults(tmp_path):
+    frame    = pd.DataFrame({"run_id": ["ghost"]})
+    enriched = ExperimentConfigs(frame, str(tmp_path / "experiments")).enriched()
+    assert enriched.loc[0, "negative_weights"] is False or enriched.loc[0, "negative_weights"] == False
+    assert enriched.loc[0, "fitness_confidence"] == 0.0
+
+
 def test_the_enriched_column_groups_an_ablation(tmp_path):
     experiments = tmp_path / "experiments"
     _run_config(experiments, "a", ["rsi"])

@@ -12,6 +12,9 @@ from coinbase.ga.strategy_output import OutputConfigFile
 
 DEFAULT_METRIC = "annualized_yield"
 
+# Groupable, but not present in index.csv — read back per run from config.json.
+_CONFIG_COLUMNS = ("weight_keys", "index_pairs", "negative_weights", "fitness_confidence")
+
 
 # ── Loading ──────────────────────────────────────────────────────────────
 
@@ -56,9 +59,20 @@ class ExperimentConfigs:
 
     def enriched(self) -> pd.DataFrame:
         frame = self._frame.copy()
-        frame["weight_keys"] = frame["run_id"].map(self._weight_keys)
-        frame["index_pairs"] = frame["run_id"].map(self._index_pairs)
+        frame["weight_keys"]        = frame["run_id"].map(self._weight_keys)
+        frame["index_pairs"]        = frame["run_id"].map(self._index_pairs)
+        # The two knobs that change what the model can express and what the GA
+        # optimizes. Neither is an index column, and comparing runs across
+        # either without knowing which is which produces a meaningless average.
+        frame["negative_weights"]   = frame["run_id"].map(self._negative_weights)
+        frame["fitness_confidence"] = frame["run_id"].map(self._fitness_confidence)
         return frame
+
+    def _negative_weights(self, run_id: str) -> bool:
+        return bool((self._raw(run_id).get("genetic_algorithm") or {}).get("allow_negative_weights", False))
+
+    def _fitness_confidence(self, run_id: str) -> float:
+        return float((self._raw(run_id).get("strategy") or {}).get("fitness_confidence", 0.0))
 
     def _weight_keys(self, run_id: str) -> str:
         raw = self._raw(run_id)
@@ -169,7 +183,7 @@ def main(args_in: list[str]) -> None:
     frame = PairFilter(ExperimentIndexFile(output.index_filepath).dataframe(), args.pair).applied()
     # Only when asked for: reading one config.json per run costs a stat and a
     # parse per row, which is wasted on the ordinary leaderboard.
-    if args.group_by in ("weight_keys", "index_pairs") or args.with_config:
+    if args.group_by in _CONFIG_COLUMNS or args.with_config:
         frame = ExperimentConfigs(frame, output.experiments_dir).enriched()
     if args.window:
         frame = frame[frame["end_date"].astype(str) == args.window]
