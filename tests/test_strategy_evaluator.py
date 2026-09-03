@@ -391,3 +391,60 @@ def test_strategy_evaluator_duration_falls_back_to_zero_for_a_single_row_frame()
     evaluator = StrategyEvaluator(frame, _config(), _KEYS)
     result    = evaluator.result(genome)
     assert evaluator.annualized_yield(result) == pytest.approx(result.gross_profit() / _config().starting_balance)
+
+
+# ── Signed weights ───────────────────────────────────────────────────
+# The score must stay on the [0, ceiling] scale the thresholds are calibrated
+# against, or a genome would be penalised merely for using a negative weight.
+
+def _signed_row(**cols) -> dict:
+    base = {f"norm_{k}": 0.0 for k in _KEYS}
+    base.update({f"norm_{k}": v for k, v in cols.items()})
+    base["close"] = 100.0
+    return base
+
+
+def test_an_all_positive_genome_scores_exactly_as_before():
+    # The backward-compatibility guarantee: no offset, no change.
+    genome = Genome({"sma_short": 0.5, "sma_long": 0.5, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    score  = GaStrategy(genome, _config(), _KEYS).signal_score(_signed_row(sma_short=1.0, sma_long=0.4), None)
+    assert score == pytest.approx(0.5 * 1.0 + 0.5 * 0.4)
+
+
+def test_a_negative_weight_inverts_a_columns_contribution():
+    genome   = Genome({"sma_short": 0.5, "sma_long": -0.5, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    strategy = GaStrategy(genome, _config(), _KEYS)
+    # sma_long high should now push the score DOWN relative to sma_long low.
+    high = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=1.0), None)
+    low  = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=0.0), None)
+    assert high < low
+
+
+# Without the offset a signed genome's whole reachable range slides below the
+# buy threshold, and the search gets pushed back to the non-negative corner
+# this change exists to escape.
+def test_the_score_floor_stays_at_zero_for_a_signed_genome():
+    genome   = Genome({"sma_short": 0.5, "sma_long": -0.5, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    strategy = GaStrategy(genome, _config(), _KEYS)
+    worst    = strategy.signal_score(_signed_row(sma_short=0.0, sma_long=1.0), None)
+    best     = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=0.0), None)
+    assert worst == pytest.approx(0.0)
+    assert best == pytest.approx(1.0)
+
+
+def test_a_signed_genome_can_still_reach_the_buy_threshold():
+    genome   = Genome({"sma_short": 0.7, "sma_long": -0.3, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    strategy = GaStrategy(genome, _config(buy_threshold=0.6), _KEYS)
+    best     = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=0.0), None)
+    assert best > 0.6
+    assert strategy.decide(_signed_row(sma_short=1.0, sma_long=0.0), None, 1000.0).action is Action.BUY
+
+
+def test_the_ceiling_counts_absolute_weight_mass():
+    genome = Genome({"sma_short": 0.7, "sma_long": -0.3, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    assert GaStrategy(genome, _config(), _KEYS).flat_score_ceiling() == pytest.approx(1.0)
+
+
+def test_the_ceiling_is_unchanged_for_an_all_positive_genome():
+    genome = Genome({"sma_short": 0.4, "sma_long": 0.2, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    assert GaStrategy(genome, _config(), _KEYS).flat_score_ceiling() == pytest.approx(0.6)

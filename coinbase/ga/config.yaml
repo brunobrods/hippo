@@ -109,6 +109,18 @@ strategy:
   weight_keys: ["sma_short", "sma_long", "sma_extra", "rsi", "macd"]
 
 genetic_algorithm:
+  # Whether a weight may be NEGATIVE, i.e. whether the model can express an
+  # inverse relationship ("RSI high -> sell") at all. With it off, a genome can
+  # only ever learn "RSI high -> buy harder", which excludes every
+  # mean-reverting reading of an indicator.
+  #
+  # Off by default: every genome trained so far has non-negative weights, and
+  # this changes what the search can EXPRESS, not merely where it looks. When
+  # on, weights are L1-normalized (absolute values sum to 1) and signal_score
+  # shifts its floor back to zero, so a signed genome is not penalised by
+  # thresholds calibrated for a [0, 1] score. Both are exact no-ops for a
+  # genome whose weights are all non-negative.
+  # allow_negative_weights: true
   population_size: 100
   generations: 50
   mutation_rate: 0.2        # per-gene probability of mutation

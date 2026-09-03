@@ -51,6 +51,26 @@ def test_normalized_weights_sum_to_one():
     assert normalized["b"] == pytest.approx(0.75)
 
 
+# The L1 norm is what makes signed weights safe: dividing by the SIGNED sum
+# explodes when weights nearly cancel.
+def test_normalized_weights_scale_by_absolute_mass():
+    normalized = NormalizedWeights({"a": -3.0, "b": 1.0}).values()
+    assert sum(abs(v) for v in normalized.values()) == pytest.approx(1.0)
+    assert normalized["a"] == pytest.approx(-0.75)
+
+
+def test_nearly_cancelling_weights_do_not_explode():
+    normalized = NormalizedWeights({"a": 1.0, "b": -0.999999}).values()
+    assert all(abs(v) <= 1.0 for v in normalized.values())
+
+
+def test_normalizing_is_unchanged_for_all_positive_weights():
+    # The backward-compatibility guarantee: every genome trained before signed
+    # weights existed must normalize to exactly what it always did.
+    raw = {"a": 2.0, "b": 3.0, "c": 5.0}
+    assert NormalizedWeights(raw).values() == pytest.approx({"a": 0.2, "b": 0.3, "c": 0.5})
+
+
 def test_normalized_weights_falls_back_to_uniform_on_zero_sum():
     normalized = NormalizedWeights({"a": 0.0, "b": 0.0}).values()
     assert normalized == {"a": 0.5, "b": 0.5}
@@ -126,6 +146,45 @@ def test_gaussian_mutation_always_renormalizes():
     mutated = GaussianMutation(genome, mutation_rate=1.0, sigma=0.5, random_source=random.Random(9)).mutated()
     assert sum(mutated.weights().values()) == pytest.approx(1.0)
     assert all(value >= 0.0 for value in mutated.weights().values())
+
+
+# The clamp at zero is exactly what made an inverse relationship
+# inexpressible: a genome could learn "RSI high -> buy harder" but never
+# "RSI high -> sell".
+def test_mutation_clamps_at_zero_by_default():
+    genome  = Genome({"a": 0.02, "b": 0.98})
+    for seed in range(30):
+        mutated = GaussianMutation(genome, 1.0, 0.5, random.Random(seed)).mutated()
+        assert all(value >= 0.0 for value in mutated.weights().values())
+
+
+def test_mutation_can_cross_zero_when_signs_are_allowed():
+    genome   = Genome({"a": 0.02, "b": 0.98})
+    negative = [
+        GaussianMutation(genome, 1.0, 0.5, random.Random(seed), allow_negative=True).mutated()
+        for seed in range(30)
+    ]
+    assert any(v < 0.0 for m in negative for v in m.weights().values())
+    # Still L1-normalized, whatever the signs.
+    for m in negative:
+        assert sum(abs(v) for v in m.weights().values()) == pytest.approx(1.0)
+
+
+def test_a_signed_initial_population_explores_both_directions():
+    plain  = RandomPopulation(50, _KEYS, random.Random(1)).genomes()
+    signed = RandomPopulation(50, _KEYS, random.Random(1), allow_negative=True).genomes()
+    assert all(v >= 0.0 for g in plain for v in g.weights().values())
+    assert any(v < 0.0 for g in signed for v in g.weights().values())
+
+
+def test_the_ga_config_flag_reaches_the_search():
+    config = GaConfig(
+        population_size=20, generations=3, mutation_rate=1.0, crossover_rate=0.8,
+        tournament_size=3, elitism_count=1, mutation_sigma=0.4, seed=5,
+        allow_negative_weights=True,
+    )
+    best = GeneticAlgorithm(config, _KEYS).evolve(_WeightSumFitness("rsi"))
+    assert sum(abs(v) for v in best.weights().values()) == pytest.approx(1.0)
 
 
 def test_gaussian_mutation_rate_zero_leaves_weights_unchanged_after_renormalization():

@@ -1,3 +1,4 @@
+import functools
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -146,7 +147,30 @@ class GaStrategy:
         )
         if POSITION_PNL_KEY in self._keys:
             total += self._genome.weight(POSITION_PNL_KEY) * self._unrealized_return(row, position)
-        return total
+        return total + self._negative_offset()
+
+    # Lifts the score's floor back to zero when a genome carries negative
+    # weights.
+    #
+    # Every norm_* column is in [0, 1] and the weights are L1-normalized, so a
+    # genome's reachable span is [-M, P] where M is its negative mass and P its
+    # positive mass. The thresholds (0.6 / 0.4 / 0.25) are calibrated against a
+    # score that starts at 0, so without this shift a genome would be penalised
+    # for using negative weights at all — its whole range would slide below the
+    # buy threshold — and the search would be pushed straight back to the
+    # non-negative corner this change exists to escape.
+    #
+    # Exactly 0.0 whenever every weight is non-negative, which is what keeps
+    # every previously trained genome scoring identically.
+    @functools.cached_property
+    def _offset(self) -> float:
+        return sum(
+            max(-self._genome.weight(key), 0.0)
+            for key in self._keys if key != POSITION_PNL_KEY
+        )
+
+    def _negative_offset(self) -> float:
+        return self._offset
 
     def _unrealized_return(self, row: dict[str, float], position: Optional[Position]) -> float:
         if position is None:
@@ -162,9 +186,13 @@ class GaStrategy:
     # can never cross a 0.6 buy_threshold, so it is structurally short-only.
     # Anything ranking scores across genomes has to measure against this rather
     # than against 1.0, or it ranks on whose position_pnl weight is smallest.
+    # Absolute, because signal_score shifts the floor to zero: a genome's
+    # reachable span becomes [0, sum of |weight|] over the indicator keys.
+    # Identical to the signed sum whenever no weight is negative.
     def flat_score_ceiling(self) -> float:
         return sum(
-            self._genome.weight(key) for key in self._keys if key != POSITION_PNL_KEY
+            abs(self._genome.weight(key))
+            for key in self._keys if key != POSITION_PNL_KEY
         )
 
 
