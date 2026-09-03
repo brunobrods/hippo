@@ -76,6 +76,57 @@ def _build_jwt(api_key: str, api_secret: str, method: str, path: str) -> str:
     return pyjwt.encode(payload, api_secret, algorithm="ES256", headers=headers)
 
 
+# ── Products ───────────────────────────────────────────────────────────
+
+# One row of /api/v3/brokerage/products, reshaped into the same keys
+# BinanceProduct.normalized() emits so the screener reads one shape.
+class CoinbaseProduct:
+    def __init__(self, raw: dict[str, Any]) -> None:
+        self._raw = raw
+
+    def normalized(self) -> dict[str, Any]:
+        return {
+            "product_id":       self._raw.get("product_id", ""),
+            "base_currency":    self._raw.get("base_currency_id", ""),
+            "quote_currency":   self._raw.get("quote_currency_id", ""),
+            "quote_increment":  self._raw.get("quote_increment", "0.01"),
+            "base_increment":   self._raw.get("base_increment", "0.00000001"),
+            "base_min_size":    self._raw.get("base_min_size", "0"),
+            "base_max_size":    self._raw.get("base_max_size", "0"),
+            "min_market_funds": self._raw.get("quote_min_size", "0"),
+            "status":           self._raw.get("status", ""),
+            "tradable":         self._tradable(),
+            "can_long":         self._tradable(),
+            # Coinbase Advanced Trade has no short side at all — there is no
+            # borrow, so a strategy trained with allow_short cannot be run here.
+            "can_short":        False,
+            "volume_24h_quote":     self._quote_volume(),
+            "price_change_24h_pct": self._float("price_percentage_change_24h"),
+            "raw":              self._raw,
+        }
+
+    # Coinbase reports volume_24h in BASE units, while Binance's quoteVolume is
+    # already in quote. Left unconverted, a liquidity filter would compare a BTC
+    # count against a USDT count and rank on nothing at all.
+    def _quote_volume(self) -> float:
+        return self._float("volume_24h") * self._float("price")
+
+    def _tradable(self) -> bool:
+        return self._raw.get("status", "") == "online" and not any((
+            self._raw.get("trading_disabled", False),
+            self._raw.get("is_disabled", False),
+            self._raw.get("view_only", False),
+            self._raw.get("cancel_only", False),
+            self._raw.get("auction_mode", False),
+        ))
+
+    def _float(self, key: str) -> float:
+        raw = self._raw.get(key)
+        if raw in (None, ""):
+            return 0.0
+        return float(raw)
+
+
 # ── Adapter ────────────────────────────────────────────────────────────
 
 class CoinbaseAdapter:
@@ -381,6 +432,31 @@ class CoinbaseAdapter:
     async def get_product(self, product_id: str) -> dict:
         """Product details including quote/base increment (tick size)."""
         return await self._get(f"/api/v3/brokerage/products/{product_id}")
+
+    async def list_products(self, product_type: str = "SPOT") -> list[dict]:
+        """Every tradable product, normalized to the canonical product shape."""
+        # Deliberately unfiltered: callers decide what "tradable" means for
+        # them, and the normalized rows carry the flags to decide with.
+        result = await self._get(
+            "/api/v3/brokerage/products", {"product_type": product_type},
+        )
+        return [
+            CoinbaseProduct(product).normalized()
+            for product in result.get("products", [])
+        ]
+
+    async def fee_rates(self) -> tuple[float, float]:
+        """This account's maker and taker rates, in basis points per side."""
+        summary = await self._get("/api/v3/brokerage/transaction_summary")
+        tier    = summary.get("fee_tier") or {}
+        maker   = tier.get("maker_fee_rate")
+        taker   = tier.get("taker_fee_rate")
+        # Raised, never defaulted to zero. A caller treats a returned rate as
+        # measured, and a silent (0.0, 0.0) would report a zero-fee venue —
+        # collapsing every cost floor and marking everything tradable.
+        if maker in (None, "") or taker in (None, ""):
+            raise CoinbaseError(0, summary, "transaction_summary carried no fee_tier rates")
+        return float(maker) * 10_000.0, float(taker) * 10_000.0
 
     async def get_best_bid_ask(self, *product_ids: str) -> dict:
         """Best bid and ask for one or more products."""

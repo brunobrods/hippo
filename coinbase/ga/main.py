@@ -14,7 +14,12 @@ from coinbase.ga.experiment_history import (
     RunId,
 )
 from coinbase.ga.ga_engine import GaConfigFile, GeneticAlgorithm, Genome
-from coinbase.ga.market_data_processor import HistoricalMarketData, MarketDataConfig, TrainTestSplit
+from coinbase.ga.market_data_processor import (
+    HistoricalMarketData,
+    MarketBasket,
+    MarketDataConfig,
+    TrainTestSplit,
+)
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
     StrategyConfigFile,
@@ -105,9 +110,20 @@ class TrainingRun:
         # would abort every remaining point of a sweep along with it.
         ExperimentIndex(output_config.index_filepath).ensure_appendable()
 
+        # The basket the index_z column is measured against, fetched once for
+        # the whole run. Empty by default, in which case the frame is exactly
+        # the one every genome trained so far was scored on.
+        index_returns = None
+        if market_config.index_pairs():
+            index_returns = await MarketBasket(
+                self._adapter, market_config.index_pairs(), window.granularity,
+                window.start, window.end, market_config.cache_dir(),
+            ).returns()
+
         frame = await HistoricalMarketData(
             self._adapter, window.pair, window.granularity, window.start, window.end,
             market_config.periods(), market_config.columns(), market_config.cache_dir(),
+            index_returns=index_returns, index_period=market_config.index_period(),
         ).dataframe()
         split = TrainTestSplit(frame, window.test_split)
         weight_keys = ValidatedWeightKeys(

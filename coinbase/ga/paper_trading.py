@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
 from coinbase.ga.config import GA_RESULTS_ROOT, ConfigFile
-from coinbase.ga.ga_engine import Genome
+from coinbase.ga.ga_engine import BackfilledGenome, Genome
 from coinbase.ga.market_data_processor import MarketDataConfig
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
@@ -231,12 +231,14 @@ class InitialPaperState:
 # Approximations worth knowing: a liquidation close is not charged, and
 # slippage is not modelled at all.
 
+# `maker` defaults to False so every existing caller keeps charging the rate it
+# always charged. A schedule that does not distinguish the two sides ignores it.
 class FeeSchedule(Protocol):
-    def charge(self, notional: float) -> float: ...
+    def charge(self, notional: float, maker: bool = False) -> float: ...
 
 
 class NoFees:
-    def charge(self, notional: float) -> float:
+    def charge(self, notional: float, maker: bool = False) -> float:
         return 0.0
 
 
@@ -244,8 +246,23 @@ class BasisPointFee:
     def __init__(self, basis_points: float) -> None:
         self._basis_points = basis_points
 
-    def charge(self, notional: float) -> float:
+    def charge(self, notional: float, maker: bool = False) -> float:
         return notional * self._basis_points / 10_000.0
+
+
+# Both venues price the two sides of the book differently — Coinbase steeply
+# (its base tier takes twice as much from a taker), Binance not at all at base
+# tier, where the only gain from resting is the spread rather than the fee.
+# A strategy that rests its orders is charged the wrong rate by a flat
+# BasisPointFee, in whichever direction the venue happens to differ.
+class MakerTakerFee:
+    def __init__(self, maker_bps: float, taker_bps: float) -> None:
+        self._maker_bps = maker_bps
+        self._taker_bps = taker_bps
+
+    def charge(self, notional: float, maker: bool = False) -> float:
+        rate = self._maker_bps if maker else self._taker_bps
+        return notional * rate / 10_000.0
 
 
 # ── Tick ───────────────────────────────────────────────────────────────
@@ -391,19 +408,28 @@ async def _main() -> None:
     for key, (from_config, from_strategy) in trained.divergences().items():
         print(f"note: {key} config.yaml={from_config} -> using trained {from_strategy}")
 
-    strategy = GaStrategy(
-        Genome(saved.weights()),
-        strategy_config,
-        weight_keys + (POSITION_PNL_KEY,),
-    )
+    keys       = weight_keys + (POSITION_PNL_KEY,)
+    # A genome saved before a weight key existed carries no weight for it, and
+    # Genome.weight raises rather than guessing. Backfilling at zero keeps a
+    # book already running against an older genome from breaking the moment
+    # config.yaml grows a column.
+    backfilled = BackfilledGenome(Genome(saved.weights()), keys)
+    for key in backfilled.missing():
+        print(f"note: genome predates {key} — running it weighted zero; retrain to use it")
+
+    strategy = GaStrategy(backfilled.filled(), strategy_config, keys)
 
     # The paper run follows its own market, which need not be the one the
     # genome was trained on — ConfiguredExchange is asked for that exchange
     # rather than data.exchange.
     async with ConfiguredExchange({"data": {"exchange": paper_config.exchange}}).adapter() as adapter:
+        basket = LiveBasket(
+            adapter, market_config.index_pairs(), window.granularity,
+        ) if market_config.index_pairs() else None
         rows = ClosedMarketRow(LiveMarketRow(
             adapter, paper_config.pair, window.granularity,
             market_config.periods(), market_config.normalized_columns(),
+            basket=basket, index_period=market_config.index_period(),
         ))
         outcome = await PaperTick(
             rows, strategy,

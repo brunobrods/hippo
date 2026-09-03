@@ -89,6 +89,15 @@ class MarketDataConfig:
         default = str(GA_RESULTS_ROOT / "candle_cache")
         return self._raw["market_data"].get("cache_dir", default)
 
+    # The basket the index_z column is measured against. Empty means the
+    # feature is off and every frame keeps exactly the columns it had, which
+    # is what every genome trained before this expects.
+    def index_pairs(self) -> tuple[str, ...]:
+        return tuple(self._raw["market_data"].get("index_pairs") or ())
+
+    def index_period(self) -> int:
+        return int(self._raw["market_data"].get("index_period", 30))
+
 
 # ── Indicators ─────────────────────────────────────────────────────────
 
@@ -153,6 +162,151 @@ class Delta:
         return self._closes.pct_change(periods=self._period)
 
 
+# True range, not just high-low: a candle that gaps away from the previous
+# close moved further than its own body shows, and that gap is real movement a
+# holder lived through.
+class TrueRange:
+    def __init__(self, highs: pd.Series, lows: pd.Series, closes: pd.Series) -> None:
+        self._highs  = highs
+        self._lows   = lows
+        self._closes = closes
+
+    @functools.cached_property
+    def series(self) -> pd.Series:
+        previous = self._closes.shift(1)
+        spans    = pd.concat(
+            [
+                self._highs - self._lows,
+                (self._highs - previous).abs(),
+                (self._lows - previous).abs(),
+            ],
+            axis=1,
+        )
+        # The first bar has no previous close, so both gap terms are NaN and
+        # only high-low is defined. skipna leaves that bar its own span rather
+        # than dropping it — on the short windows the screener uses, one row is
+        # a meaningful share of the sample.
+        return spans.max(axis=1, skipna=True)
+
+
+class AverageTrueRange:
+    # Wilder's smoothing is exactly the EWM form Rsi already uses above, so the
+    # two indicators stay consistent rather than one quietly using a simple mean.
+    def __init__(self, true_range: pd.Series, closes: pd.Series, period: int = 14) -> None:
+        self._true_range = true_range
+        self._closes     = closes
+        self._period     = period
+
+    @functools.cached_property
+    def series(self) -> pd.Series:
+        return self._true_range.ewm(
+            alpha=1 / self._period, min_periods=self._period, adjust=False,
+        ).mean()
+
+    @functools.cached_property
+    def percent(self) -> pd.Series:
+        return self.series / self._closes.mask(self._closes == 0)
+
+
+# The share of its own opening price a candle travelled between its extremes.
+# This is the perfect-timing bound — capturing it means buying the low and
+# selling the high — so it is reported alongside, never instead of, the
+# close-to-close move a directional hold can actually take.
+class CandleRange:
+    def __init__(self, highs: pd.Series, lows: pd.Series, opens: pd.Series) -> None:
+        self._highs = highs
+        self._lows  = lows
+        self._opens = opens
+
+    @functools.cached_property
+    def fraction(self) -> pd.Series:
+        return (self._highs - self._lows) / self._opens.mask(self._opens == 0)
+
+
+# What the market as a whole did, as an equal-weight basket of the pairs in
+# it. Equal weight rather than volume weight on purpose: this is the menu a
+# strategy picked from, so the fair benchmark gives every item on it the same
+# say. Keyed by timestamp, because the pairs it averages do not share a row
+# order — they list at different dates and drop candles independently.
+class MarketIndex:
+    def __init__(self, frames: dict[str, pd.DataFrame]) -> None:
+        self._frames = frames
+
+    @functools.cached_property
+    def returns(self) -> pd.Series:
+        columns = {}
+        for pair, frame in self._frames.items():
+            closes = pd.Series(
+                frame["close"].values, index=frame["timestamp"].astype("int64").values,
+            )
+            columns[pair] = closes.pct_change()
+        if not columns:
+            return pd.Series(dtype="float64")
+        # mean(axis=1) skips NaN, so a pair missing a candle leaves the basket
+        # measured on the pairs that do have one rather than blanking the row.
+        return pd.DataFrame(columns).mean(axis=1)
+
+
+# How unusually a pair is moving relative to that basket.
+#
+# The raw excess return (pair minus market) is not comparable between pairs:
+# 2% of excess is ordinary on a wild coin and extraordinary on a quiet one,
+# and the GA would have to learn that distinction per pair. Scoring the excess
+# against its OWN recent spread makes the number mean the same thing
+# everywhere — roughly, +2 is a divergence well outside this pair's normal
+# relationship to the market, 0 is moving with it.
+#
+# Two limits worth knowing before reading anything into it:
+#
+#   It measures ONE candle's divergence, with the pair's recent mean excess
+#   subtracted. A pair that quietly decouples by 1% a candle for a month never
+#   reads much above 1 — the rolling mean absorbs the drift. Sustained
+#   decoupling needs a z of the CUMULATIVE excess, which this is not.
+#
+#   It is signed, not magnitude. A genome can learn "unusually up" or
+#   "unusually down", never "unusual in either direction", because the score
+#   is a weighted sum and norm_index_z is monotone in the signed value.
+#
+# And note what the GA actually sees is norm_index_z, which MinMaxColumn
+# rescales against each pair's own window — so the cross-pair comparability
+# this class establishes is then partly undone downstream, the same way it is
+# for every other normalized column.
+class RelativeStrength:
+    def __init__(
+        self,
+        closes: pd.Series,
+        timestamps: pd.Series,
+        index_returns: pd.Series,
+        period: int = 30,
+    ) -> None:
+        self._closes        = closes
+        self._timestamps    = timestamps
+        self._index_returns = index_returns
+        self._period        = period
+
+    @functools.cached_property
+    def excess(self) -> pd.Series:
+        market = self._timestamps.astype("int64").map(self._index_returns)
+        return self._closes.pct_change() - market.astype("float64")
+
+    @functools.cached_property
+    def z_score(self) -> pd.Series:
+        excess = self.excess
+        # Scored against the window BEFORE this candle, not one containing it.
+        # Including the point being measured caps |z| at (n-1)/sqrt(n) — 5.29
+        # at n=30 — and lets every genuine outlier inflate the very spread it
+        # is divided by, damping exactly the readings this exists to detect.
+        # shift(1) is not look-ahead: it uses strictly older data.
+        mean   = excess.rolling(self._period).mean().shift(1)
+        spread = excess.rolling(self._period).std().shift(1)
+        # NaN, not 0.0, wherever there is no scale to divide by — warm-up, a
+        # gap in the basket, or a genuinely flat window. Filling those with
+        # zero would state "moving exactly with the market" where nothing was
+        # measured, and IndicatorFrame's dropna() would keep the fabrication
+        # instead of trimming the row like it does for every other indicator.
+        return (excess - mean) / spread.mask(spread == 0)
+
+
 class MinMaxColumn:
     def __init__(self, series: pd.Series) -> None:
         self._series = series
@@ -166,10 +320,46 @@ class MinMaxColumn:
 
 # ── Frame builders ─────────────────────────────────────────────────────
 
+# Raw OHLCV in frame form, with nothing computed and nothing dropped.
+#
+# IndicatorFrame below cannot serve this purpose: it has no `open` column at
+# all, and it ends in .dropna() after a 50-period SMA, so on a 180-row daily
+# window it would silently discard the first 50 rows and compute statistics on
+# 130 days while reporting 180 — and on any window shorter than the longest
+# indicator period it returns nothing whatsoever.
+class OhlcFrame:
+    def __init__(self, raw_candles: list[dict]) -> None:
+        self._raw = raw_candles
+
+    @functools.cached_property
+    def dataframe(self) -> pd.DataFrame:
+        candles = sorted(self._raw, key=lambda c: int(c["start"]))
+        return pd.DataFrame({
+            "timestamp": pd.Series([int(c["start"])    for c in candles], dtype="int64"),
+            "open":      pd.Series([float(c["open"])   for c in candles], dtype="float64"),
+            "high":      pd.Series([float(c["high"])   for c in candles], dtype="float64"),
+            "low":       pd.Series([float(c["low"])    for c in candles], dtype="float64"),
+            "close":     pd.Series([float(c["close"])  for c in candles], dtype="float64"),
+            "volume":    pd.Series([float(c["volume"]) for c in candles], dtype="float64"),
+        })
+
+
 class IndicatorFrame:
-    def __init__(self, raw_candles: list[dict], periods: IndicatorPeriods) -> None:
-        self._raw     = raw_candles
-        self._periods = periods
+    # `index_returns` is optional and the frame is byte-identical without it,
+    # so every existing single-pair path — training, paper, live — keeps the
+    # exact columns and warm-up it had. The index_z column appears only when a
+    # caller has a basket to measure against.
+    def __init__(
+        self,
+        raw_candles: list[dict],
+        periods: IndicatorPeriods,
+        index_returns: Optional[pd.Series] = None,
+        index_period: int = 30,
+    ) -> None:
+        self._raw           = raw_candles
+        self._periods       = periods
+        self._index_returns = index_returns
+        self._index_period  = index_period
 
     @functools.cached_property
     def dataframe(self) -> pd.DataFrame:
@@ -200,6 +390,10 @@ class IndicatorFrame:
             "delta_5":        Delta(closes, 5).series,
             "delta_10":       Delta(closes, 10).series,
         })
+        if self._index_returns is not None:
+            frame["index_z"] = RelativeStrength(
+                closes, starts, self._index_returns, self._index_period,
+            ).z_score
         return frame.dropna().reset_index(drop=True)
 
 
@@ -412,6 +606,95 @@ class AccountBalance:
 
 # ── Entry points ───────────────────────────────────────────────────────
 
+# The equal-weight return series of a basket of pairs, fetched through the same
+# cache and shared semaphore as everything else. Separate from HistoricalMarketData
+# because the basket is fetched ONCE and handed to every pair's frame — building
+# it per pair would refetch N pairs N times.
+class MarketBasket:
+    def __init__(
+        self,
+        adapter: ExchangeAdapter,
+        pairs: tuple[str, ...],
+        granularity: str,
+        start: int,
+        end: int,
+        cache_dir: Optional[str] = None,
+        limit: Optional[asyncio.Semaphore] = None,
+    ) -> None:
+        self._adapter     = adapter
+        self._pairs       = pairs
+        self._granularity = granularity
+        self._start       = start
+        self._end         = end
+        self._cache_dir   = cache_dir
+        self._limit       = limit
+        self._returns: Optional[pd.Series] = None
+
+    async def returns(self) -> pd.Series:
+        if self._returns is None:
+            frames = await asyncio.gather(*(
+                self._frame(pair) for pair in self._pairs
+            ))
+            self._returns = MarketIndex(dict(zip(self._pairs, frames))).returns
+        return self._returns
+
+    async def _frame(self, pair: str) -> pd.DataFrame:
+        base    = HistoricalCandles(
+            self._adapter, pair, self._granularity, self._start, self._end, limit=self._limit,
+        )
+        candles = base if self._cache_dir is None else CachedHistoricalCandles(
+            base,
+            CandleCacheFile(
+                self._cache_dir,
+                CandleCacheKey(
+                    self._adapter.name(), pair, self._granularity, self._start, self._end,
+                ),
+            ),
+        )
+        return OhlcFrame(await candles.raw()).dataframe
+
+
+# The basket for a LIVE window, shared by every row that reads it.
+#
+# A live window slides, so each row computing its own would refetch the whole
+# basket per pair — 12 pairs against a 5-pair basket is 60 fetches a tick
+# instead of 5, the exact waste MarketBasket exists to avoid. Flooring the
+# window to the candle boundary makes every row in the same candle ask for the
+# identical window, so one memoized fetch serves them all and it refreshes by
+# itself when the candle turns.
+class LiveBasket:
+    def __init__(
+        self,
+        adapter: ExchangeAdapter,
+        pairs: tuple[str, ...],
+        granularity: str,
+        lookback_candles: int = 200,
+        limit: Optional[asyncio.Semaphore] = None,
+    ) -> None:
+        self._adapter          = adapter
+        self._pairs            = pairs
+        self._granularity      = granularity
+        self._lookback_candles = lookback_candles
+        self._limit            = limit
+        self._window: Optional[tuple[int, int]] = None
+        self._returns: Optional[pd.Series] = None
+
+    def pairs(self) -> tuple[str, ...]:
+        return self._pairs
+
+    async def returns(self) -> pd.Series:
+        seconds = GRANULARITY_SECONDS[self._granularity]
+        end     = int(time.time()) // seconds * seconds
+        window  = (end - self._lookback_candles * seconds, end)
+        if window != self._window or self._returns is None:
+            self._returns = await MarketBasket(
+                self._adapter, self._pairs, self._granularity,
+                window[0], window[1], cache_dir=None, limit=self._limit,
+            ).returns()
+            self._window = window
+        return self._returns
+
+
 class HistoricalMarketData:
     def __init__(
         self,
@@ -424,6 +707,8 @@ class HistoricalMarketData:
         normalized_columns: tuple[str, ...],
         cache_dir: Optional[str] = None,
         limit: Optional[asyncio.Semaphore] = None,
+        index_returns: Optional[pd.Series] = None,
+        index_period: int = 30,
     ) -> None:
         self._adapter            = adapter
         self._product_id         = product_id
@@ -434,6 +719,8 @@ class HistoricalMarketData:
         self._normalized_columns = normalized_columns
         self._cache_dir          = cache_dir
         self._limit              = limit
+        self._index_returns      = index_returns
+        self._index_period       = index_period
 
     async def dataframe(self) -> pd.DataFrame:
         base    = HistoricalCandles(
@@ -451,7 +738,9 @@ class HistoricalMarketData:
             ),
         )
         raw   = await candles.raw()
-        frame = IndicatorFrame(raw, self._periods).dataframe
+        frame = IndicatorFrame(
+            raw, self._periods, self._index_returns, self._index_period,
+        ).dataframe
         return NormalizedIndicators(frame, self._normalized_columns).dataframe
 
 

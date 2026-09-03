@@ -1,8 +1,10 @@
 import asyncio
 import csv
 import json
+import logging
 import os
 import secrets
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -10,6 +12,8 @@ from typing import Any
 from coinbase.ga.ga_engine import GaConfig
 from coinbase.ga.strategy_evaluator import StrategyConfig
 from coinbase.ga.strategy_output import ParentDirectory
+
+logger = logging.getLogger(__name__)
 
 # One row per training run — a flat, greppable/pandas-loadable leaderboard so
 # comparing runs doesn't require opening every experiments/<run_id>/strategy.json.
@@ -87,6 +91,46 @@ class ResolvedConfigFile:
             json.dump(self._raw_config, handle, indent=2, default=str)
 
 
+# A cross-process mutex built the same way ExperimentIndex already creates its
+# file: os.O_CREAT|os.O_EXCL is atomic, so exactly one holder can win the race.
+#
+# Needed because a parallel sweep appends to one index.csv from N processes,
+# and `open(..., "a")` gives no ordering guarantee across them — two rows can
+# interleave into one corrupt line. A stale lock (a worker killed mid-write)
+# is broken after `timeout` rather than wedging the whole sweep forever.
+class IndexLock:
+    def __init__(self, filepath: str, timeout: float = 30.0, poll: float = 0.05) -> None:
+        self._path    = f"{filepath}.lock"
+        self._timeout = timeout
+        self._poll    = poll
+
+    def __enter__(self) -> "IndexLock":
+        deadline = time.time() + self._timeout
+        while True:
+            try:
+                handle = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(handle, str(os.getpid()).encode())
+                os.close(handle)
+                return self
+            except FileExistsError:
+                if time.time() >= deadline:
+                    # Assume the holder died rather than block a long sweep on
+                    # a file nobody owns any more.
+                    logger.warning("breaking a stale index lock at %s", self._path)
+                    self._release()
+                    deadline = time.time() + self._timeout
+                time.sleep(self._poll)
+
+    def __exit__(self, *_: Any) -> None:
+        self._release()
+
+    def _release(self) -> None:
+        try:
+            os.unlink(self._path)
+        except FileNotFoundError:
+            pass
+
+
 # ── Index ────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -140,16 +184,20 @@ class ExperimentIndex:
     def __init__(self, filepath: str) -> None:
         self._filepath = filepath
 
+    # Locked because a parallel sweep appends from N processes at once, and
+    # two unsynchronized appends can interleave into a single corrupt row.
+    # A sequential run takes an uncontended lock, which costs one file create.
     def append(self, record: ExperimentRecord) -> None:
         ParentDirectory(self._filepath).ensure()
-        is_new = self._create_exclusively()
-        if not is_new:
-            self.ensure_appendable()
-        with open(self._filepath, "a", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=_INDEX_FIELDS)
-            if is_new:
-                writer.writeheader()
-            writer.writerow(record.as_row())
+        with IndexLock(self._filepath):
+            is_new = self._create_exclusively()
+            if not is_new:
+                self.ensure_appendable()
+            with open(self._filepath, "a", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=_INDEX_FIELDS)
+                if is_new:
+                    writer.writeheader()
+                writer.writerow(record.as_row())
 
     # The header is only ever written once, so appending rows built from a newer
     # _INDEX_FIELDS would silently shift every value into the wrong column of an

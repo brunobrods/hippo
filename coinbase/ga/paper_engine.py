@@ -45,8 +45,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from coinbase.ga.config import GA_RESULTS_ROOT, ConfigFile
-from coinbase.ga.ga_engine import Genome
-from coinbase.ga.market_data_processor import MarketDataConfig
+from coinbase.ga.ga_engine import BackfilledGenome, Genome
+from coinbase.ga.market_data_processor import LiveBasket, MarketDataConfig
 from coinbase.ga.paper_metrics import (
     AlgoPerformance,
     AlgoStatus,
@@ -637,6 +637,7 @@ class PaperEngine:
         self._config = config
         self._ga_raw = ga_raw
         self._pool   = pool
+        self._baskets: dict[tuple[str, str], LiveBasket] = {}
 
     @functools.cached_property
     def algos(self) -> tuple[IsolatedAlgo, ...]:
@@ -667,6 +668,19 @@ class PaperEngine:
             for name, pairs in by_exchange.items()
         )
 
+    # One basket per (exchange, granularity), shared by every algo on it —
+    # each algo building its own would refetch the whole basket per algo,
+    # every round.
+    def _basket(self, lane: Any, market: MarketDataConfig, granularity: str) -> Optional[LiveBasket]:
+        if not market.index_pairs():
+            return None
+        key = (lane.name(), granularity)
+        if key not in self._baskets:
+            self._baskets[key] = LiveBasket(
+                lane.adapter(), market.index_pairs(), granularity, limit=lane.limit(),
+            )
+        return self._baskets[key]
+
     def _algo(self, entry: AlgoConfig) -> PaperAlgo:
         market  = MarketDataConfig(self._ga_raw)
         lane    = self._pool.lane(entry.exchange)
@@ -678,12 +692,25 @@ class PaperEngine:
         rows = RetriedMarketRow(ClosedMarketRow(LiveMarketRow(
             lane.adapter(), entry.pair, entry.granularity,
             market.periods(), market.columns(), limit=lane.limit(),
+            basket=self._basket(lane, market, entry.granularity),
+            index_period=market.index_period(),
         )))
+        # Backfilled for the same reason paper_trading does it: this engine
+        # runs MANY older genomes at once, so it is the likeliest place for a
+        # genome saved before a weight key existed to meet a config that has it.
+        genome = BackfilledGenome(
+            Genome(saved.weights()), keys + (POSITION_PNL_KEY,),
+        )
+        if genome.missing():
+            logger.warning(
+                "%s: genome predates %s — running it with those weighted zero",
+                entry.name, ", ".join(genome.missing()),
+            )
         return PaperAlgo(
             config   = entry,
             rows     = rows,
             strategy = GaStrategy(
-                Genome(saved.weights()), trained.config(), keys + (POSITION_PNL_KEY,),
+                genome.filled(), trained.config(), keys + (POSITION_PNL_KEY,),
             ),
             book     = self.books[entry.name],
             fees     = self._fees(),

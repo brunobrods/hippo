@@ -1,14 +1,26 @@
+import argparse
 import asyncio
 import copy
+import logging
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from coinbase.ga.config import ConfigFile
 from coinbase.ga.main import TrainingRun, TrainingSummary
+from coinbase.ga.market_data_processor import (
+    CachedHistoricalCandles,
+    CandleCacheFile,
+    CandleCacheKey,
+    HistoricalCandles,
+    MarketDataConfig,
+)
 from coinbase.ga.strategy_output import OutputConfigFile, ParentDirectory
 from exchange.adapter import ExchangeAdapter
+
+logger = logging.getLogger(__name__)
 
 # genetic_algorithm.seed is overridden per seed repeat regardless of which
 # axis is varying, so every axis value gets trained once per configured seed.
@@ -110,18 +122,24 @@ class SweepPoint:
 
 class ScratchStrategyPath:
     # TrainingRun writes output.strategy_filepath and immediately reads it back
-    # to verify the round trip, so a scratch file shared between two sweeps
-    # running at once would have each reading the other's strategy — or a
-    # half-written one. Naming it after the owning process keeps concurrent
-    # sweeps apart, which ExperimentIndex's atomic header creation already
-    # assumes is a supported way to run them.
-    def __init__(self, experiments_dir: str, process_id: int) -> None:
+    # to verify the round trip, so any two runs sharing the path would have each
+    # reading the other's strategy — or a half-written one. Two things can
+    # collide, and the name has to separate both:
+    #
+    #   process_id  keeps concurrent SWEEPS apart, which ExperimentIndex's
+    #               atomic header creation already assumes is supported.
+    #   ordinal     keeps concurrent POINTS of one sweep apart, which
+    #               ParallelSweep makes possible — the plan is built in the
+    #               parent, so every point would otherwise inherit one pid.
+    def __init__(self, experiments_dir: str, process_id: int, ordinal: int) -> None:
         self._experiments_dir = experiments_dir
         self._process_id      = process_id
+        self._ordinal         = ordinal
 
     def value(self) -> str:
         return os.path.join(
-            self._experiments_dir, "_sweep_scratch", f"best_strategy_{self._process_id}.json",
+            self._experiments_dir, "_sweep_scratch",
+            f"best_strategy_{self._process_id}_{self._ordinal}.json",
         )
 
 
@@ -148,24 +166,30 @@ class SweepPlan:
         self._process_id  = process_id
 
     def points(self) -> tuple[SweepPoint, ...]:
-        scratch_strategy_path = self._scratch_strategy_path()
         points: list[SweepPoint] = []
         for axis in self._axes:
             for value in axis.values:
                 with_axis = DottedPathOverride(self._base_config, axis.path, value).applied()
                 for seed in self._seeds:
                     config = DottedPathOverride(with_axis, SEED_PATH, seed).applied()
-                    config = DottedPathOverride(config, STRATEGY_FILEPATH_PATH, scratch_strategy_path).applied()
+                    config = DottedPathOverride(
+                        config, STRATEGY_FILEPATH_PATH, self._scratch_strategy_path(len(points)),
+                    ).applied()
                     points.append(SweepPoint(axis.path, value, seed, config))
         return tuple(points)
 
     def ensure_scratch_directory(self) -> None:
-        ParentDirectory(self._scratch_strategy_path()).ensure()
+        ParentDirectory(self._scratch_strategy_path(0)).ensure()
 
-    def _scratch_strategy_path(self) -> str:
+    # One path per point AND per sweep process. Every run writes its best
+    # strategy here and reads it straight back to verify the saved JSON reloads
+    # into an identical backtest, so any sharing has a run verifying whichever
+    # write landed last. Sequential sweeps are unaffected; they just no longer
+    # reuse one file.
+    def _scratch_strategy_path(self, ordinal: int) -> str:
         experiments_dir = OutputConfigFile(self._base_config).config().experiments_dir
         owner = os.getpid() if self._process_id is None else self._process_id
-        return ScratchStrategyPath(experiments_dir, owner).value()
+        return ScratchStrategyPath(experiments_dir, owner, ordinal).value()
 
 
 # ── Console progress ─────────────────────────────────────────────────────
@@ -180,6 +204,13 @@ class ConsoleSweepProgress:
     def point_finished(self, summary: TrainingSummary) -> None:
         print(summary.as_text())
         print()
+
+    # Parallel points finish out of order, so there is no "started" line to
+    # pair a result with — the count and the text carry it instead.
+    def point_completed(self, done: int, text: str) -> None:
+        print(f"[{done}/{self._total}] done")
+        print(text)
+        print(flush=True)
 
 
 # ── Orchestration ────────────────────────────────────────────────────────
@@ -205,6 +236,111 @@ class Sweep:
         return tuple(summaries)
 
 
+# Runs ONE point, in its own process, with its own adapter.
+#
+# A callable object rather than a bare function so it stays in the codebase's
+# idiom while remaining picklable — ProcessPoolExecutor has to ship it and its
+# argument across a process boundary, which rules out closures and lambdas.
+# The aiohttp session is built inside __call__ for the same reason: a
+# connection pool cannot be pickled, let alone shared between processes.
+class SweepWorker:
+    def __call__(self, point: SweepPoint) -> tuple[str, str]:
+        from exchange.selection import ConfiguredExchange
+
+        async def train() -> tuple[str, str]:
+            async with ConfiguredExchange(point.raw_config).adapter() as adapter:
+                summary = await TrainingRun(adapter, point.raw_config).train()
+            return summary.run_id(), summary.as_text()
+
+        return asyncio.run(train())
+
+
+# True parallelism, not asyncio: a training run is ~5000 pandas backtests, so
+# it is CPU-bound and the GIL makes concurrent coroutines strictly slower than
+# a loop. Processes sidestep it. Measured at 70 s a run, 120 runs go from
+# ~2h20m sequential to roughly 20 minutes across 8 workers.
+#
+# Two pieces of shared state had to be made safe first: each point now writes
+# its own scratch strategy file (SweepPlan._scratch_strategy_path), and
+# index.csv appends take an IndexLock. The candle cache was already safe —
+# CandleCacheFile writes tmp-then-rename.
+class ParallelSweep:
+    def __init__(
+        self,
+        points: tuple[SweepPoint, ...],
+        progress: "ConsoleSweepProgress",
+        workers: int,
+    ) -> None:
+        self._points   = points
+        self._progress = progress
+        self._workers  = workers
+
+    async def run(self) -> tuple[str, ...]:
+        loop    = asyncio.get_running_loop()
+        worker  = SweepWorker()
+        results: list[str] = []
+        with ProcessPoolExecutor(max_workers=self._workers) as pool:
+            tasks = [loop.run_in_executor(pool, worker, point) for point in self._points]
+            for done, task in enumerate(asyncio.as_completed(tasks), start=1):
+                try:
+                    _, text = await task
+                    results.append(text)
+                except Exception as exc:
+                    # One point failing must not lose the other 119. The pair
+                    # is not recoverable from the future, so the message is
+                    # what identifies it.
+                    logger.error("a sweep point failed: %s", exc)
+                    results.append(f"FAILED: {exc}")
+                self._progress.point_completed(done, results[-1])
+        return tuple(results)
+
+
+# ── Cache warming ──────────────────────────────────────────────────────
+
+# Fetched once, in the parent, before any worker starts.
+#
+# Workers do not share memory, so N of them starting cold would each fetch the
+# same windows — N identical cold fetches racing instead of one, which is the
+# very thing Sweep's sequential comment says it was avoiding. Warming first
+# keeps the parallel path as cache-friendly as the sequential one.
+class WarmedCache:
+    def __init__(self, points: tuple[SweepPoint, ...]) -> None:
+        self._points = points
+
+    async def run(self) -> int:
+        from exchange.selection import ConfiguredExchange
+
+        wanted: dict[tuple[str, str, str, int, int], dict[str, Any]] = {}
+        for point in self._points:
+            market = MarketDataConfig(point.raw_config)
+            window = market.window()
+            key    = (point.raw_config["data"]["exchange"], window.pair,
+                      window.granularity, window.start, window.end)
+            wanted.setdefault(key, point.raw_config)
+            for pair in market.index_pairs():
+                wanted.setdefault(
+                    (point.raw_config["data"]["exchange"], pair,
+                     window.granularity, window.start, window.end),
+                    point.raw_config,
+                )
+
+        first = self._points[0].raw_config
+        async with ConfiguredExchange(first).adapter() as adapter:
+            limit  = asyncio.Semaphore(8)
+            market = MarketDataConfig(first)
+            await asyncio.gather(*(
+                CachedHistoricalCandles(
+                    HistoricalCandles(adapter, pair, granularity, start, end, limit=limit),
+                    CandleCacheFile(
+                        market.cache_dir(),
+                        CandleCacheKey(exchange, pair, granularity, start, end),
+                    ),
+                ).raw()
+                for exchange, pair, granularity, start, end in wanted
+            ))
+        return len(wanted)
+
+
 # ── Entry point ────────────────────────────────────────────────────────
 # Run:  python coinbase/ga/sweep.py [sweep_config_path]
 # Trains one full GA strategy per (axis value, seed) point in sweep.yaml (or
@@ -217,11 +353,28 @@ class Sweep:
 # sweep gets split into batches that finish within one process's lifetime —
 # already-recorded points in experiments/ are unaffected either way.
 
-async def _main() -> None:
+async def _main(argv: list[str]) -> None:
     from exchange.selection import ConfiguredExchange
 
-    sweep_config_path = sys.argv[1] if len(sys.argv) > 1 else "coinbase/ga/sweep.yaml"
-    sweep_config = SweepConfigFile(ConfigFile(sweep_config_path).raw())
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    parser = argparse.ArgumentParser(description="Train one GA strategy per sweep point")
+    parser.add_argument("sweep_config", nargs="?", default="coinbase/ga/sweep.yaml")
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="Training processes to run at once (default: 1, sequential). "
+             "A run is CPU-bound, so this scales with cores, not with IO.",
+    )
+    args = parser.parse_args(argv)
+
+    sweep_config = SweepConfigFile(ConfigFile(args.sweep_config).raw())
+    # `fixed:` is folded on before any axis, and the result is what BOTH the
+    # plan and the adapter are built from — pinning data.exchange has to reach
+    # ConfiguredExchange too, or a sweep trains Binance configs against a
+    # Coinbase adapter.
     fixed        = sweep_config.fixed()
     base_config  = FixedOverrides(ConfigFile(sweep_config.base_config_path()).raw(), fixed).applied()
     plan         = SweepPlan(base_config, sweep_config.axes(), sweep_config.seeds())
@@ -229,13 +382,21 @@ async def _main() -> None:
     points       = plan.points()
 
     print(f"Sweeping {len(points)} points across {len(sweep_config.axes())} axes, "
-          f"{len(sweep_config.seeds())} seeds each")
+          f"{len(sweep_config.seeds())} seeds each, {args.workers} at a time")
     if fixed:
         print("Fixed for every point: " + ", ".join(f"{path}={value}" for path, value in fixed))
 
-    async with ConfiguredExchange(base_config).adapter() as adapter:
-        await Sweep(adapter, points, ConsoleSweepProgress(len(points))).run()
+    if args.workers <= 1:
+        async with ConfiguredExchange(base_config).adapter() as adapter:
+            await Sweep(adapter, points, ConsoleSweepProgress(len(points))).run()
+        return
+
+    # Warm first: workers share no memory, so starting them cold would race N
+    # identical fetches of the same windows.
+    windows = await WarmedCache(points).run()
+    print(f"Cache warmed for {windows} windows; starting {args.workers} workers")
+    await ParallelSweep(points, ConsoleSweepProgress(len(points)), args.workers).run()
 
 
 if __name__ == "__main__":
-    asyncio.run(_main())
+    asyncio.run(_main(sys.argv[1:]))

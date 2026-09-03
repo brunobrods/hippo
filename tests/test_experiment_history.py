@@ -1,4 +1,6 @@
 import csv
+import os
+import time
 import json
 import subprocess
 from datetime import date
@@ -9,6 +11,7 @@ from coinbase.ga.experiment_history import (
     ExperimentDirectory,
     ExperimentIndex,
     ExperimentRecord,
+    IndexLock,
     GitCommitHash,
     ResolvedConfigFile,
     RunId,
@@ -160,3 +163,41 @@ def test_experiment_index_still_appends_when_the_header_matches(tmp_path):
     index.append(_record("run-1"))
     index.append(_record("run-2"))  # exercises the verify path on an unchanged schema
     assert len(list(csv.DictReader(filepath.read_text().splitlines()))) == 2
+
+
+# ── IndexLock ────────────────────────────────────────────────────────
+# A parallel sweep appends to one index.csv from N processes; two
+# unsynchronized appends can interleave into a single corrupt row.
+
+def test_the_lock_is_released_when_the_block_exits(tmp_path):
+    target = str(tmp_path / "index.csv")
+    with IndexLock(target):
+        assert os.path.exists(f"{target}.lock")
+    assert not os.path.exists(f"{target}.lock")
+
+
+def test_the_lock_is_released_even_when_the_block_raises(tmp_path):
+    target = str(tmp_path / "index.csv")
+    with pytest.raises(RuntimeError):
+        with IndexLock(target):
+            raise RuntimeError("boom")
+    assert not os.path.exists(f"{target}.lock")
+
+
+def test_a_second_holder_waits_rather_than_writing_alongside(tmp_path):
+    target = str(tmp_path / "index.csv")
+    lock   = IndexLock(target, timeout=0.2, poll=0.01)
+    lock.__enter__()
+    # The holder never releases, so the waiter must break the stale lock and
+    # take it rather than blocking the sweep forever.
+    started = time.time()
+    with IndexLock(target, timeout=0.2, poll=0.01):
+        assert time.time() - started >= 0.2
+    lock.__exit__()
+
+
+def test_appending_leaves_no_lock_behind(tmp_path):
+    filepath = tmp_path / "index.csv"
+    ExperimentIndex(str(filepath)).append(_record("run-1"))
+    assert not os.path.exists(f"{filepath}.lock")
+    assert len(list(csv.DictReader(filepath.read_text().splitlines()))) == 1

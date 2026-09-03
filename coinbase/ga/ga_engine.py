@@ -15,6 +15,9 @@ class GaConfig:
     elitism_count:   int
     mutation_sigma:  float = 0.1
     seed:            Optional[int] = None
+    # Off by default: every genome trained so far has non-negative weights, and
+    # flipping this changes what the search can express, not just where it looks.
+    allow_negative_weights: bool = False
 
 
 class GaConfigFile:
@@ -32,6 +35,7 @@ class GaConfigFile:
             elitism_count   = section["elitism_count"],
             mutation_sigma  = section.get("mutation_sigma", 0.1),
             seed            = section.get("seed"),
+            allow_negative_weights = bool(section.get("allow_negative_weights", False)),
         )
 
 
@@ -48,6 +52,9 @@ class Genome:
     def weight(self, key: str) -> float:
         return self._weights[key]
 
+    def has(self, key: str) -> bool:
+        return key in self._weights
+
     def fitness(self) -> float:
         if self._fitness is None:
             raise ValueError(f"Genome has not been evaluated yet: {self._weights}")
@@ -60,12 +67,43 @@ class Genome:
         return Genome(self._weights, fitness)
 
 
+# A genome saved before a weight key existed, run against a config that now
+# has it. The genome assigned that key no weight — it could not — so zero is
+# the honest reading, and it leaves the score exactly what the genome was
+# scored on when it was trained.
+#
+# Deliberately a decorator on the LOAD path rather than a softening of
+# Genome.weight: training must still fail loudly on a key it does not know,
+# because there a missing weight is a bug, not history.
+class BackfilledGenome:
+    def __init__(self, genome: Genome, keys: tuple[str, ...]) -> None:
+        self._genome = genome
+        self._keys   = keys
+
+    def missing(self) -> tuple[str, ...]:
+        return tuple(key for key in self._keys if not self._genome.has(key))
+
+    def weights(self) -> dict[str, float]:
+        return {**{key: 0.0 for key in self.missing()}, **self._genome.weights()}
+
+    def filled(self) -> Genome:
+        return Genome(self.weights())
+
+
+# Scaled so the ABSOLUTE weights sum to 1, not the signed ones.
+#
+# Dividing by the signed sum breaks the moment weights may be negative: a
+# genome whose weights nearly cancel has a sum near zero, and dividing by it
+# explodes the weights without bound. The L1 norm has neither problem, and it
+# is identical to the old behaviour whenever every weight is already positive
+# — which is why enabling signed weights changes nothing for genomes that do
+# not use them.
 class NormalizedWeights:
     def __init__(self, raw: dict[str, float]) -> None:
         self._raw = raw
 
     def values(self) -> dict[str, float]:
-        total = sum(self._raw.values())
+        total = sum(abs(value) for value in self._raw.values())
         if total <= 0.0:
             share = 1.0 / len(self._raw)
             return {key: share for key in self._raw}
@@ -73,23 +111,44 @@ class NormalizedWeights:
 
 
 class RandomWeights:
-    def __init__(self, keys: tuple[str, ...], random_source: random.Random) -> None:
-        self._keys   = keys
-        self._random = random_source
+    def __init__(
+        self,
+        keys: tuple[str, ...],
+        random_source: random.Random,
+        allow_negative: bool = False,
+    ) -> None:
+        self._keys           = keys
+        self._random         = random_source
+        self._allow_negative = allow_negative
 
     def generate(self) -> dict[str, float]:
-        raw = {key: self._random.random() for key in self._keys}
+        raw = {key: self._gene() for key in self._keys}
         return NormalizedWeights(raw).values()
+
+    # Sampled symmetrically about zero when signs are allowed, so the initial
+    # population explores inverse relationships from the first generation
+    # rather than having to mutate its way across zero.
+    def _gene(self) -> float:
+        if self._allow_negative:
+            return self._random.uniform(-1.0, 1.0)
+        return self._random.random()
 
 
 class RandomPopulation:
-    def __init__(self, size: int, keys: tuple[str, ...], random_source: random.Random) -> None:
-        self._size   = size
-        self._keys   = keys
-        self._random = random_source
+    def __init__(
+        self,
+        size: int,
+        keys: tuple[str, ...],
+        random_source: random.Random,
+        allow_negative: bool = False,
+    ) -> None:
+        self._size           = size
+        self._keys           = keys
+        self._random         = random_source
+        self._allow_negative = allow_negative
 
     def genomes(self) -> list[Genome]:
-        random_weights = RandomWeights(self._keys, self._random)
+        random_weights = RandomWeights(self._keys, self._random, self._allow_negative)
         return [Genome(random_weights.generate()) for _ in range(self._size)]
 
 
@@ -142,11 +201,13 @@ class GaussianMutation:
         mutation_rate: float,
         sigma: float,
         random_source: random.Random,
+        allow_negative: bool = False,
     ) -> None:
-        self._genome        = genome
-        self._mutation_rate = mutation_rate
-        self._sigma         = sigma
-        self._random        = random_source
+        self._genome         = genome
+        self._mutation_rate  = mutation_rate
+        self._sigma          = sigma
+        self._random         = random_source
+        self._allow_negative = allow_negative
 
     def mutated(self) -> Genome:
         raw = {
@@ -155,10 +216,14 @@ class GaussianMutation:
         }
         return Genome(NormalizedWeights(raw).values())
 
+    # The clamp at zero is what made an inverse relationship inexpressible: a
+    # genome could learn "RSI high means buy harder" but never "RSI high means
+    # sell". Lifting it lets a weight cross zero and stay there.
     def _mutated_gene(self, value: float) -> float:
         if self._random.random() >= self._mutation_rate:
             return value
-        return max(0.0, value + self._random.gauss(0.0, self._sigma))
+        mutated = value + self._random.gauss(0.0, self._sigma)
+        return mutated if self._allow_negative else max(0.0, mutated)
 
 
 class Elitism:
@@ -190,7 +255,10 @@ class GeneticAlgorithm:
         self._random = random.Random(config.seed)
 
     def initial_population(self) -> list[Genome]:
-        return RandomPopulation(self._config.population_size, self._keys, self._random).genomes()
+        return RandomPopulation(
+            self._config.population_size, self._keys, self._random,
+            self._config.allow_negative_weights,
+        ).genomes()
 
     def evolve(
         self,
@@ -218,4 +286,7 @@ class GeneticAlgorithm:
             candidate = UniformCrossover(parent1, parent2, self._random).child()
         else:
             candidate = parent1
-        return GaussianMutation(candidate, self._config.mutation_rate, self._config.mutation_sigma, self._random).mutated()
+        return GaussianMutation(
+            candidate, self._config.mutation_rate, self._config.mutation_sigma,
+            self._random, self._config.allow_negative_weights,
+        ).mutated()

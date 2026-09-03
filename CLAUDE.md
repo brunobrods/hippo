@@ -82,6 +82,21 @@ python -m coinbase.ga.paper_trading
 ./scripts/register_paper_task.ps1                    # register, every 30 min
 ./scripts/register_paper_task.ps1 -Remove            # unregister
 
+# Pair screener — rank a venue's whole universe by how far it moves, net of costs
+python -m coinbase.pair_screener
+python -m coinbase.pair_screener --exchange binance --quote USDT --days 180 --top 25
+python -m coinbase.pair_screener --exchange binance --require-short --min-volume 1e7
+python -m coinbase.pair_screener --metric net_maker_bps   # see the maker/taker gap
+
+# Cross-sectional selector — one book, picks which pair to hold and which way
+python -m coinbase.ga.pair_selector --pairs FET-USDT ETH-USDT --exchange binance
+python -m coinbase.ga.pair_selector --from-shortlist binance --fee-bps 10
+python -m coinbase.ga.pair_selector --pairs FET-USDT --no-fees   # gross, like Backtest
+
+# Selector paper trading — ONE tick per invocation, then exits (Task Scheduler)
+python -m coinbase.ga.selection_paper --pairs FET-USDT ETH-USDT --exchange binance
+python -m coinbase.ga.selection_paper --from-shortlist binance
+
 # Tests
 pytest
 pytest tests/test_config.py   # single file
@@ -117,6 +132,146 @@ BTC-USDT without disturbing training config.
 while the GA trained against the full training window's range, so `norm_*`
 columns do not mean quite the same thing live as in scoring. Deferred
 deliberately; it affects any live or paper run.
+
+## Pair screening
+
+`coinbase/pair_screener.py` answers "which pairs move enough to be worth
+trading, after costs?" — discovering the venue's universe via the
+`ProductCatalog` half of the adapter Protocol, measuring 180 days of `ONE_DAY`
+candles per pair, and ranking on movement net of the round-trip cost floor.
+
+Three things about it are load-bearing rather than stylistic:
+
+- **The window is snapped to whole UTC days.** `CandleCacheKey` interpolates the
+  raw `start`/`end` ints into the filename, so an unsnapped `time.time()` mints
+  a unique key every second — a guaranteed cache miss and a full cold refetch of
+  every pair on every run. Snapped, the first run of a day fetches and the rest
+  are disk reads. Snapping alone does **not** make the window closed-only:
+  Binance treats klines' `endTime` as inclusive of a candle's *open*, so
+  `PairCandles._closed` drops the still-forming candle. Leaving it in moved
+  `atr_pct` by ~11% on real BTC data.
+- **One semaphore is shared across every pair.** `HistoricalCandles` builds a
+  private `Semaphore(8)` when none is passed, so N pairs would put N×8 requests
+  in flight. The screener threads `ExchangeLane.limit()` into all of them.
+- **Ranking defaults to `net_taker_bps`, not `net_maker_bps`.** The maker figure
+  credits the whole spread back, so it *rises* with the spread and promotes
+  illiquid pairs — it once ranked MANTRA above pairs that objectively moved more,
+  purely for having the widest spread. `net_maker_bps` stays as a column.
+
+**Read `required_accuracy`, not the volatility.** Movement is necessary and not
+sufficient: the screener proves a pair moved, never that the direction was
+forecastable. `required_accuracy` converts a move and a cost floor into the
+direction accuracy a strategy would need — `p = (target + cost + move) / 2·move`.
+It lands near 70% on the good pairs, against published daily-direction models in
+the low 50s. `viable` requires both clearing the cost floor **and**
+`required_accuracy <= 1.0`, because a pair can move more than it costs to trade
+while still being arithmetically incapable of the target (BTC-USDT is exactly
+this case at 1%/day).
+
+Fee rates are read from the venue per account (`/sapi/v1/asset/tradeFee`,
+`/api/v3/brokerage/transaction_summary`), never hardcoded — tiers move with
+volume, and the measured rates here differed sharply from the published base
+tier. The output says whether a rate was measured or is a fallback.
+
+**Handoff to the GA.** The shortlist JSON's flat `pairs` array is the `values:`
+list for a sweep axis, which `DottedPathOverride` already supports:
+
+```yaml
+axes:
+  - path: "data.pair"
+    values: ["DEXE-USDT", "ZEC-USDT"]     # paste from the shortlist
+```
+
+`Sweep` builds one adapter from `data.exchange` **outside** the point loop, so
+set `data.exchange: "binance"` in `config.yaml` before sweeping Binance pairs —
+otherwise every point trains against Coinbase, where those pairs do not exist.
+Then `python -m coinbase.ga.results --group-by pair` compares them; read the
+`std` column, not just `mean`.
+
+**Maker execution is not modelled.** Post-only exists on both adapters
+(Binance `LIMIT_MAKER`, Coinbase `postOnly`) and nothing calls it, because
+`Ledger.apply` fills every decision unconditionally at the candle close — there
+is no resting-order state and no way to express a non-fill. `MakerTakerFee` in
+`paper_trading.py` prices the two sides differently but is not yet wired into
+`paper_engine`. Until a fill model exists, treat `net_maker_bps` as a best case
+that assumes the order filled, which is exactly what a resting order does not
+guarantee.
+
+## Wider-market context (`index_z`)
+
+`market_data.index_pairs` sets an equal-weight basket standing in for "the
+market". With it set, every frame gains an **`index_z`** column: the pair's
+return minus the basket's, scored against its own recent spread. So +2 means
+this pair is diverging from the market by more than it normally does, and 0
+means it is going along with it.
+
+Equal weight, not volume weight — the basket is meant to be the menu a
+strategy picked from, so every item gets the same say. The z-score rather than
+the raw excess because 2% of excess is ordinary on a wild pair and
+extraordinary on a quiet one; scaling by each pair's own spread makes the
+number mean the same thing everywhere. `MarketIndex` is keyed by **timestamp**,
+not row order, because the pairs it averages list at different dates and drop
+candles independently.
+
+**Off by default, and that is load-bearing.** Turning it on changes the frame
+every genome is scored on. To use it: set the basket, add `index_z` to *both*
+`market_data.normalized_columns` and `strategy.weight_keys`, then retrain.
+Genomes saved before it existed carry no such weight — `BackfilledGenome` runs
+them with it at zero (the honest reading: they could not have used it) and
+logs which keys it filled. Training still fails loudly on an unknown key,
+because there a missing weight is a bug rather than history.
+
+## Cross-sectional pair selection
+
+`coinbase/ga/pair_selector.py` asks the question one level above a genome:
+given N genomes each watching its own pair, which pair is worth holding right
+now, and in which direction? One position at a time, taken in whichever pair
+has the strongest conviction, held until that pair's own exit threshold fires.
+No rotation mid-hold — a round trip costs real basis points.
+
+Two things it does that `Backtest` does not, deliberately:
+
+- **Fees are charged**, via `Ledger.charge`. A selector re-entering on every
+  exit trades far more than a single-pair strategy. `Trade.profit()` stays
+  gross so `experiments/index.csv` comparisons across the whole history remain
+  valid; the selector charges on top.
+- **Direction accuracy is measured** — the number `required_accuracy` from the
+  screener is a bar for. Reported with a Wilson 95% interval, because "63%"
+  from 11 trades is indistinguishable from a coin and the bar sits inside the
+  interval. Trades the window cut short unwind at their own entry price and are
+  **excluded** from both rates: closed by the calendar, not by the strategy, and
+  scoring one as a miss invents an outcome the data never produced.
+
+**Cross-pair ranking is the weakest link.** `signal_score` sums `norm_*`
+columns min-max scaled inside each pair's *own* window, so a raw 0.8 on one
+pair and 0.8 on another are not the same quantity. `Conviction` measures each
+score against its own genome's trigger — `(score − buy_threshold) / (1 −
+buy_threshold)` — which removes the differing-thresholds problem and much of
+the differing-scale one. "Much of" is the honest phrase; do not read a good
+result here as proof the ranking is sound.
+
+**Always read the benchmark and the attribution, not the headline.** The report
+prints equal-weight buy-and-hold over the identical window, and flags when one
+pair carries more than 60% of net profit. On the first real run the selector
+returned +60% against −11.9% for holding everything equally — but FET-USDT
+alone accounted for 134% of net profit, and stripping it left −20.7%. That is
+one pair moving, not selection skill.
+
+**Paper trading it** — `coinbase/ga/selection_paper.py`, one tick per
+invocation like `paper_trading.py`, with the same two safety properties. The
+state file adds one field that matters: **which pair the position is in**. A
+size and an entry price restored against the wrong market would be marked at
+an unrelated price and exited using a different pair's genome. A tick acts on
+the oldest candle *every* pair has closed — one lagging pair holds the whole
+tick rather than letting a stale score into the ranking. A single tick can
+both exit one pair and enter another, so the outcome reports `exited` and
+`entered` separately rather than one action field that would hide a leg.
+
+`BestRunPerPair` picks each pair's highest-scoring run out of
+`experiments/index.csv`, filtered to the **same granularity** — a genome
+trained on `THIRTY_MINUTE` candles reads its indicators off a different clock.
+This is in-sample selection twice over (the run scored best on the data it is
+then selected over), so treat any result as an upper bound.
 
 ## Architecture
 
