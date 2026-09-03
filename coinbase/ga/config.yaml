@@ -73,6 +73,21 @@ paper:
   # state_filepath: "./paper_state.json"
 
 strategy:
+  # How hard the GA is penalised for an uncertain trade sample.
+  #
+  # Fitness scores the one-sided 95% Student-t LOWER BOUND on the per-trade
+  # edge, not the realized total. Scoring the realized total meant annualizing
+  # whatever happened: a genome that took two lucky trades in eleven months was
+  # graded as if that pace and that luck ran all year, and the search learned to
+  # trade almost never and hope. Measured on 60 runs with signed weights, 23 of
+  # them scored on a single never-closed position and 8 cleared 100% annualized
+  # on a median of three trades.
+  #
+  # 1.0 applies the bound in full. 0.0 restores the historical behaviour, which
+  # is how a pre-existing run is reproduced. The REPORTED annualized_yield is
+  # untouched either way, so experiments/index.csv stays comparable across every
+  # run ever recorded.
+  fitness_confidence: 1.0
   position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
   buy_threshold: 0.60       # signal_score above this opens a position
   sell_threshold: 0.40      # signal_score below this closes an open position

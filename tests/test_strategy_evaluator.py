@@ -10,10 +10,12 @@ from coinbase.ga.strategy_evaluator import (
     StrategyConfigFile,
     StrategyEvaluator,
     ValidatedStrategyConfig,
+    StudentT,
+    TradeSample,
     ValidatedWeightKeys,
     WeightKeysConfig,
 )
-from coinbase.trading_strategy import Action, Direction, Position
+from coinbase.trading_strategy import Action, Direction, Position, Trade
 
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
 
@@ -308,15 +310,39 @@ def _frame_with_timestamps(timestamps: list[int]) -> pd.DataFrame:
     })
 
 
-def test_strategy_evaluator_fitness_is_the_annualized_yield_of_the_backtest():
+# fitness is deliberately NOT the annualized yield any more: the reported
+# metric stays the realized figure so index.csv remains comparable, while the
+# selection score prices in how uncertain the trade sample is.
+def test_reported_yield_is_still_the_realized_figure():
     frame     = _frame_with_timestamps([0, 864000, 1728000, 2592000])  # 30-day window
     genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
     evaluator = StrategyEvaluator(frame, _config(), _KEYS)
     result    = evaluator.result(genome)
 
     assert result.gross_profit() == pytest.approx(20.0)  # 10% of 1000 @100 -> 1 unit, +20 on the move
+    assert evaluator.annualized_yield(result) == pytest.approx((1.02) ** (SECONDS_PER_YEAR / 2592000) - 1.0)
+
+
+def test_zero_confidence_restores_the_historical_fitness():
+    frame     = _frame_with_timestamps([0, 864000, 1728000, 2592000])
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    evaluator = StrategyEvaluator(frame, _config(fitness_confidence=0.0), _KEYS)
+    result    = evaluator.result(genome)
+
     assert evaluator.fitness(genome) == pytest.approx(evaluator.annualized_yield(result))
-    assert evaluator.fitness(genome) == pytest.approx((1.02) ** (SECONDS_PER_YEAR / 2592000) - 1.0)
+
+
+# The exploit this exists to close: a single lucky trade was annualized into a
+# yearly rate, so "trade once and hope" outranked trading consistently.
+def test_one_lucky_trade_earns_no_credit():
+    frame     = _frame_with_timestamps([0, 864000, 1728000, 2592000])
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    evaluator = StrategyEvaluator(frame, _config(), _KEYS)
+    result    = evaluator.result(genome)
+
+    assert len(result.trades()) == 1
+    assert result.gross_profit() > 0.0            # it made money
+    assert evaluator.fitness(genome) == pytest.approx(0.0)   # and is credited none of it
 
 
 def _frame_that_buys_and_never_sells() -> pd.DataFrame:
@@ -448,3 +474,114 @@ def test_the_ceiling_counts_absolute_weight_mass():
 def test_the_ceiling_is_unchanged_for_an_all_positive_genome():
     genome = Genome({"sma_short": 0.4, "sma_long": 0.2, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
     assert GaStrategy(genome, _config(), _KEYS).flat_score_ceiling() == pytest.approx(0.6)
+
+
+# ── StudentT ─────────────────────────────────────────────────────────
+
+# A fixed z-multiplier refuses to punish a two-trade sample; t does.
+def test_a_tiny_sample_gets_a_far_larger_multiplier():
+    assert StudentT(1).multiplier() > 6.0
+    assert StudentT(30).multiplier() < 1.75
+
+
+def test_the_multiplier_shrinks_monotonically_toward_the_normal():
+    values = [StudentT(df).multiplier() for df in (1, 2, 5, 10, 30, 120, 5000)]
+    assert values == sorted(values, reverse=True)
+    assert values[-1] == pytest.approx(1.645)
+
+
+def test_an_untabulated_size_takes_the_conservative_neighbour():
+    # 17 df sits between the 15 and 20 rows; err toward punishing uncertainty.
+    assert StudentT(17).multiplier() == StudentT(20).multiplier()
+
+
+def test_degenerate_degrees_of_freedom_are_treated_as_one():
+    assert StudentT(0).multiplier() == StudentT(1).multiplier()
+
+
+# ── TradeSample ──────────────────────────────────────────────────────
+
+def _trades(*profits: float) -> list:
+    # entry 100, size 1 -> exit price carries the profit
+    return [Trade(100.0, 100.0 + p, 1.0) for p in profits]
+
+
+def test_returns_are_profits_as_a_fraction_of_the_starting_balance():
+    sample = TradeSample(_trades(10.0, -20.0), starting_balance=1000.0)
+    assert sample.returns == pytest.approx([0.01, -0.02])
+    assert sample.mean() == pytest.approx(-0.005)
+
+
+def test_the_standard_error_falls_as_the_sample_grows():
+    few  = TradeSample(_trades(10.0, 30.0), 1000.0).standard_error()
+    many = TradeSample(_trades(*([10.0, 30.0] * 10)), 1000.0).standard_error()
+    assert many < few
+
+
+def test_a_single_trade_has_no_measurable_standard_error():
+    assert TradeSample(_trades(10.0), 1000.0).standard_error() == 0.0
+
+
+# The hole a bound on observed variance alone leaves: two trades that happen
+# to return the same amount have zero observed variance and would take zero
+# penalty, ranking level with a thirty-trade record.
+def test_identical_trades_still_carry_uncertainty():
+    twins = TradeSample(_trades(300.0, 300.0), 1000.0)
+    assert twins.standard_error() == 0.0
+    assert twins.effective_standard_error() > 0.0
+
+
+def test_the_uncertainty_floor_falls_as_the_sample_grows():
+    few  = TradeSample(_trades(*([20.0] * 4)), 1000.0)
+    many = TradeSample(_trades(*([20.0] * 36)), 1000.0)
+    assert many.effective_standard_error() < few.effective_standard_error()
+
+
+def test_a_genuinely_erratic_sample_keeps_its_observed_error():
+    erratic = TradeSample(_trades(200.0, -160.0, 180.0, -140.0), 1000.0)
+    assert erratic.effective_standard_error() == pytest.approx(erratic.standard_error())
+
+
+# A single win proves nothing on the upside; its loss is still real.
+def test_a_single_winning_trade_is_credited_nothing():
+    assert TradeSample(_trades(50.0), 1000.0).lower_bound(1.0) == pytest.approx(0.0)
+
+
+def test_a_single_losing_trade_still_counts_against_it():
+    assert TradeSample(_trades(-50.0), 1000.0).lower_bound(1.0) == pytest.approx(-0.05)
+
+
+def test_zero_confidence_is_just_the_realized_mean():
+    sample = TradeSample(_trades(10.0, 30.0), 1000.0)
+    assert sample.lower_bound(0.0) == pytest.approx(sample.mean())
+
+
+# The core of the fix: two lucky trades must not outrank many consistent ones.
+def test_a_two_trade_windfall_loses_to_a_long_consistent_record():
+    windfall   = TradeSample(_trades(300.0, 250.0), 1000.0)
+    consistent = TradeSample(_trades(*([12.0, 8.0] * 15)), 1000.0)
+    assert windfall.mean() > consistent.mean()                       # bigger per trade
+    assert windfall.pessimistic_return(1.0) < consistent.pessimistic_return(1.0)
+
+
+def test_an_erratic_record_loses_to_a_steady_one_of_the_same_mean():
+    steady  = TradeSample(_trades(*([20.0] * 12)), 1000.0)
+    erratic = TradeSample(_trades(*([200.0, -160.0] * 6)), 1000.0)
+    assert erratic.mean() == pytest.approx(steady.mean())
+    assert erratic.pessimistic_return(1.0) < steady.pessimistic_return(1.0)
+
+
+# Below -1.0 AnnualizedYield raises a negative base to a fractional power and
+# returns a complex number, which would poison every GA comparison.
+def test_the_pessimistic_return_is_floored_at_total_ruin():
+    ruinous = TradeSample(_trades(*([900.0, -900.0] * 4)), 1000.0)
+    assert ruinous.pessimistic_return(1.0) == pytest.approx(-1.0)
+
+
+# The penalty has to bite on small samples without gutting a genuinely long,
+# consistent record — 60 steady trades keep ~78% of their realized edge.
+def test_a_good_long_record_keeps_most_of_its_edge():
+    sample   = TradeSample(_trades(*([25.0, 15.0, 20.0] * 20)), 1000.0)
+    realized = sample.mean() * sample.count()
+    assert sample.pessimistic_return(1.0) > 0.7 * realized
+    assert sample.pessimistic_return(1.0) < realized

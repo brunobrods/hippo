@@ -5,7 +5,15 @@ from typing import Any, Optional
 import pandas as pd
 
 from coinbase.ga.ga_engine import Genome
-from coinbase.trading_strategy import Action, Backtest, BacktestResult, Decision, Direction, Position
+from coinbase.trading_strategy import (
+    Action,
+    Backtest,
+    BacktestResult,
+    Decision,
+    Direction,
+    Position,
+    Trade,
+)
 
 
 # ── Config ─────────────────────────────────────────────────────────────
@@ -22,6 +30,11 @@ class StrategyConfig:
     allow_short:           bool  = False
     short_entry_threshold: float = 0.25  # score below this opens a short
     short_exit_threshold:  float = 0.40  # score above this covers it
+    # How hard the GA is penalised for an uncertain trade sample. Scales the
+    # one-sided 95% Student-t bound on the per-trade edge: 1.0 applies it in
+    # full, 0.0 restores the historical behaviour of scoring the realized total
+    # with no regard for how few trades produced it.
+    fitness_confidence:    float = 1.0
 
 
 class StrategyConfigFile:
@@ -39,6 +52,7 @@ class StrategyConfigFile:
             allow_short           = section.get("allow_short", False),
             short_entry_threshold = section.get("short_entry_threshold", 0.25),
             short_exit_threshold  = section.get("short_exit_threshold", 0.40),
+            fitness_confidence    = float(section.get("fitness_confidence", 1.0)),
         )
 
 
@@ -213,6 +227,102 @@ class AnnualizedYield:
         return (1.0 + total_return) ** (self._SECONDS_PER_YEAR / self._duration_seconds) - 1.0
 
 
+# One-sided 95% Student-t multipliers by degrees of freedom.
+#
+# A table rather than a formula because scipy is not a dependency, and the
+# only values that matter here are the small-sample ones: t(1) = 6.31 against
+# t(inf) = 1.64 is exactly the penalty a two-trade sample deserves and a
+# fixed z-multiplier refuses to apply.
+class StudentT:
+    _BY_DF = {
+        1: 6.314, 2: 2.920, 3: 2.353, 4: 2.132, 5: 2.015,
+        6: 1.943, 7: 1.895, 8: 1.860, 9: 1.833, 10: 1.812,
+        12: 1.782, 15: 1.753, 20: 1.725, 25: 1.708, 30: 1.697,
+        40: 1.684, 60: 1.671, 120: 1.658,
+    }
+    _ASYMPTOTIC = 1.645
+
+    def __init__(self, degrees_of_freedom: int) -> None:
+        self._df = degrees_of_freedom
+
+    def multiplier(self) -> float:
+        if self._df < 1:
+            return self._BY_DF[1]
+        if self._df in self._BY_DF:
+            return self._BY_DF[self._df]
+        larger = [df for df in self._BY_DF if df > self._df]
+        # Between tabulated rows, take the more conservative (larger) value
+        # rather than interpolating — erring toward punishing uncertainty.
+        return self._BY_DF[min(larger)] if larger else self._ASYMPTOTIC
+
+
+# The per-trade returns a backtest produced, and what can honestly be inferred
+# from them.
+#
+# This exists because annualizing a realized total treats however many trades
+# happened as a repeatable rate: a genome that took two lucky trades in eleven
+# months was scored as if that pace and that luck would continue all year, and
+# eight such runs scored above 100% on a median of three trades. Measuring the
+# LOWER BOUND on the per-trade edge instead prices the uncertainty in, so a
+# small or erratic sample cannot outrank a large consistent one.
+class TradeSample:
+    def __init__(self, trades: list[Trade], starting_balance: float) -> None:
+        self._trades           = trades
+        self._starting_balance = starting_balance
+
+    @functools.cached_property
+    def returns(self) -> list[float]:
+        return [trade.profit() / self._starting_balance for trade in self._trades]
+
+    def count(self) -> int:
+        return len(self._trades)
+
+    def mean(self) -> float:
+        return sum(self.returns) / len(self.returns) if self.returns else 0.0
+
+    # The observed standard error, honestly reported — zero when the sample is
+    # too small to have one, or when every trade happened to return the same.
+    def standard_error(self) -> float:
+        n = self.count()
+        if n < 2:
+            return 0.0
+        mean     = self.mean()
+        variance = sum((value - mean) ** 2 for value in self.returns) / (n - 1)
+        return (variance ** 0.5) / (n ** 0.5)
+
+    # The observed error floored by a prior, and the floor is what makes the
+    # sample size bite.
+    #
+    # Two trades that happen to return the same amount have zero observed
+    # variance, so a bound built on the observed error alone applies no penalty
+    # at all and ranks them level with a thirty-trade record. Consistency across
+    # two observations is not evidence of consistency. The prior says a trade's
+    # outcome is at least as uncertain as its own average magnitude — true of
+    # essentially any real strategy — which restores the 1/sqrt(n) dependence
+    # that small samples deserve.
+    def effective_standard_error(self) -> float:
+        floor = abs(self.mean()) / (self.count() ** 0.5) if self.count() else 0.0
+        return max(self.standard_error(), floor)
+
+    # `scale` of 0.0 is the historical behaviour exactly — the realized mean,
+    # with no penalty for how few trades produced it.
+    def lower_bound(self, scale: float) -> float:
+        if scale <= 0.0:
+            return self.mean()
+        if self.count() == 1:
+            # One trade admits no variance estimate at all. It earns no credit
+            # on the upside — a single win proves nothing — while its loss
+            # still counts, so inaction dressed up as one trade cannot score.
+            return min(self.returns[0], 0.0)
+        return self.mean() - scale * StudentT(self.count() - 1).multiplier() * self.effective_standard_error()
+
+    # The whole-window return the lower bound implies, floored at -1.0: below
+    # that, AnnualizedYield raises a negative base to a fractional power and
+    # returns a complex number. A real book can only lose what it has.
+    def pessimistic_return(self, scale: float) -> float:
+        return max(self.lower_bound(scale) * self.count(), -1.0)
+
+
 # ── Evaluator ───────────────────────────────────────────────────────────
 
 class StrategyEvaluator:
@@ -230,12 +340,24 @@ class StrategyEvaluator:
         self._keys   = keys
 
     # Selection score, not a reported metric: annualized_yield() below still
-    # reports the honest 0.0 for a no-trade run in the performance report.
+    # reports the realized figure, so index.csv stays comparable across every
+    # run ever recorded even as what the GA optimizes changes.
+    #
+    # Scored on the lower bound of the per-trade edge rather than the realized
+    # total, because annualizing the realized total let a two-trade sample be
+    # graded as a yearly rate. A genome now has to earn its yield often enough
+    # and consistently enough for the bound to survive.
     def fitness(self, genome: Genome) -> float:
         result = self.result(genome)
-        if not result.trades():
+        sample = TradeSample(result.trades(), self._config.starting_balance)
+        if sample.count() == 0:
             return self._NO_TRADE_FITNESS
-        return self.annualized_yield(result)
+        pessimistic = sample.pessimistic_return(self._config.fitness_confidence)
+        return AnnualizedYield(
+            pessimistic * self._config.starting_balance,
+            self._config.starting_balance,
+            self._duration_seconds(),
+        ).value()
 
     def result(self, genome: Genome) -> BacktestResult:
         strategy = GaStrategy(genome, self._config, self._keys)
