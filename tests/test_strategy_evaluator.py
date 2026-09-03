@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 
+import coinbase.ga.strategy_evaluator as strategy_evaluator
 from coinbase.ga.ga_engine import Genome
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
@@ -15,7 +16,7 @@ from coinbase.ga.strategy_evaluator import (
     ValidatedWeightKeys,
     WeightKeysConfig,
 )
-from coinbase.trading_strategy import Action, Direction, Position, Trade
+from coinbase.trading_strategy import Action, Direction, MarketRows, Position, Trade
 
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
 
@@ -585,3 +586,27 @@ def test_a_good_long_record_keeps_most_of_its_edge():
     realized = sample.mean() * sample.count()
     assert sample.pessimistic_return(1.0) > 0.7 * realized
     assert sample.pessimistic_return(1.0) < realized
+
+def test_strategy_evaluator_converts_the_window_to_rows_once_for_every_genome(monkeypatch):
+    # The GA scores population x generations genomes against ONE window, and
+    # Backtest is rebuilt per genome — so the row conversion has to be held by
+    # the evaluator or it re-runs thousands of times per training run.
+    seen: list[MarketRows] = []
+    real_backtest = strategy_evaluator.Backtest
+
+    class RecordingBacktest(real_backtest):
+        def __init__(self, rows: MarketRows, *args: object, **kwargs: object) -> None:
+            seen.append(rows)
+            super().__init__(rows, *args, **kwargs)
+
+    monkeypatch.setattr(strategy_evaluator, "Backtest", RecordingBacktest)
+
+    evaluator = StrategyEvaluator(_frame_with_timestamps([0, 864000, 1728000, 2592000]), _config(), _KEYS)
+    for weight in (1.0, 0.5, 0.25):
+        evaluator.fitness(Genome(
+            {"sma_short": weight, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0},
+        ))
+
+    assert len(seen) == 3
+    assert all(rows is seen[0] for rows in seen)                  # one MarketRows for every genome
+    assert all(rows.records is seen[0].records for rows in seen)  # converted exactly once

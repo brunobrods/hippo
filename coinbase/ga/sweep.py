@@ -6,7 +6,7 @@ import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from coinbase.ga.config import ConfigFile
 from coinbase.ga.main import TrainingRun, TrainingSummary
@@ -52,6 +52,13 @@ class SweepConfigFile:
     def seeds(self) -> tuple[int, ...]:
         return tuple(self._raw["seeds"])
 
+    # Dotted paths pinned for every point of this sweep, applied to base_config
+    # before any axis is. Not an axis: nothing here varies, so it does not
+    # multiply the point count and does not break the OFAT property below.
+    # Optional — a sweep file without a `fixed:` section pins nothing.
+    def fixed(self) -> tuple[tuple[str, Any], ...]:
+        return tuple((self._raw.get("fixed") or {}).items())
+
     def axes(self) -> tuple[SweepAxis, ...]:
         return tuple(
             SweepAxis(path=axis["path"], values=tuple(axis["values"]))
@@ -85,6 +92,26 @@ class DottedPathOverride:
         return result
 
 
+class FixedOverrides:
+    # Folds a sweep file's `fixed:` paths onto the base config, in order, so a
+    # later path can refine one an earlier one set. The result is what both the
+    # SweepPlan and the adapter are built from — pinning `data.exchange` here
+    # has to reach ConfiguredExchange too, or a sweep would train Binance
+    # configs against a Coinbase adapter.
+    def __init__(self, raw_config: dict[str, Any], overrides: tuple[tuple[str, Any], ...]) -> None:
+        self._raw_config = raw_config
+        self._overrides  = overrides
+
+    def applied(self) -> dict[str, Any]:
+        # Copied even when nothing is pinned, so the result is never an alias
+        # of the caller's config — DottedPathOverride makes the same promise,
+        # and a `fixed:`-less sweep must not be the one case that breaks it.
+        result = copy.deepcopy(self._raw_config)
+        for path, value in self._overrides:
+            result = DottedPathOverride(result, path, value).applied()
+        return result
+
+
 @dataclass(frozen=True)
 class SweepPoint:
     axis_path:  str
@@ -93,16 +120,50 @@ class SweepPoint:
     raw_config: dict[str, Any]
 
 
+class ScratchStrategyPath:
+    # TrainingRun writes output.strategy_filepath and immediately reads it back
+    # to verify the round trip, so any two runs sharing the path would have each
+    # reading the other's strategy — or a half-written one. Two things can
+    # collide, and the name has to separate both:
+    #
+    #   process_id  keeps concurrent SWEEPS apart, which ExperimentIndex's
+    #               atomic header creation already assumes is supported.
+    #   ordinal     keeps concurrent POINTS of one sweep apart, which
+    #               ParallelSweep makes possible — the plan is built in the
+    #               parent, so every point would otherwise inherit one pid.
+    def __init__(self, experiments_dir: str, process_id: int, ordinal: int) -> None:
+        self._experiments_dir = experiments_dir
+        self._process_id      = process_id
+        self._ordinal         = ordinal
+
+    def value(self) -> str:
+        return os.path.join(
+            self._experiments_dir, "_sweep_scratch",
+            f"best_strategy_{self._process_id}_{self._ordinal}.json",
+        )
+
+
 class SweepPlan:
     # One-factor-at-a-time by construction: each axis value is applied to the
     # unmodified base_config, never combined with another axis's value, so
     # every point isolates the effect of a single parameter. Joint/combined
     # sweeps are deliberately out of scope here — see MODEL_DEVELOPMENT_PLAN.md
     # step 3, which reserves those for a later, narrower random search.
-    def __init__(self, base_config: dict[str, Any], axes: tuple[SweepAxis, ...], seeds: tuple[int, ...]) -> None:
+    #
+    # process_id names the scratch file this plan's points write through; it
+    # defaults to the running process, and is injectable so a test can assert
+    # the path without depending on its own pid.
+    def __init__(
+        self,
+        base_config: dict[str, Any],
+        axes: tuple[SweepAxis, ...],
+        seeds: tuple[int, ...],
+        process_id: Optional[int] = None,
+    ) -> None:
         self._base_config = base_config
         self._axes        = axes
         self._seeds       = seeds
+        self._process_id  = process_id
 
     def points(self) -> tuple[SweepPoint, ...]:
         points: list[SweepPoint] = []
@@ -120,14 +181,15 @@ class SweepPlan:
     def ensure_scratch_directory(self) -> None:
         ParentDirectory(self._scratch_strategy_path(0)).ensure()
 
-    # One path per point, not one for the whole sweep. Every run writes its
-    # best strategy here and reads it straight back to verify the saved JSON
-    # reloads into an identical backtest; sharing the path across points that
-    # run concurrently would have each verifying whichever run wrote last.
-    # Sequential sweeps are unaffected — they just no longer reuse one file.
+    # One path per point AND per sweep process. Every run writes its best
+    # strategy here and reads it straight back to verify the saved JSON reloads
+    # into an identical backtest, so any sharing has a run verifying whichever
+    # write landed last. Sequential sweeps are unaffected; they just no longer
+    # reuse one file.
     def _scratch_strategy_path(self, ordinal: int) -> str:
         experiments_dir = OutputConfigFile(self._base_config).config().experiments_dir
-        return os.path.join(experiments_dir, "_sweep_scratch", f"best_strategy_{ordinal}.json")
+        owner = os.getpid() if self._process_id is None else self._process_id
+        return ScratchStrategyPath(experiments_dir, owner, ordinal).value()
 
 
 # ── Console progress ─────────────────────────────────────────────────────
@@ -309,13 +371,20 @@ async def _main(argv: list[str]) -> None:
     args = parser.parse_args(argv)
 
     sweep_config = SweepConfigFile(ConfigFile(args.sweep_config).raw())
-    base_config  = ConfigFile(sweep_config.base_config_path()).raw()
+    # `fixed:` is folded on before any axis, and the result is what BOTH the
+    # plan and the adapter are built from — pinning data.exchange has to reach
+    # ConfiguredExchange too, or a sweep trains Binance configs against a
+    # Coinbase adapter.
+    fixed        = sweep_config.fixed()
+    base_config  = FixedOverrides(ConfigFile(sweep_config.base_config_path()).raw(), fixed).applied()
     plan         = SweepPlan(base_config, sweep_config.axes(), sweep_config.seeds())
     plan.ensure_scratch_directory()
     points       = plan.points()
 
     print(f"Sweeping {len(points)} points across {len(sweep_config.axes())} axes, "
           f"{len(sweep_config.seeds())} seeds each, {args.workers} at a time")
+    if fixed:
+        print("Fixed for every point: " + ", ".join(f"{path}={value}" for path, value in fixed))
 
     if args.workers <= 1:
         async with ConfiguredExchange(base_config).adapter() as adapter:

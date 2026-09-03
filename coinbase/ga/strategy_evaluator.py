@@ -11,6 +11,7 @@ from coinbase.trading_strategy import (
     BacktestResult,
     Decision,
     Direction,
+    MarketRows,
     Position,
     Trade,
 )
@@ -339,6 +340,12 @@ class StrategyEvaluator:
         self._config = config
         self._keys   = keys
 
+    # One conversion of the window shared by every genome scored against it.
+    # Backtest is rebuilt per genome, so this cannot live there — see MarketRows.
+    @functools.cached_property
+    def _rows(self) -> MarketRows:
+        return MarketRows(self._frame)
+
     # Selection score, not a reported metric: annualized_yield() below still
     # reports the realized figure, so index.csv stays comparable across every
     # run ever recorded even as what the GA optimizes changes.
@@ -362,7 +369,7 @@ class StrategyEvaluator:
     def result(self, genome: Genome) -> BacktestResult:
         strategy = GaStrategy(genome, self._config, self._keys)
         return Backtest(
-            self._frame, strategy, self._config.starting_balance, self._config.unwind_at_entry_price,
+            self._rows, strategy, self._config.starting_balance, self._config.unwind_at_entry_price,
         ).run()
 
     def annualized_yield(self, result: BacktestResult) -> float:
