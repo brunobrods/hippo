@@ -56,10 +56,7 @@ from coinbase.ga.paper_metrics import (
     StatusPayload,
 )
 from coinbase.ga.paper_trading import (
-    BasisPointFee,
-    FeeSchedule,
     InitialPaperState,
-    NoFees,
     PaperState,
     PaperStateFile,
     PaperTick,
@@ -75,7 +72,15 @@ from coinbase.ga.strategy_evaluator import (
 from coinbase.ga.strategy_output import DryRunLog, ParentDirectory, StrategyJsonFile, UtcNow
 from coinbase.market_scanner import GRANULARITY_SECONDS
 from coinbase.strategy import ClosedMarketRow, LiveMarketRow, RetriedMarketRow
-from coinbase.trading_strategy import Direction, IsolatedMargin, Position
+from coinbase.trading_strategy import (
+    BorrowRate,
+    ConfiguredBorrowRate,
+    ConfiguredFees,
+    Direction,
+    FeeSchedule,
+    IsolatedMargin,
+    Position,
+)
 from exchange.pool import ExchangeLane, ExchangePool
 
 logger = logging.getLogger(__name__)
@@ -105,6 +110,7 @@ class EngineConfig:
     price_refresh_seconds:   int
     max_concurrent_requests: int
     fee_bps:                 float
+    borrow_bps_per_hour:     float
     journal_filepath:        str
     host:                    str
     port:                    int
@@ -130,6 +136,7 @@ class PaperEngineConfigFile:
             price_refresh_seconds   = int(engine.get("price_refresh_seconds", 45)),
             max_concurrent_requests = int(engine.get("max_concurrent_requests", 8)),
             fee_bps                 = float(engine.get("fee_bps", 0.0)),
+            borrow_bps_per_hour     = float(engine.get("borrow_bps_per_hour", 0.0)),
             journal_filepath        = os.path.join(log_dir, "journal.tsv"),
             host                    = dashboard.get("host", "127.0.0.1"),
             port                    = int(dashboard.get("port", 8787)),
@@ -272,6 +279,7 @@ class PaperAlgo:
         strategy: GaStrategy,
         book: PaperBook,
         fees: FeeSchedule,
+        borrow: BorrowRate,
         curve: EquityCurve,
         log: DryRunLog,
     ) -> None:
@@ -280,12 +288,14 @@ class PaperAlgo:
         self._strategy = strategy
         self._book     = book
         self._fees     = fees
+        self._borrow   = borrow
         self._curve    = curve
         self._log      = log
         self._outcome: Optional[TickOutcome] = None
         self._last_tick_at: Optional[str]    = None
         self._mark_price: float              = 0.0
         self._fee_paid: float                = 0.0
+        self._interest_paid: float           = 0.0
 
     def config(self) -> AlgoConfig:
         return self._config
@@ -293,12 +303,13 @@ class PaperAlgo:
     async def tick(self) -> None:
         outcome = await PaperTick(
             self._rows, self._strategy, self._book,
-            self._config.starting_balance, self._fees,
+            self._config.starting_balance, self._fees, self._borrow,
         ).run()
         self._outcome      = outcome
         self._last_tick_at = UtcNow().iso()
         if outcome.acted:
-            self._fee_paid += outcome.fee
+            self._fee_paid      += outcome.fee
+            self._interest_paid += outcome.interest
             self._mark_price = outcome.row["close"]
             self._log.append(
                 self._last_tick_at, outcome.decision, outcome.balance, outcome.equity,
@@ -337,6 +348,7 @@ class PaperAlgo:
             macd              = self._row_value("macd"),
             signal_score      = self._signal_score(),
             fee_paid          = self._fee_paid,
+            interest_paid     = self._interest_paid,
         )
 
     def _last_action(self) -> str:
@@ -437,8 +449,8 @@ class IsolatedAlgo:
 class PaperJournal:
     _COLUMNS = (
         "timestamp", "algo", "exchange", "pair", "candle_start", "action",
-        "price", "fee", "balance", "equity", "position_side", "position_size",
-        "entry_price", "unrealized", "realized", "trades", "error",
+        "price", "fee", "interest", "balance", "equity", "position_side",
+        "position_size", "entry_price", "unrealized", "realized", "trades", "error",
     )
 
     def __init__(self, filepath: str) -> None:
@@ -446,8 +458,10 @@ class PaperJournal:
 
     def append(self, timestamp: str, status: AlgoStatus) -> None:
         ParentDirectory(self._filepath).ensure()
-        # Header once, on creation — 17 unlabelled columns are unreadable, and
-        # appending to an existing file must never insert one mid-stream.
+        # Header once, on creation — 18 unlabelled columns are unreadable, and
+        # appending to an existing file must never insert one mid-stream. A
+        # journal started before `interest` existed keeps its old header and
+        # will be one column short of its later rows; delete it to restart.
         if not os.path.exists(self._filepath):
             with open(self._filepath, "w", encoding="utf-8") as handle:
                 handle.write("\t".join(self._COLUMNS) + "\n")
@@ -456,6 +470,7 @@ class PaperJournal:
             timestamp, status.name, status.exchange, status.pair,
             str(status.last_candle_start), status.last_action,
             f"{status.mark_price:.8f}", f"{status.fee_paid:.8f}",
+            f"{status.interest_paid:.8f}",
             f"{status.balance:.6f}", f"{status.equity:.6f}",
             position.direction if position else "-",
             f"{position.size:.8f}" if position else "0",
@@ -713,15 +728,11 @@ class PaperEngine:
                 genome.filled(), trained.config(), keys + (POSITION_PNL_KEY,),
             ),
             book     = self.books[entry.name],
-            fees     = self._fees(),
+            fees     = ConfiguredFees(self._config.fee_bps).schedule(),
+            borrow   = ConfiguredBorrowRate(self._config.borrow_bps_per_hour).rate(),
             curve    = self.curves[entry.name],
             log      = DryRunLog(entry.log_filepath),
         )
-
-    def _fees(self) -> FeeSchedule:
-        if self._config.fee_bps <= 0.0:
-            return NoFees()
-        return BasisPointFee(self._config.fee_bps)
 
 
 # ── Entry point ────────────────────────────────────────────────────────

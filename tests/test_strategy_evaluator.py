@@ -278,22 +278,22 @@ def test_ga_strategy_position_pnl_reads_a_winning_short_as_positive():
 # ── AnnualizedYield ──────────────────────────────────────────────────
 
 def test_annualized_yield_compounds_a_short_window_up_to_a_year():
-    value = AnnualizedYield(gross_profit=100.0, starting_balance=1000.0, duration_seconds=30 * 86400).value()
+    value = AnnualizedYield(profit=100.0, starting_balance=1000.0, duration_seconds=30 * 86400).value()
     assert value == pytest.approx((1.10) ** (SECONDS_PER_YEAR / (30 * 86400)) - 1.0)
 
 
 def test_annualized_yield_matches_simple_return_over_exactly_one_year():
-    value = AnnualizedYield(gross_profit=100.0, starting_balance=1000.0, duration_seconds=SECONDS_PER_YEAR).value()
+    value = AnnualizedYield(profit=100.0, starting_balance=1000.0, duration_seconds=SECONDS_PER_YEAR).value()
     assert value == pytest.approx(0.10)
 
 
 def test_annualized_yield_handles_losses():
-    value = AnnualizedYield(gross_profit=-50.0, starting_balance=1000.0, duration_seconds=10 * 86400).value()
+    value = AnnualizedYield(profit=-50.0, starting_balance=1000.0, duration_seconds=10 * 86400).value()
     assert value < 0.0
 
 
 def test_annualized_yield_falls_back_to_simple_return_when_duration_is_zero():
-    value = AnnualizedYield(gross_profit=100.0, starting_balance=1000.0, duration_seconds=0.0).value()
+    value = AnnualizedYield(profit=100.0, starting_balance=1000.0, duration_seconds=0.0).value()
     assert value == pytest.approx(0.10)
 
 
@@ -344,6 +344,71 @@ def test_one_lucky_trade_earns_no_credit():
     assert len(result.trades()) == 1
     assert result.gross_profit() > 0.0            # it made money
     assert evaluator.fitness(genome) == pytest.approx(0.0)   # and is credited none of it
+
+
+# ── Costs ────────────────────────────────────────────────────────────
+
+def test_strategy_evaluator_scores_on_net_profit_when_a_fee_is_configured():
+    frame     = _frame_with_timestamps([0, 864000, 1728000, 2592000])
+    evaluator = StrategyEvaluator(frame, _config(fee_bps=10.0), _KEYS)
+    result    = evaluator.result(_all_weight_on_sma_short())
+
+    assert result.gross_profit() == pytest.approx(20.0)   # unchanged by costs
+    assert result.fees_paid()    == pytest.approx(0.22)   # 0.10 in @100, 0.12 out @120
+    assert result.net_profit()   == pytest.approx(19.78)
+    # The reported yield compounds the net figure, not the gross one.
+    assert evaluator.annualized_yield(result) == pytest.approx(
+        (1.0 + 19.78 / 1000.0) ** (SECONDS_PER_YEAR / 2592000) - 1.0
+    )
+
+
+def _frame_that_shorts_for_two_hours() -> pd.DataFrame:
+    # Timestamps start at 3600, not 0: an entry time of 0 reads as "unknown"
+    # and would accrue nothing (see BorrowInterest).
+    return pd.DataFrame({
+        "timestamp":      [3600, 7200, 10800, 14400],
+        "close":          [100.0, 100.0, 90.0, 90.0],
+        "norm_sma_short": [0.1, 0.1, 0.5, 0.5],   # short, hold, cover, flat
+        "norm_sma_long":  [0.0, 0.0, 0.0, 0.0],
+        "norm_sma_extra": [0.0, 0.0, 0.0, 0.0],
+        "norm_rsi":       [0.0, 0.0, 0.0, 0.0],
+        "norm_macd":      [0.0, 0.0, 0.0, 0.0],
+    })
+
+
+def test_strategy_evaluator_charges_a_short_the_interest_it_accrued():
+    evaluator = StrategyEvaluator(
+        _frame_that_shorts_for_two_hours(),
+        _shorting_config(borrow_bps_per_hour=10.0),
+        _KEYS,
+    )
+    result = evaluator.result(_all_weight_on_sma_short())
+
+    assert result.gross_profit()  == pytest.approx(10.0)  # 1 unit short 100 -> 90
+    assert result.interest_paid() == pytest.approx(0.2)   # 100 borrowed, 10 bps/h, 2h
+    assert result.fees_paid()     == 0.0                  # fee_bps left at its default
+    assert result.net_profit()    == pytest.approx(9.8)
+
+
+def test_annualized_yield_floors_a_loss_worse_than_the_whole_balance():
+    # Gross loss is bounded by the collateral, but fees and interest are charged
+    # on top of it, so a liquidated short can leave the balance negative. Below
+    # -100% the base of the power is negative and Python returns a COMPLEX
+    # number, which makes every fitness comparison in the GA raise TypeError.
+    value = AnnualizedYield(
+        profit=-1500.0, starting_balance=1000.0, duration_seconds=30 * 86400,
+    ).value()
+    assert isinstance(value, float)
+    assert value == pytest.approx(-1.0)
+
+
+def test_validated_strategy_config_rejects_a_negative_rate():
+    # ConfiguredFees reads any rate <= 0 as "no cost", so a sign typo would
+    # quietly score a run free of the costs it was configured to pay.
+    with pytest.raises(ValueError, match="fee_bps"):
+        ValidatedStrategyConfig(_config(fee_bps=-10.0)).config()
+    with pytest.raises(ValueError, match="borrow_bps_per_hour"):
+        ValidatedStrategyConfig(_config(borrow_bps_per_hour=-1.0)).config()
 
 
 def _frame_that_buys_and_never_sells() -> pd.DataFrame:

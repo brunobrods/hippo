@@ -134,7 +134,8 @@ _PAGE = """<!doctype html>
       <th>Mark</th><th>Position</th><th>Entry</th><th>Liq</th>
       <th>Unreal</th><th>Unreal %</th>
       <th>Balance</th><th>Equity</th><th>Realized</th>
-      <th>Fees</th><th>Trades</th><th>Win %</th><th>MaxDD</th><th>Return</th><th>Ann.</th>
+      <th>Fees</th><th>Interest</th>
+      <th>Trades</th><th>Win %</th><th>MaxDD</th><th>Return</th><th>Ann.</th>
       <th>RSI</th><th>MACD</th><th>Score</th>
     </tr></thead>
     <tbody id="rows"></tbody>
@@ -201,6 +202,7 @@ function rows(algos) {
       <td>${n(a.equity)}</td>
       <td class="${cls(a.realized_pnl)}">${n(a.realized_pnl)}</td>
       <td>${n(a.fee_paid)}</td>
+      <td>${n(a.interest_paid)}</td>
       <td>${a.trades}</td><td>${pct(a.win_rate)}</td>
       <td>${pct(a.max_drawdown)}</td>
       <td class="${cls(a.total_return)}">${pct(a.total_return)}</td>
@@ -208,7 +210,7 @@ function rows(algos) {
       <td>${n(a.rsi, 1)}</td><td>${n(a.macd, 4)}</td><td>${n(a.signal_score, 3)}</td>
     </tr>`);
     if (a.error) {
-      out.push(`<tr class="err-row"><td colspan="24">${esc(a.name)}: ${esc(a.error)}</td></tr>`);
+      out.push(`<tr class="err-row"><td colspan="25">${esc(a.name)}: ${esc(a.error)}</td></tr>`);
     }
   }
   document.getElementById("rows").innerHTML = out.join("");
