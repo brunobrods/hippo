@@ -11,10 +11,12 @@ from coinbase.ga.strategy_evaluator import (
     StrategyConfigFile,
     StrategyEvaluator,
     ValidatedStrategyConfig,
+    StudentT,
+    TradeSample,
     ValidatedWeightKeys,
     WeightKeysConfig,
 )
-from coinbase.trading_strategy import Action, Direction, MarketRows, Position
+from coinbase.trading_strategy import Action, Direction, MarketRows, Position, Trade
 
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
 
@@ -35,18 +37,11 @@ def _config(**overrides) -> StrategyConfig:
     return StrategyConfig(**defaults)
 
 
-# `score` is the signal_score the row should produce, not a raw column value.
-# signal_score maps the weighted sum onto [0, 1] as (s + 1) / 2, and a norm_
-# column can never be negative — so a below-neutral score is reachable only
-# through a negative weight. The row spreads the score across one bullish
-# column and its bearish mirror, which _all_weight_on_sma_short weights +1 and
-# -1: score = (norm_sma_short - norm_sma_long + 1) / 2.
-def _row(close: float, score: float) -> dict[str, float]:
-    signal = 2.0 * score - 1.0
+def _row(close: float, sma_short: float) -> dict[str, float]:
     return {
         "close": close,
-        "norm_sma_short": max(0.0, signal),
-        "norm_sma_long": max(0.0, -signal),
+        "norm_sma_short": sma_short,
+        "norm_sma_long": 0.0,
         "norm_sma_extra": 0.0,
         "norm_rsi": 0.0,
         "norm_macd": 0.0,
@@ -54,7 +49,7 @@ def _row(close: float, score: float) -> dict[str, float]:
 
 
 def _all_weight_on_sma_short() -> Genome:
-    return Genome({"sma_short": 1.0, "sma_long": -1.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    return Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
 
 
 # ── StrategyConfigFile ───────────────────────────────────────────────
@@ -152,57 +147,34 @@ def test_validated_weight_keys_rejects_a_key_missing_from_normalized_columns():
 
 # ── GaStrategy ────────────────────────────────────────────────────────
 
-def test_signal_score_is_neutral_at_a_half_and_spans_zero_to_one():
-    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
-    # Bullish and bearish columns cancelling is the neutral point.
-    assert strategy.signal_score(_row(100.0, 0.5), None) == pytest.approx(0.5)
-    # Fully bullish and fully bearish are the ends of the range.
-    assert strategy.signal_score(_row(100.0, 1.0), None) == pytest.approx(1.0)
-    assert strategy.signal_score(_row(100.0, 0.0), None) == pytest.approx(0.0)
-
-
-def test_a_negative_weight_reads_its_indicator_as_bearish():
-    # The point of signed weights: the same rising column that pushes the score
-    # up under a positive weight pushes it down under a negative one.
-    row     = {"close": 100.0, "norm_sma_short": 1.0, "norm_sma_long": 0.0,
-               "norm_sma_extra": 0.0, "norm_rsi": 0.0, "norm_macd": 0.0}
-    bullish = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
-    bearish = Genome({"sma_short": -1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
-
-    assert GaStrategy(bullish, _config(), _KEYS).signal_score(row, None) == pytest.approx(1.0)
-    assert GaStrategy(bearish, _config(), _KEYS).signal_score(row, None) == pytest.approx(0.0)
-    assert GaStrategy(bullish, _config(), _KEYS).decide(row, None, 1000.0).action is Action.BUY
-    assert GaStrategy(bearish, _shorting_config(), _KEYS).decide(row, None, 1000.0).action is Action.SHORT
-
-
 def test_ga_strategy_buys_when_flat_and_score_above_buy_threshold():
     strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
-    decision = strategy.decide(_row(close=100.0, score=0.8), position=None, balance=1000.0)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.8), position=None, balance=1000.0)
     assert decision.action is Action.BUY
     assert decision.size == pytest.approx(1.0)  # 10% of 1000 / 100
 
 
 def test_ga_strategy_holds_when_flat_and_score_between_thresholds():
     strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
-    decision = strategy.decide(_row(close=100.0, score=0.5), position=None, balance=1000.0)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.5), position=None, balance=1000.0)
     assert decision.action is Action.HOLD
 
 
 def test_ga_strategy_never_re_buys_while_already_positioned():
     strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
-    decision = strategy.decide(_row(close=100.0, score=0.9), position=Position(90.0, 1.0), balance=1000.0)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.9), position=Position(90.0, 1.0), balance=1000.0)
     assert decision.action is Action.HOLD
 
 
 def test_ga_strategy_sells_when_positioned_and_score_below_sell_threshold():
     strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
-    decision = strategy.decide(_row(close=100.0, score=0.2), position=Position(90.0, 1.0), balance=1000.0)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.2), position=Position(90.0, 1.0), balance=1000.0)
     assert decision.action is Action.SELL
 
 
 def test_ga_strategy_holds_position_when_score_between_thresholds():
     strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
-    decision = strategy.decide(_row(close=100.0, score=0.5), position=Position(90.0, 1.0), balance=1000.0)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.5), position=Position(90.0, 1.0), balance=1000.0)
     assert decision.action is Action.HOLD
 
 
@@ -215,7 +187,7 @@ def _all_weight_on_position_pnl() -> Genome:
 def test_ga_strategy_position_pnl_is_zero_while_flat():
     keys     = _KEYS + (POSITION_PNL_KEY,)
     strategy = GaStrategy(_all_weight_on_position_pnl(), _config(), keys)
-    decision = strategy.decide(_row(close=100.0, score=0.0), position=None, balance=1000.0)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.0), position=None, balance=1000.0)
     assert decision.action is Action.HOLD  # score is 0.0, not above buy_threshold
 
 
@@ -223,7 +195,7 @@ def test_ga_strategy_position_pnl_pulls_score_down_on_a_loss_and_triggers_sell()
     keys     = _KEYS + (POSITION_PNL_KEY,)
     strategy = GaStrategy(_all_weight_on_position_pnl(), _config(), keys)
     position = Position(entry_price=100.0, size=1.0)
-    decision = strategy.decide(_row(close=70.0, score=0.0), position=position, balance=1000.0)
+    decision = strategy.decide(_row(close=70.0, sma_short=0.0), position=position, balance=1000.0)
     # unrealized_return = (70-100)/100 = -0.3, weight 1.0 -> score -0.3 < sell_threshold 0.4
     assert decision.action is Action.SELL
 
@@ -232,7 +204,7 @@ def test_ga_strategy_position_pnl_holds_a_winning_position():
     keys     = _KEYS + (POSITION_PNL_KEY,)
     strategy = GaStrategy(_all_weight_on_position_pnl(), _config(), keys)
     position = Position(entry_price=100.0, size=1.0)
-    decision = strategy.decide(_row(close=150.0, score=0.0), position=position, balance=1000.0)
+    decision = strategy.decide(_row(close=150.0, sma_short=0.0), position=position, balance=1000.0)
     # unrealized_return = (150-100)/100 = 0.5, not below sell_threshold 0.4 -> stays in
     assert decision.action is Action.HOLD
 
@@ -241,7 +213,7 @@ def test_ga_strategy_ignores_position_pnl_when_key_not_in_use():
     # confirms no behavior change for callers that don't opt into POSITION_PNL_KEY
     strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
     position = Position(entry_price=100.0, size=1.0)
-    decision = strategy.decide(_row(close=1.0, score=0.5), position=position, balance=1000.0)
+    decision = strategy.decide(_row(close=1.0, sma_short=0.5), position=position, balance=1000.0)
     assert decision.action is Action.HOLD  # a huge unrealized loss on close=1.0 has zero effect
 
 
@@ -253,7 +225,7 @@ def _shorting_config(**overrides) -> StrategyConfig:
 
 def test_ga_strategy_opens_a_short_when_score_falls_below_short_entry():
     strategy = GaStrategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
-    decision = strategy.decide(_row(close=100.0, score=0.1), position=None, balance=1000.0)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.1), position=None, balance=1000.0)
     assert decision.action is Action.SHORT
     assert decision.size == pytest.approx(1.0)  # 10% of 1000 / 100, same sizing as a long
 
@@ -261,27 +233,27 @@ def test_ga_strategy_opens_a_short_when_score_falls_below_short_entry():
 def test_ga_strategy_stays_flat_in_the_band_between_short_entry_and_buy():
     strategy = GaStrategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
     for score in (0.3, 0.5):
-        decision = strategy.decide(_row(close=100.0, score=score), position=None, balance=1000.0)
+        decision = strategy.decide(_row(close=100.0, sma_short=score), position=None, balance=1000.0)
         assert decision.action is Action.HOLD
 
 
 def test_ga_strategy_never_shorts_when_allow_short_is_off():
     strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)  # allow_short defaults False
-    decision = strategy.decide(_row(close=100.0, score=0.0), position=None, balance=1000.0)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.0), position=None, balance=1000.0)
     assert decision.action is Action.HOLD
 
 
 def test_ga_strategy_covers_a_short_when_score_rises_above_short_exit():
     strategy = GaStrategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
     position = Position(entry_price=100.0, size=1.0, direction=Direction.SHORT)
-    decision = strategy.decide(_row(close=90.0, score=0.5), position=position, balance=1000.0)
+    decision = strategy.decide(_row(close=90.0, sma_short=0.5), position=position, balance=1000.0)
     assert decision.action is Action.COVER
 
 
 def test_ga_strategy_holds_a_short_while_score_stays_below_short_exit():
     strategy = GaStrategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
     position = Position(entry_price=100.0, size=1.0, direction=Direction.SHORT)
-    decision = strategy.decide(_row(close=90.0, score=0.2), position=position, balance=1000.0)
+    decision = strategy.decide(_row(close=90.0, sma_short=0.2), position=position, balance=1000.0)
     assert decision.action is Action.HOLD
 
 
@@ -290,7 +262,7 @@ def test_ga_strategy_closes_a_long_rather_than_flipping_straight_to_short():
     # leaving the short to a later candle from flat.
     strategy = GaStrategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
     position = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
-    decision = strategy.decide(_row(close=100.0, score=0.0), position=position, balance=1000.0)
+    decision = strategy.decide(_row(close=100.0, sma_short=0.0), position=position, balance=1000.0)
     assert decision.action is Action.SELL
 
 
@@ -299,7 +271,7 @@ def test_ga_strategy_position_pnl_reads_a_winning_short_as_positive():
     strategy = GaStrategy(_all_weight_on_position_pnl(), _shorting_config(), keys)
     position = Position(entry_price=100.0, size=1.0, direction=Direction.SHORT)
     # price fell 50% -> the short is up 0.5, which is above short_exit 0.40 -> take profit
-    decision = strategy.decide(_row(close=50.0, score=0.0), position=position, balance=1000.0)
+    decision = strategy.decide(_row(close=50.0, sma_short=0.0), position=position, balance=1000.0)
     assert decision.action is Action.COVER
 
 
@@ -331,38 +303,61 @@ def _frame_with_timestamps(timestamps: list[int]) -> pd.DataFrame:
     return pd.DataFrame({
         "timestamp":      timestamps,
         "close":          [100.0, 100.0, 120.0, 120.0],
-        # Bullish column and its bearish mirror, weighted +1/-1 — see _row.
-        # Scores: 0.0 (flat), 1.0 (buy), 1.0 (hold), 0.0 (sell at 120).
         "norm_sma_short": [0.0, 1.0, 1.0, 0.0],
-        "norm_sma_long":  [1.0, 0.0, 0.0, 1.0],
+        "norm_sma_long":  [0.0, 0.0, 0.0, 0.0],
         "norm_sma_extra": [0.0, 0.0, 0.0, 0.0],
         "norm_rsi":       [0.0, 0.0, 0.0, 0.0],
         "norm_macd":      [0.0, 0.0, 0.0, 0.0],
     })
 
 
-def test_strategy_evaluator_fitness_is_the_annualized_yield_of_the_backtest():
+# fitness is deliberately NOT the annualized yield any more: the reported
+# metric stays the realized figure so index.csv remains comparable, while the
+# selection score prices in how uncertain the trade sample is.
+def test_reported_yield_is_still_the_realized_figure():
     frame     = _frame_with_timestamps([0, 864000, 1728000, 2592000])  # 30-day window
-    genome    = _all_weight_on_sma_short()
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
     evaluator = StrategyEvaluator(frame, _config(), _KEYS)
     result    = evaluator.result(genome)
 
     assert result.gross_profit() == pytest.approx(20.0)  # 10% of 1000 @100 -> 1 unit, +20 on the move
-    assert evaluator.fitness(genome) == pytest.approx(evaluator.annualized_yield(result))
-    assert evaluator.fitness(genome) == pytest.approx((1.02) ** (SECONDS_PER_YEAR / 2592000) - 1.0)
+    assert evaluator.annualized_yield(result) == pytest.approx((1.02) ** (SECONDS_PER_YEAR / 2592000) - 1.0)
 
+
+def test_zero_confidence_restores_the_historical_fitness():
+    frame     = _frame_with_timestamps([0, 864000, 1728000, 2592000])
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    evaluator = StrategyEvaluator(frame, _config(fitness_confidence=0.0), _KEYS)
+    result    = evaluator.result(genome)
+
+    assert evaluator.fitness(genome) == pytest.approx(evaluator.annualized_yield(result))
+
+
+# The exploit this exists to close: a single lucky trade was annualized into a
+# yearly rate, so "trade once and hope" outranked trading consistently.
+def test_one_lucky_trade_earns_no_credit():
+    frame     = _frame_with_timestamps([0, 864000, 1728000, 2592000])
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    evaluator = StrategyEvaluator(frame, _config(), _KEYS)
+    result    = evaluator.result(genome)
+
+    assert len(result.trades()) == 1
+    assert result.gross_profit() > 0.0            # it made money
+    assert evaluator.fitness(genome) == pytest.approx(0.0)   # and is credited none of it
+
+
+# ── Costs ────────────────────────────────────────────────────────────
 
 def test_strategy_evaluator_scores_on_net_profit_when_a_fee_is_configured():
     frame     = _frame_with_timestamps([0, 864000, 1728000, 2592000])
-    genome    = _all_weight_on_sma_short()
     evaluator = StrategyEvaluator(frame, _config(fee_bps=10.0), _KEYS)
-    result    = evaluator.result(genome)
+    result    = evaluator.result(_all_weight_on_sma_short())
 
     assert result.gross_profit() == pytest.approx(20.0)   # unchanged by costs
     assert result.fees_paid()    == pytest.approx(0.22)   # 0.10 in @100, 0.12 out @120
     assert result.net_profit()   == pytest.approx(19.78)
-    # The GA now compounds the net return, not the gross one.
-    assert evaluator.fitness(genome) == pytest.approx(
+    # The reported yield compounds the net figure, not the gross one.
+    assert evaluator.annualized_yield(result) == pytest.approx(
         (1.0 + 19.78 / 1000.0) ** (SECONDS_PER_YEAR / 2592000) - 1.0
     )
 
@@ -373,9 +368,8 @@ def _frame_that_shorts_for_two_hours() -> pd.DataFrame:
     return pd.DataFrame({
         "timestamp":      [3600, 7200, 10800, 14400],
         "close":          [100.0, 100.0, 90.0, 90.0],
-        # Scores 0.0, 0.0, 1.0, 0.5 — short, hold, cover, flat.
-        "norm_sma_short": [0.0, 0.0, 1.0, 0.5],
-        "norm_sma_long":  [1.0, 1.0, 0.0, 0.5],
+        "norm_sma_short": [0.1, 0.1, 0.5, 0.5],   # short, hold, cover, flat
+        "norm_sma_long":  [0.0, 0.0, 0.0, 0.0],
         "norm_sma_extra": [0.0, 0.0, 0.0, 0.0],
         "norm_rsi":       [0.0, 0.0, 0.0, 0.0],
         "norm_macd":      [0.0, 0.0, 0.0, 0.0],
@@ -383,13 +377,12 @@ def _frame_that_shorts_for_two_hours() -> pd.DataFrame:
 
 
 def test_strategy_evaluator_charges_a_short_the_interest_it_accrued():
-    genome    = _all_weight_on_sma_short()
     evaluator = StrategyEvaluator(
         _frame_that_shorts_for_two_hours(),
         _shorting_config(borrow_bps_per_hour=10.0),
         _KEYS,
     )
-    result = evaluator.result(genome)
+    result = evaluator.result(_all_weight_on_sma_short())
 
     assert result.gross_profit()  == pytest.approx(10.0)  # 1 unit short 100 -> 90
     assert result.interest_paid() == pytest.approx(0.2)   # 100 borrowed, 10 bps/h, 2h
@@ -431,14 +424,14 @@ def _frame_that_buys_and_never_sells() -> pd.DataFrame:
 
 
 def test_strategy_evaluator_result_unwinds_a_still_open_position_at_entry_price_by_default():
-    genome    = _all_weight_on_sma_short()
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
     evaluator = StrategyEvaluator(_frame_that_buys_and_never_sells(), _config(), _KEYS)  # default: unwind_at_entry_price=True
     result    = evaluator.result(genome)
     assert result.gross_profit() == pytest.approx(0.0)  # still "in flight", not realized at the 150.0 close
 
 
 def test_strategy_evaluator_result_realizes_at_market_price_when_unwind_at_entry_price_is_false():
-    genome    = _all_weight_on_sma_short()
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
     evaluator = StrategyEvaluator(
         _frame_that_buys_and_never_sells(), _config(unwind_at_entry_price=False), _KEYS,
     )
@@ -447,13 +440,12 @@ def test_strategy_evaluator_result_realizes_at_market_price_when_unwind_at_entry
 
 
 def _frame_that_never_trades() -> pd.DataFrame:
-    # bullish and bearish columns cancel, so the score sits at neutral 0.5 on
-    # every row — inside the hold band, and no position is ever opened
+    # score sits in the hold band on every row, so no position is ever opened
     return pd.DataFrame({
         "timestamp":      [0, 864000],
         "close":          [100.0, 150.0],
         "norm_sma_short": [0.5, 0.5],
-        "norm_sma_long":  [0.5, 0.5],
+        "norm_sma_long":  [0.0, 0.0],
         "norm_sma_extra": [0.0, 0.0],
         "norm_rsi":       [0.0, 0.0],
         "norm_macd":      [0.0, 0.0],
@@ -461,7 +453,7 @@ def _frame_that_never_trades() -> pd.DataFrame:
 
 
 def test_fitness_ranks_a_no_trade_genome_below_any_losing_strategy():
-    genome    = _all_weight_on_sma_short()
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
     evaluator = StrategyEvaluator(_frame_that_never_trades(), _config(), _KEYS)
     result    = evaluator.result(genome)
 
@@ -472,13 +464,13 @@ def test_fitness_ranks_a_no_trade_genome_below_any_losing_strategy():
 
 def test_no_trade_run_still_reports_an_honest_zero_yield():
     # fitness is a selection score; the performance report must not inherit its penalty
-    genome    = _all_weight_on_sma_short()
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
     evaluator = StrategyEvaluator(_frame_that_never_trades(), _config(), _KEYS)
     assert evaluator.annualized_yield(evaluator.result(genome)) == pytest.approx(0.0)
 
 
 def test_fitness_still_equals_annualized_yield_when_the_genome_trades():
-    genome    = _all_weight_on_sma_short()
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
     evaluator = StrategyEvaluator(_frame_that_buys_and_never_sells(), _config(), _KEYS)
     result    = evaluator.result(genome)
     assert result.trades() != []
@@ -487,11 +479,178 @@ def test_fitness_still_equals_annualized_yield_when_the_genome_trades():
 
 def test_strategy_evaluator_duration_falls_back_to_zero_for_a_single_row_frame():
     frame     = _frame_with_timestamps([0, 864000, 1728000, 2592000]).iloc[:1]
-    genome    = _all_weight_on_sma_short()
+    genome    = Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
     evaluator = StrategyEvaluator(frame, _config(), _KEYS)
     result    = evaluator.result(genome)
     assert evaluator.annualized_yield(result) == pytest.approx(result.gross_profit() / _config().starting_balance)
 
+
+# ── Signed weights ───────────────────────────────────────────────────
+# The score must stay on the [0, ceiling] scale the thresholds are calibrated
+# against, or a genome would be penalised merely for using a negative weight.
+
+def _signed_row(**cols) -> dict:
+    base = {f"norm_{k}": 0.0 for k in _KEYS}
+    base.update({f"norm_{k}": v for k, v in cols.items()})
+    base["close"] = 100.0
+    return base
+
+
+def test_an_all_positive_genome_scores_exactly_as_before():
+    # The backward-compatibility guarantee: no offset, no change.
+    genome = Genome({"sma_short": 0.5, "sma_long": 0.5, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    score  = GaStrategy(genome, _config(), _KEYS).signal_score(_signed_row(sma_short=1.0, sma_long=0.4), None)
+    assert score == pytest.approx(0.5 * 1.0 + 0.5 * 0.4)
+
+
+def test_a_negative_weight_inverts_a_columns_contribution():
+    genome   = Genome({"sma_short": 0.5, "sma_long": -0.5, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    strategy = GaStrategy(genome, _config(), _KEYS)
+    # sma_long high should now push the score DOWN relative to sma_long low.
+    high = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=1.0), None)
+    low  = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=0.0), None)
+    assert high < low
+
+
+# Without the offset a signed genome's whole reachable range slides below the
+# buy threshold, and the search gets pushed back to the non-negative corner
+# this change exists to escape.
+def test_the_score_floor_stays_at_zero_for_a_signed_genome():
+    genome   = Genome({"sma_short": 0.5, "sma_long": -0.5, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    strategy = GaStrategy(genome, _config(), _KEYS)
+    worst    = strategy.signal_score(_signed_row(sma_short=0.0, sma_long=1.0), None)
+    best     = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=0.0), None)
+    assert worst == pytest.approx(0.0)
+    assert best == pytest.approx(1.0)
+
+
+def test_a_signed_genome_can_still_reach_the_buy_threshold():
+    genome   = Genome({"sma_short": 0.7, "sma_long": -0.3, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    strategy = GaStrategy(genome, _config(buy_threshold=0.6), _KEYS)
+    best     = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=0.0), None)
+    assert best > 0.6
+    assert strategy.decide(_signed_row(sma_short=1.0, sma_long=0.0), None, 1000.0).action is Action.BUY
+
+
+def test_the_ceiling_counts_absolute_weight_mass():
+    genome = Genome({"sma_short": 0.7, "sma_long": -0.3, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    assert GaStrategy(genome, _config(), _KEYS).flat_score_ceiling() == pytest.approx(1.0)
+
+
+def test_the_ceiling_is_unchanged_for_an_all_positive_genome():
+    genome = Genome({"sma_short": 0.4, "sma_long": 0.2, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+    assert GaStrategy(genome, _config(), _KEYS).flat_score_ceiling() == pytest.approx(0.6)
+
+
+# ── StudentT ─────────────────────────────────────────────────────────
+
+# A fixed z-multiplier refuses to punish a two-trade sample; t does.
+def test_a_tiny_sample_gets_a_far_larger_multiplier():
+    assert StudentT(1).multiplier() > 6.0
+    assert StudentT(30).multiplier() < 1.75
+
+
+def test_the_multiplier_shrinks_monotonically_toward_the_normal():
+    values = [StudentT(df).multiplier() for df in (1, 2, 5, 10, 30, 120, 5000)]
+    assert values == sorted(values, reverse=True)
+    assert values[-1] == pytest.approx(1.645)
+
+
+def test_an_untabulated_size_takes_the_conservative_neighbour():
+    # 17 df sits between the 15 and 20 rows; err toward punishing uncertainty.
+    assert StudentT(17).multiplier() == StudentT(20).multiplier()
+
+
+def test_degenerate_degrees_of_freedom_are_treated_as_one():
+    assert StudentT(0).multiplier() == StudentT(1).multiplier()
+
+
+# ── TradeSample ──────────────────────────────────────────────────────
+
+def _trades(*profits: float) -> list:
+    # entry 100, size 1 -> exit price carries the profit
+    return [Trade(100.0, 100.0 + p, 1.0) for p in profits]
+
+
+def test_returns_are_profits_as_a_fraction_of_the_starting_balance():
+    sample = TradeSample(_trades(10.0, -20.0), starting_balance=1000.0)
+    assert sample.returns == pytest.approx([0.01, -0.02])
+    assert sample.mean() == pytest.approx(-0.005)
+
+
+def test_the_standard_error_falls_as_the_sample_grows():
+    few  = TradeSample(_trades(10.0, 30.0), 1000.0).standard_error()
+    many = TradeSample(_trades(*([10.0, 30.0] * 10)), 1000.0).standard_error()
+    assert many < few
+
+
+def test_a_single_trade_has_no_measurable_standard_error():
+    assert TradeSample(_trades(10.0), 1000.0).standard_error() == 0.0
+
+
+# The hole a bound on observed variance alone leaves: two trades that happen
+# to return the same amount have zero observed variance and would take zero
+# penalty, ranking level with a thirty-trade record.
+def test_identical_trades_still_carry_uncertainty():
+    twins = TradeSample(_trades(300.0, 300.0), 1000.0)
+    assert twins.standard_error() == 0.0
+    assert twins.effective_standard_error() > 0.0
+
+
+def test_the_uncertainty_floor_falls_as_the_sample_grows():
+    few  = TradeSample(_trades(*([20.0] * 4)), 1000.0)
+    many = TradeSample(_trades(*([20.0] * 36)), 1000.0)
+    assert many.effective_standard_error() < few.effective_standard_error()
+
+
+def test_a_genuinely_erratic_sample_keeps_its_observed_error():
+    erratic = TradeSample(_trades(200.0, -160.0, 180.0, -140.0), 1000.0)
+    assert erratic.effective_standard_error() == pytest.approx(erratic.standard_error())
+
+
+# A single win proves nothing on the upside; its loss is still real.
+def test_a_single_winning_trade_is_credited_nothing():
+    assert TradeSample(_trades(50.0), 1000.0).lower_bound(1.0) == pytest.approx(0.0)
+
+
+def test_a_single_losing_trade_still_counts_against_it():
+    assert TradeSample(_trades(-50.0), 1000.0).lower_bound(1.0) == pytest.approx(-0.05)
+
+
+def test_zero_confidence_is_just_the_realized_mean():
+    sample = TradeSample(_trades(10.0, 30.0), 1000.0)
+    assert sample.lower_bound(0.0) == pytest.approx(sample.mean())
+
+
+# The core of the fix: two lucky trades must not outrank many consistent ones.
+def test_a_two_trade_windfall_loses_to_a_long_consistent_record():
+    windfall   = TradeSample(_trades(300.0, 250.0), 1000.0)
+    consistent = TradeSample(_trades(*([12.0, 8.0] * 15)), 1000.0)
+    assert windfall.mean() > consistent.mean()                       # bigger per trade
+    assert windfall.pessimistic_return(1.0) < consistent.pessimistic_return(1.0)
+
+
+def test_an_erratic_record_loses_to_a_steady_one_of_the_same_mean():
+    steady  = TradeSample(_trades(*([20.0] * 12)), 1000.0)
+    erratic = TradeSample(_trades(*([200.0, -160.0] * 6)), 1000.0)
+    assert erratic.mean() == pytest.approx(steady.mean())
+    assert erratic.pessimistic_return(1.0) < steady.pessimistic_return(1.0)
+
+
+# Below -1.0 AnnualizedYield raises a negative base to a fractional power and
+# returns a complex number, which would poison every GA comparison.
+def test_the_pessimistic_return_is_floored_at_total_ruin():
+    ruinous = TradeSample(_trades(*([900.0, -900.0] * 4)), 1000.0)
+    assert ruinous.pessimistic_return(1.0) == pytest.approx(-1.0)
+
+
+# The penalty has to bite on small samples without gutting a genuinely long,
+# consistent record — 60 steady trades keep ~78% of their realized edge.
+def test_a_good_long_record_keeps_most_of_its_edge():
+    sample   = TradeSample(_trades(*([25.0, 15.0, 20.0] * 20)), 1000.0)
+    realized = sample.mean() * sample.count()
+    assert sample.pessimistic_return(1.0) > 0.7 * realized
+    assert sample.pessimistic_return(1.0) < realized
 
 def test_strategy_evaluator_converts_the_window_to_rows_once_for_every_genome(monkeypatch):
     # The GA scores population x generations genomes against ONE window, and

@@ -16,6 +16,14 @@ own exchange's dialect internally:
     account      {"currency", "available_balance": {"value", "currency"}, ...}
                  plus an optional "product_id" when the balance is scoped to a
                  single market, as isolated margin balances are.
+    product      {"product_id", "base_currency", "quote_currency", "status",
+                  "tradable", "can_long", "can_short", "quote_increment",
+                  "base_increment", "base_min_size", "min_market_funds",
+                  "volume_24h_quote", "price_change_24h_pct"}
+                 Increments stay strings — they are handed back to the venue,
+                 which rejects floats. The two derived statistics are floats:
+                 nothing sends them anywhere, and "volume_24h_quote" is always
+                 denominated in the QUOTE currency, so pairs are comparable.
 """
 
 from typing import Any, Protocol
@@ -52,7 +60,20 @@ class AccountSource(Protocol):
     async def get_accounts(self, limit: int = 50) -> list[dict]: ...
 
 
-class ExchangeAdapter(CandleSource, AccountSource, Protocol):
+# Split out rather than folded into ExchangeAdapter so a caller that only needs
+# the universe — the pair screener — can type against this alone, and its test
+# doubles need not grow candle and account methods they never use.
+class ProductCatalog(Protocol):
+    async def list_products(self) -> list[dict]: ...
+
+    # Maker and taker rates for THIS account, in basis points per side. Read
+    # from the venue rather than assumed: both exchanges discount by 30-day
+    # volume (and Binance again for paying fees in BNB), so a hardcoded base
+    # tier is wrong for anyone who has already traded.
+    async def fee_rates(self) -> tuple[float, float]: ...
+
+
+class ExchangeAdapter(CandleSource, AccountSource, ProductCatalog, Protocol):
     async def connect(self) -> None: ...
 
     async def close(self) -> None: ...

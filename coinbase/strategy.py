@@ -6,7 +6,12 @@ from typing import Optional
 import aiohttp
 import pandas as pd
 
-from coinbase.ga.market_data_processor import AccountBalance, HistoricalMarketData, IndicatorPeriods
+from coinbase.ga.market_data_processor import (
+    AccountBalance,
+    HistoricalMarketData,
+    IndicatorPeriods,
+    LiveBasket,
+)
 from coinbase.market_scanner import GRANULARITY_SECONDS
 from coinbase.trading_strategy import Decision, Ledger, Strategy
 from exchange.adapter import ExchangeAdapter, ExchangeError
@@ -31,6 +36,8 @@ class LiveMarketRow:
         normalized_columns: tuple[str, ...],
         lookback_candles: int = 200,
         limit: Optional[asyncio.Semaphore] = None,
+        basket: Optional[LiveBasket] = None,
+        index_period: int = 30,
     ) -> None:
         self._adapter            = adapter
         self._pair               = pair
@@ -39,6 +46,10 @@ class LiveMarketRow:
         self._normalized_columns = normalized_columns
         self._lookback_candles   = lookback_candles
         self._limit              = limit
+        # Shared, not built here: N rows each constructing their own would
+        # refetch the whole basket N times per tick.
+        self._basket             = basket
+        self._index_period       = index_period
 
     def pair(self) -> str:
         return self._pair
@@ -51,10 +62,14 @@ class LiveMarketRow:
         start = end - self._lookback_candles * GRANULARITY_SECONDS[self._granularity]
         # cache_dir=None: this window slides every call, so disk caching would
         # never hit and would just accumulate one throwaway file per tick.
+        # The basket memoizes per candle boundary, so every row in this tick
+        # shares one fetch of it.
+        index_returns = await self._basket.returns() if self._basket is not None else None
         return await HistoricalMarketData(
             self._adapter, self._pair, self._granularity, start, end,
             self._periods, self._normalized_columns, cache_dir=None,
             limit=self._limit,
+            index_returns=index_returns, index_period=self._index_period,
         ).dataframe()
 
     async def latest(self) -> dict[str, float]:

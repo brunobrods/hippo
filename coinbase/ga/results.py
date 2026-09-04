@@ -1,6 +1,8 @@
 import argparse
+import json
+import os
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -9,6 +11,9 @@ from coinbase.ga.experiment_history import ExperimentDirectory
 from coinbase.ga.strategy_output import OutputConfigFile
 
 DEFAULT_METRIC = "annualized_yield"
+
+# Groupable, but not present in index.csv — read back per run from config.json.
+_CONFIG_COLUMNS = ("weight_keys", "index_pairs", "negative_weights", "fitness_confidence")
 
 
 # ── Loading ──────────────────────────────────────────────────────────────
@@ -37,6 +42,53 @@ class RunLogFile:
                         "avg_fitness":  float(parts[2]),
                     })
         return pd.DataFrame(rows)
+
+
+# Columns the index cannot carry, recovered from each run's own config.json.
+#
+# index.csv has a fixed header and ExperimentIndex refuses to append rows built
+# from a different one, so adding a column for every config knob would break
+# every existing file. ResolvedConfigFile already saves the whole resolved
+# config per run, which makes it the right place to read a knob back from —
+# and it means comparing runs that differ in `weight_keys` (a feature ablation,
+# say) needs no schema change at all.
+class ExperimentConfigs:
+    def __init__(self, frame: pd.DataFrame, experiments_dir: str) -> None:
+        self._frame           = frame
+        self._experiments_dir = experiments_dir
+
+    def enriched(self) -> pd.DataFrame:
+        frame = self._frame.copy()
+        frame["weight_keys"]        = frame["run_id"].map(self._weight_keys)
+        frame["index_pairs"]        = frame["run_id"].map(self._index_pairs)
+        # The two knobs that change what the model can express and what the GA
+        # optimizes. Neither is an index column, and comparing runs across
+        # either without knowing which is which produces a meaningless average.
+        frame["negative_weights"]   = frame["run_id"].map(self._negative_weights)
+        frame["fitness_confidence"] = frame["run_id"].map(self._fitness_confidence)
+        return frame
+
+    def _negative_weights(self, run_id: str) -> bool:
+        return bool((self._raw(run_id).get("genetic_algorithm") or {}).get("allow_negative_weights", False))
+
+    def _fitness_confidence(self, run_id: str) -> float:
+        return float((self._raw(run_id).get("strategy") or {}).get("fitness_confidence", 0.0))
+
+    def _weight_keys(self, run_id: str) -> str:
+        raw = self._raw(run_id)
+        keys = ((raw.get("strategy") or {}).get("weight_keys")) or []
+        return ",".join(keys) if keys else "unknown"
+
+    def _index_pairs(self, run_id: str) -> int:
+        raw = self._raw(run_id)
+        return len(((raw.get("market_data") or {}).get("index_pairs")) or [])
+
+    def _raw(self, run_id: str) -> dict[str, Any]:
+        path = ExperimentDirectory(self._experiments_dir, run_id).config_path()
+        if not os.path.exists(path):
+            return {}
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
 
 
 # ── Views ────────────────────────────────────────────────────────────────
@@ -102,6 +154,13 @@ def parse_args(args_in: list[str]) -> argparse.Namespace:
     p.add_argument("--config", default="coinbase/ga/config.yaml", help="Path to config.yaml (for output paths)")
     p.add_argument("--metric", default=DEFAULT_METRIC, help=f"Performance column to rank/aggregate by (default: {DEFAULT_METRIC})")
     p.add_argument("--pair", default=None, help="Only include runs for this pair")
+    # Exact match, not "on or after": annualized_yield is only comparable
+    # between runs scored on the SAME window, so a range filter would invite
+    # exactly the comparison that means nothing.
+    p.add_argument("--window", default=None, metavar="END_DATE",
+                   help="Only runs whose data window ends on this ISO date")
+    p.add_argument("--with-config", action="store_true",
+                   help="Add weight_keys/index_pairs columns read from each run's config.json")
 
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--top", type=int, metavar="N", help="Show the top N runs by --metric (default mode)")
@@ -122,6 +181,12 @@ def main(args_in: list[str]) -> None:
         return
 
     frame = PairFilter(ExperimentIndexFile(output.index_filepath).dataframe(), args.pair).applied()
+    # Only when asked for: reading one config.json per run costs a stat and a
+    # parse per row, which is wasted on the ordinary leaderboard.
+    if args.group_by in _CONFIG_COLUMNS or args.with_config:
+        frame = ExperimentConfigs(frame, output.experiments_dir).enriched()
+    if args.window:
+        frame = frame[frame["end_date"].astype(str) == args.window]
 
     if args.group_by:
         ConsoleTable(GroupedComparison(frame, args.group_by, args.metric).summary()).print()

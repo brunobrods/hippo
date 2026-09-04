@@ -132,6 +132,8 @@ def test_strategy_metadata_as_dict():
     assert as_dict["timeframe"] == "ONE_HOUR"
     assert as_dict["training_period"] == "2024-01-01 to 2026-07-01"
     assert as_dict["created_at"] == "2026-07-15T10:30:00+00:00"
+    # allow_negative_weights is recorded too: it changes what the search can
+    # express, so a saved strategy has to say which model class produced it.
     assert as_dict["ga_config"] == {
         "population_size": 20,
         "generations": 5,
@@ -141,6 +143,7 @@ def test_strategy_metadata_as_dict():
         "elitism_count": 2,
         "mutation_sigma": 0.15,
         "seed": 42,
+        "allow_negative_weights": False,
     }
 
 
@@ -161,7 +164,6 @@ def test_trained_strategy_as_dict():
         "short_exit_threshold": 0.40,
         "fee_bps": 0.0,
         "borrow_bps_per_hour": 0.0,
-        "signal_score_version": 2,
     }
 
 
@@ -261,7 +263,6 @@ def test_strategy_json_round_trips_through_disk(tmp_path):
         "short_exit_threshold": 0.40,
         "fee_bps": 0.0,
         "borrow_bps_per_hour": 0.0,
-        "signal_score_version": 2,
     }
 
 

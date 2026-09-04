@@ -15,6 +15,7 @@ from coinbase.trading_strategy import (
     Direction,
     MarketRows,
     Position,
+    Trade,
 )
 
 
@@ -32,6 +33,11 @@ class StrategyConfig:
     allow_short:           bool  = False
     short_entry_threshold: float = 0.25  # score below this opens a short
     short_exit_threshold:  float = 0.40  # score above this covers it
+    # How hard the GA is penalised for an uncertain trade sample. Scales the
+    # one-sided 95% Student-t bound on the per-trade edge: 1.0 applies it in
+    # full, 0.0 restores the historical behaviour of scoring the realized total
+    # with no regard for how few trades produced it.
+    fitness_confidence:    float = 1.0
     # Trading costs, both zero by default so an existing config reproduces the
     # numbers it always produced. fee_bps is charged per leg on the notional
     # that changed hands; borrow_bps_per_hour accrues only against a short, for
@@ -55,6 +61,7 @@ class StrategyConfigFile:
             allow_short           = section.get("allow_short", False),
             short_entry_threshold = section.get("short_entry_threshold", 0.25),
             short_exit_threshold  = section.get("short_exit_threshold", 0.40),
+            fitness_confidence    = float(section.get("fitness_confidence", 1.0)),
             fee_bps               = float(section.get("fee_bps", 0.0)),
             borrow_bps_per_hour   = float(section.get("borrow_bps_per_hour", 0.0)),
         )
@@ -136,12 +143,6 @@ class ValidatedWeightKeys:
 
 POSITION_PNL_KEY = "position_pnl"
 
-# Bumped whenever signal_score's mapping changes, because a genome's thresholds
-# only mean anything against the mapping it was calibrated on. Version 1 scored
-# the raw weighted sum of non-negative weights; version 2 allows signed weights
-# and maps the sum onto [0, 1] as (s + 1) / 2, which moves neutral to 0.5.
-SIGNAL_SCORE_VERSION = 2
-
 
 class GaStrategy:
     def __init__(self, genome: Genome, config: StrategyConfig, keys: tuple[str, ...]) -> None:
@@ -173,18 +174,6 @@ class GaStrategy:
     # Public because it is the number that explains a decision: a monitor
     # showing why a strategy is holding needs the score, not just the action.
     # A pure query — asking for it never changes what decide() would return.
-    #
-    # Weights are signed and their absolute values sum to 1, so the weighted sum
-    # of norm_ columns (each in [0, 1]) lands in [-1, 1]. Mapping that onto
-    # [0, 1] keeps every threshold in config.yaml in the vocabulary it was
-    # written in: buy_threshold 0.60 still reads as "well above neutral", where
-    # a raw signed score would silently invert what those numbers mean.
-    #
-    # Neutral is now 0.5 rather than wherever a positive-only genome happened to
-    # sit, so THRESHOLDS CALIBRATED BEFORE SIGNED WEIGHTS DO NOT CARRY OVER.
-    # The POSITION_PNL_KEY term is a fractional return rather than a norm_
-    # column, so it can still push the total outside [-1, 1] — as it always
-    # could, and the thresholds have always had to tolerate.
     def signal_score(self, row: dict[str, float], position: Optional[Position]) -> float:
         total = sum(
             self._genome.weight(key) * row[f"norm_{key}"]
@@ -192,12 +181,53 @@ class GaStrategy:
         )
         if POSITION_PNL_KEY in self._keys:
             total += self._genome.weight(POSITION_PNL_KEY) * self._unrealized_return(row, position)
-        return (total + 1.0) / 2.0
+        return total + self._negative_offset()
+
+    # Lifts the score's floor back to zero when a genome carries negative
+    # weights.
+    #
+    # Every norm_* column is in [0, 1] and the weights are L1-normalized, so a
+    # genome's reachable span is [-M, P] where M is its negative mass and P its
+    # positive mass. The thresholds (0.6 / 0.4 / 0.25) are calibrated against a
+    # score that starts at 0, so without this shift a genome would be penalised
+    # for using negative weights at all — its whole range would slide below the
+    # buy threshold — and the search would be pushed straight back to the
+    # non-negative corner this change exists to escape.
+    #
+    # Exactly 0.0 whenever every weight is non-negative, which is what keeps
+    # every previously trained genome scoring identically.
+    @functools.cached_property
+    def _offset(self) -> float:
+        return sum(
+            max(-self._genome.weight(key), 0.0)
+            for key in self._keys if key != POSITION_PNL_KEY
+        )
+
+    def _negative_offset(self) -> float:
+        return self._offset
 
     def _unrealized_return(self, row: dict[str, float], position: Optional[Position]) -> float:
         if position is None:
             return 0.0
         return position.unrealized_return(row["close"])
+
+    # The highest score reachable with no position open. Every norm_* column
+    # is in [0, 1] and NormalizedWeights forces the weights to sum to 1.0
+    # INCLUDING position_pnl — which contributes exactly 0 when flat — so the
+    # ceiling is the weight mass on the indicator keys, not 1.0.
+    #
+    # It matters: a genome carrying 0.49 on position_pnl tops out at 0.51 and
+    # can never cross a 0.6 buy_threshold, so it is structurally short-only.
+    # Anything ranking scores across genomes has to measure against this rather
+    # than against 1.0, or it ranks on whose position_pnl weight is smallest.
+    # Absolute, because signal_score shifts the floor to zero: a genome's
+    # reachable span becomes [0, sum of |weight|] over the indicator keys.
+    # Identical to the signed sum whenever no weight is negative.
+    def flat_score_ceiling(self) -> float:
+        return sum(
+            abs(self._genome.weight(key))
+            for key in self._keys if key != POSITION_PNL_KEY
+        )
 
 
 # ── Yield ────────────────────────────────────────────────────────────────
@@ -226,6 +256,106 @@ class AnnualizedYield:
         return (1.0 + total_return) ** (self._SECONDS_PER_YEAR / self._duration_seconds) - 1.0
 
 
+# One-sided 95% Student-t multipliers by degrees of freedom.
+#
+# A table rather than a formula because scipy is not a dependency, and the
+# only values that matter here are the small-sample ones: t(1) = 6.31 against
+# t(inf) = 1.64 is exactly the penalty a two-trade sample deserves and a
+# fixed z-multiplier refuses to apply.
+class StudentT:
+    _BY_DF = {
+        1: 6.314, 2: 2.920, 3: 2.353, 4: 2.132, 5: 2.015,
+        6: 1.943, 7: 1.895, 8: 1.860, 9: 1.833, 10: 1.812,
+        12: 1.782, 15: 1.753, 20: 1.725, 25: 1.708, 30: 1.697,
+        40: 1.684, 60: 1.671, 120: 1.658,
+    }
+    _ASYMPTOTIC = 1.645
+
+    def __init__(self, degrees_of_freedom: int) -> None:
+        self._df = degrees_of_freedom
+
+    def multiplier(self) -> float:
+        if self._df < 1:
+            return self._BY_DF[1]
+        if self._df in self._BY_DF:
+            return self._BY_DF[self._df]
+        larger = [df for df in self._BY_DF if df > self._df]
+        # Between tabulated rows, take the more conservative (larger) value
+        # rather than interpolating — erring toward punishing uncertainty.
+        return self._BY_DF[min(larger)] if larger else self._ASYMPTOTIC
+
+
+# The per-trade returns a backtest produced, and what can honestly be inferred
+# from them.
+#
+# This exists because annualizing a realized total treats however many trades
+# happened as a repeatable rate: a genome that took two lucky trades in eleven
+# months was scored as if that pace and that luck would continue all year, and
+# eight such runs scored above 100% on a median of three trades. Measuring the
+# LOWER BOUND on the per-trade edge instead prices the uncertainty in, so a
+# small or erratic sample cannot outrank a large consistent one.
+class TradeSample:
+    def __init__(self, trades: list[Trade], starting_balance: float) -> None:
+        self._trades           = trades
+        self._starting_balance = starting_balance
+
+    # Net, so the edge the GA is asked to prove is the one that survives its own
+    # costs: a genome churning for a spread thinner than its fees has no edge to
+    # bound, however consistent the gross figure looks. With both rates at their
+    # 0.0 default this is the gross number it has always been.
+    @functools.cached_property
+    def returns(self) -> list[float]:
+        return [trade.net_profit() / self._starting_balance for trade in self._trades]
+
+    def count(self) -> int:
+        return len(self._trades)
+
+    def mean(self) -> float:
+        return sum(self.returns) / len(self.returns) if self.returns else 0.0
+
+    # The observed standard error, honestly reported — zero when the sample is
+    # too small to have one, or when every trade happened to return the same.
+    def standard_error(self) -> float:
+        n = self.count()
+        if n < 2:
+            return 0.0
+        mean     = self.mean()
+        variance = sum((value - mean) ** 2 for value in self.returns) / (n - 1)
+        return (variance ** 0.5) / (n ** 0.5)
+
+    # The observed error floored by a prior, and the floor is what makes the
+    # sample size bite.
+    #
+    # Two trades that happen to return the same amount have zero observed
+    # variance, so a bound built on the observed error alone applies no penalty
+    # at all and ranks them level with a thirty-trade record. Consistency across
+    # two observations is not evidence of consistency. The prior says a trade's
+    # outcome is at least as uncertain as its own average magnitude — true of
+    # essentially any real strategy — which restores the 1/sqrt(n) dependence
+    # that small samples deserve.
+    def effective_standard_error(self) -> float:
+        floor = abs(self.mean()) / (self.count() ** 0.5) if self.count() else 0.0
+        return max(self.standard_error(), floor)
+
+    # `scale` of 0.0 is the historical behaviour exactly — the realized mean,
+    # with no penalty for how few trades produced it.
+    def lower_bound(self, scale: float) -> float:
+        if scale <= 0.0:
+            return self.mean()
+        if self.count() == 1:
+            # One trade admits no variance estimate at all. It earns no credit
+            # on the upside — a single win proves nothing — while its loss
+            # still counts, so inaction dressed up as one trade cannot score.
+            return min(self.returns[0], 0.0)
+        return self.mean() - scale * StudentT(self.count() - 1).multiplier() * self.effective_standard_error()
+
+    # The whole-window return the lower bound implies, floored at -1.0: below
+    # that, AnnualizedYield raises a negative base to a fractional power and
+    # returns a complex number. A real book can only lose what it has.
+    def pessimistic_return(self, scale: float) -> float:
+        return max(self.lower_bound(scale) * self.count(), -1.0)
+
+
 # ── Evaluator ───────────────────────────────────────────────────────────
 
 class StrategyEvaluator:
@@ -249,12 +379,24 @@ class StrategyEvaluator:
         return MarketRows(self._frame)
 
     # Selection score, not a reported metric: annualized_yield() below still
-    # reports the honest 0.0 for a no-trade run in the performance report.
+    # reports the realized figure, so index.csv stays comparable across every
+    # run ever recorded even as what the GA optimizes changes.
+    #
+    # Scored on the lower bound of the per-trade edge rather than the realized
+    # total, because annualizing the realized total let a two-trade sample be
+    # graded as a yearly rate. A genome now has to earn its yield often enough
+    # and consistently enough for the bound to survive.
     def fitness(self, genome: Genome) -> float:
         result = self.result(genome)
-        if not result.trades():
+        sample = TradeSample(result.trades(), self._config.starting_balance)
+        if sample.count() == 0:
             return self._NO_TRADE_FITNESS
-        return self.annualized_yield(result)
+        pessimistic = sample.pessimistic_return(self._config.fitness_confidence)
+        return AnnualizedYield(
+            pessimistic * self._config.starting_balance,
+            self._config.starting_balance,
+            self._duration_seconds(),
+        ).value()
 
     def result(self, genome: Genome) -> BacktestResult:
         strategy = GaStrategy(genome, self._config, self._keys)

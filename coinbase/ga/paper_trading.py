@@ -48,11 +48,10 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
 from coinbase.ga.config import GA_RESULTS_ROOT, ConfigFile
-from coinbase.ga.ga_engine import Genome
+from coinbase.ga.ga_engine import BackfilledGenome, Genome
 from coinbase.ga.market_data_processor import MarketDataConfig
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
-    SIGNAL_SCORE_VERSION,
     GaStrategy,
     StrategyConfig,
     StrategyConfigFile,
@@ -71,6 +70,7 @@ from coinbase.trading_strategy import (
     Direction,
     FeeSchedule,
     Ledger,
+    MakerTakerFee,
     NoBorrowRate,
     NoFees,
     Position,
@@ -124,13 +124,6 @@ class TrainedStrategyConfig:
     def config(self) -> StrategyConfig:
         section = {**(self._raw_config.get("strategy") or {}), **self._hyperparameters}
         return ValidatedStrategyConfig(StrategyConfigFile({"strategy": section}).config()).config()
-
-    # True when the genome was scored under an older signal_score mapping. Its
-    # thresholds were calibrated against that mapping, so papering it under
-    # today's silently measures a strategy nobody trained — version 1 scored the
-    # raw weighted sum, where version 2 puts neutral at 0.5.
-    def stale_scoring(self) -> bool:
-        return self._hyperparameters.get("signal_score_version", 1) < SIGNAL_SCORE_VERSION
 
     # Keys where the saved strategy and config.yaml disagree — surfaced so a
     # divergence is visible rather than silently resolved.
@@ -247,12 +240,12 @@ class InitialPaperState:
 
 
 # ── Fees ───────────────────────────────────────────────────────────────
-# FeeSchedule, BasisPointFee, NoFees and the borrow-rate objects now live in
-# coinbase/trading_strategy.py beside the Ledger that applies them, so a paper
-# run and a backtest cost a round trip identically instead of each carrying its
-# own model. They are re-exported here: paper_engine.py imports them from this
-# module, and a saved config or a caller should not have to care which file
-# they moved to.
+# FeeSchedule, NoFees, BasisPointFee and MakerTakerFee now live in
+# coinbase/trading_strategy.py beside the Ledger that applies them, joined by
+# the borrow-rate objects, so a paper run and a backtest cost a round trip
+# identically instead of each carrying its own model. They are re-exported
+# here: paper_engine.py imports them from this module, and a caller should not
+# have to care which file they moved to.
 
 
 # ── Tick ───────────────────────────────────────────────────────────────
@@ -396,27 +389,28 @@ async def _main() -> None:
     for key, (from_config, from_strategy) in trained.divergences().items():
         print(f"note: {key} config.yaml={from_config} -> using trained {from_strategy}")
 
-    if trained.stale_scoring():
-        print(
-            "WARNING: this strategy was trained before signed weights, when signal_score "
-            "was the raw weighted sum. Its thresholds were calibrated against that scale "
-            "and do not mean the same thing now that neutral is 0.5 — retrain before "
-            "trusting this book."
-        )
+    keys       = weight_keys + (POSITION_PNL_KEY,)
+    # A genome saved before a weight key existed carries no weight for it, and
+    # Genome.weight raises rather than guessing. Backfilling at zero keeps a
+    # book already running against an older genome from breaking the moment
+    # config.yaml grows a column.
+    backfilled = BackfilledGenome(Genome(saved.weights()), keys)
+    for key in backfilled.missing():
+        print(f"note: genome predates {key} — running it weighted zero; retrain to use it")
 
-    strategy = GaStrategy(
-        Genome(saved.weights()),
-        strategy_config,
-        weight_keys + (POSITION_PNL_KEY,),
-    )
+    strategy = GaStrategy(backfilled.filled(), strategy_config, keys)
 
     # The paper run follows its own market, which need not be the one the
     # genome was trained on — ConfiguredExchange is asked for that exchange
     # rather than data.exchange.
     async with ConfiguredExchange({"data": {"exchange": paper_config.exchange}}).adapter() as adapter:
+        basket = LiveBasket(
+            adapter, market_config.index_pairs(), window.granularity,
+        ) if market_config.index_pairs() else None
         rows = ClosedMarketRow(LiveMarketRow(
             adapter, paper_config.pair, window.granularity,
             market_config.periods(), market_config.normalized_columns(),
+            basket=basket, index_period=market_config.index_period(),
         ))
         # Costs come from the strategy the genome was trained under, so a
         # paper book is charged what its own scoring assumed it would be.

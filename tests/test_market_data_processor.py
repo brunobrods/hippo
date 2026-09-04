@@ -6,11 +6,15 @@ import pytest
 from exchange.adapter import ExchangeError
 from coinbase.ga.market_data_processor import (
     AccountBalance,
+    AverageTrueRange,
     CachedHistoricalCandles,
     CandleCacheFile,
     CandleCacheKey,
+    CandleRange,
     ChunkedTimeRange,
     Delta,
+    OhlcFrame,
+    TrueRange,
     HistoricalCandles,
     HistoricalMarketData,
     IndicatorFrame,
@@ -19,7 +23,9 @@ from coinbase.ga.market_data_processor import (
     LiveMarketState,
     Macd,
     MarketDataConfig,
+    MarketIndex,
     MinMaxColumn,
+    RelativeStrength,
     NormalizedIndicators,
     Rsi,
     Sma,
@@ -608,3 +614,183 @@ async def test_one_exchanges_cached_window_is_never_served_to_the_other(tmp_path
 
     # The second run must have hit its own exchange, not Coinbase's cache file.
     assert len(binance.candle_calls) == 1
+
+
+# ── TrueRange / AverageTrueRange / CandleRange / OhlcFrame ─────────────
+
+def _ohlc(start: int, open_: float, high: float, low: float, close: float, volume: float = 1.0) -> dict:
+    return {
+        "start":  str(start),
+        "open":   str(open_),
+        "high":   str(high),
+        "low":    str(low),
+        "close":  str(close),
+        "volume": str(volume),
+    }
+
+
+def test_true_range_is_high_minus_low_on_the_first_bar():
+    # No previous close exists, so both gap terms are NaN and only the body is
+    # defined — the bar must keep its own span rather than drop out.
+    true_range = TrueRange(pd.Series([110.0]), pd.Series([90.0]), pd.Series([100.0]))
+    assert true_range.series.iloc[0] == 20.0
+
+
+def test_true_range_uses_the_previous_close_when_the_bar_gaps():
+    highs  = pd.Series([100.0, 105.0])
+    lows   = pd.Series([100.0, 104.0])
+    closes = pd.Series([100.0, 104.5])
+    # The body is only 1.0, but the bar opened 5.0 above the previous close.
+    assert TrueRange(highs, lows, closes).series.iloc[1] == 5.0
+
+
+def test_average_true_range_percent_is_the_range_relative_to_close():
+    highs  = pd.Series([102.0] * 10)
+    lows   = pd.Series([98.0] * 10)
+    closes = pd.Series([100.0] * 10)
+    atr    = AverageTrueRange(TrueRange(highs, lows, closes).series, closes, period=3)
+    assert atr.percent.dropna().iloc[-1] == pytest.approx(0.04)
+
+
+def test_candle_range_fraction_is_the_span_over_the_open():
+    fraction = CandleRange(pd.Series([110.0]), pd.Series([90.0]), pd.Series([100.0])).fraction
+    assert fraction.iloc[0] == pytest.approx(0.20)
+
+
+def test_candle_range_fraction_is_zero_for_a_doji():
+    fraction = CandleRange(pd.Series([100.0]), pd.Series([100.0]), pd.Series([100.0])).fraction
+    assert fraction.iloc[0] == 0.0
+
+
+def test_ohlc_frame_carries_the_open_column_indicator_frame_discards():
+    frame   = OhlcFrame([_ohlc(0, 100.0, 110.0, 90.0, 105.0)]).dataframe
+    periods = IndicatorPeriods(2, 3, 4, 5, 12, 26, 9)
+    assert frame.loc[0, "open"] == 100.0
+    assert "open" not in IndicatorFrame([], periods).dataframe.columns
+
+
+def test_ohlc_frame_keeps_every_candle_and_drops_no_warmup_rows():
+    # IndicatorFrame would dropna() away every row here — its shortest SMA
+    # alone needs a warm-up. OhlcFrame computes nothing, so it drops nothing.
+    candles = [_ohlc(i * 86400, 100.0, 101.0, 99.0, 100.0) for i in range(40)]
+    assert len(OhlcFrame(candles).dataframe) == 40
+
+
+def test_ohlc_frame_sorts_candles_oldest_first():
+    candles = [_ohlc(2 * 86400, 3.0, 3.0, 3.0, 3.0), _ohlc(0, 1.0, 1.0, 1.0, 1.0)]
+    assert list(OhlcFrame(candles).dataframe["open"]) == [1.0, 3.0]
+
+
+# ── MarketIndex / RelativeStrength ─────────────────────────────────────
+
+def _closes(starts: list[int], closes: list[float]) -> pd.DataFrame:
+    return OhlcFrame([
+        _ohlc(start, close, close, close, close) for start, close in zip(starts, closes)
+    ]).dataframe
+
+
+def test_market_index_is_the_equal_weight_return_of_its_pairs():
+    frames = {
+        "A": _closes([0, 86400], [100.0, 110.0]),   # +10%
+        "B": _closes([0, 86400], [100.0,  90.0]),   # -10%
+    }
+    assert MarketIndex(frames).returns.loc[86400] == pytest.approx(0.0)
+
+
+def test_market_index_is_keyed_by_timestamp_not_row_order():
+    # B starts a day later; the basket must still line the two up by date.
+    frames = {
+        "A": _closes([0, 86400, 172800], [100.0, 110.0, 121.0]),
+        "B": _closes([86400, 172800], [50.0, 55.0]),
+    }
+    returns = MarketIndex(frames).returns
+    assert returns.loc[172800] == pytest.approx(0.10)   # both +10% that day
+
+
+def test_a_pair_missing_a_candle_does_not_blank_the_basket():
+    frames = {
+        "A": _closes([0, 86400], [100.0, 120.0]),
+        "B": _closes([0], [100.0]),                     # no second candle
+    }
+    # The basket is measured on the pair that has one, not set to NaN.
+    assert MarketIndex(frames).returns.loc[86400] == pytest.approx(0.20)
+
+
+def test_an_empty_basket_is_an_empty_series_rather_than_an_error():
+    assert MarketIndex({}).returns.empty
+
+
+def test_relative_strength_excess_is_the_pair_return_minus_the_market():
+    closes     = pd.Series([100.0, 110.0])
+    timestamps = pd.Series([0, 86400])
+    index      = pd.Series({0: float("nan"), 86400: 0.04})
+    excess     = RelativeStrength(closes, timestamps, index).excess
+    assert excess.iloc[1] == pytest.approx(0.06)        # +10% pair, +4% market
+
+
+# The point of the z-score: 2% of excess is ordinary on a wild pair and
+# extraordinary on a quiet one, and a raw excess cannot tell them apart.
+def test_a_pair_moving_with_the_market_scores_near_zero():
+    closes     = pd.Series([100.0 * (1.01 ** i) for i in range(40)])
+    timestamps = pd.Series([i * 86400 for i in range(40)])
+    index      = pd.Series({i * 86400: 0.01 for i in range(40)})
+    z          = RelativeStrength(closes, timestamps, index, period=10).z_score
+    assert abs(z.iloc[-1]) < 0.5
+
+
+def test_an_unusual_divergence_scores_far_from_zero():
+    prices = [100.0 * (1.01 ** i) for i in range(39)]
+    prices.append(prices[-1] * 1.25)                    # one violent day
+    timestamps = pd.Series([i * 86400 for i in range(40)])
+    index      = pd.Series({i * 86400: 0.01 for i in range(40)})
+    z          = RelativeStrength(pd.Series(prices), timestamps, index, period=10).z_score
+    assert z.iloc[-1] > 2.0
+
+
+# NaN, not 0.0. Zero would state "moving exactly with the market" where
+# nothing was measured, and dropna() would keep the fabrication.
+def test_a_flat_spread_is_not_a_number_rather_than_a_fabricated_zero():
+    closes     = pd.Series([100.0] * 40)
+    timestamps = pd.Series([i * 86400 for i in range(40)])
+    index      = pd.Series({i * 86400: 0.0 for i in range(40)})
+    z          = RelativeStrength(closes, timestamps, index, period=10).z_score
+    assert pd.isna(z.iloc[-1])
+
+
+def test_a_gap_in_the_basket_is_not_a_number_rather_than_a_fabricated_zero():
+    closes     = pd.Series([100.0 * (1.01 ** i) for i in range(40)])
+    timestamps = pd.Series([i * 86400 for i in range(40)])
+    # The basket is missing one timestamp the pair has.
+    index      = pd.Series({i * 86400: 0.005 for i in range(40) if i != 20})
+    z          = RelativeStrength(closes, timestamps, index, period=10).z_score
+    assert pd.isna(z.iloc[20])
+    # And it must not silently mute the following window to zero either.
+    assert not (z.iloc[21:31] == 0.0).any()
+
+
+def test_the_window_excludes_the_candle_being_scored():
+    # Scoring a point against a window containing it caps |z| at
+    # (n-1)/sqrt(n); excluding it leaves a violent day genuinely unbounded.
+    prices = [100.0 * (1.01 ** i) for i in range(39)]
+    prices.append(prices[-1] * 1.6)
+    timestamps = pd.Series([i * 86400 for i in range(40)])
+    index      = pd.Series({i * 86400: 0.01 for i in range(40)})
+    z          = RelativeStrength(pd.Series(prices), timestamps, index, period=10).z_score
+    assert z.iloc[-1] > 5.3
+
+
+# Every genome trained before the index existed expects the old columns, so
+# the frame has to be identical when no basket is supplied.
+def test_the_frame_is_unchanged_when_no_basket_is_given():
+    candles = [_ohlc(i * 86400, 100.0, 101.0, 99.0, 100.0 + i) for i in range(80)]
+    periods = IndicatorPeriods(2, 3, 4, 5, 12, 26, 9)
+    assert "index_z" not in IndicatorFrame(candles, periods).dataframe.columns
+
+
+def test_the_frame_gains_an_index_column_when_a_basket_is_given():
+    candles = [_ohlc(i * 86400, 100.0, 101.0, 99.0, 100.0 + i) for i in range(80)]
+    periods = IndicatorPeriods(2, 3, 4, 5, 12, 26, 9)
+    index   = pd.Series({i * 86400: 0.001 for i in range(80)})
+    frame   = IndicatorFrame(candles, periods, index, index_period=10).dataframe
+    assert "index_z" in frame.columns
+    assert not frame["index_z"].isna().any()

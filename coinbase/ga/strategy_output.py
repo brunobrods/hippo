@@ -7,7 +7,7 @@ from typing import Any
 
 from coinbase.ga.config import GA_RESULTS_ROOT
 from coinbase.ga.ga_engine import GaConfig, Genome
-from coinbase.ga.strategy_evaluator import SIGNAL_SCORE_VERSION, StrategyConfig
+from coinbase.ga.strategy_evaluator import StrategyConfig
 from coinbase.trading_strategy import BacktestResult, Decision
 
 
@@ -108,9 +108,6 @@ class TrainedStrategy:
                 # in keys that are recorded here.
                 "fee_bps":               self._config.fee_bps,
                 "borrow_bps_per_hour":   self._config.borrow_bps_per_hour,
-                # Which signal_score mapping these thresholds were calibrated
-                # against. Absent in anything saved before signed weights.
-                "signal_score_version":  SIGNAL_SCORE_VERSION,
             },
         }
 

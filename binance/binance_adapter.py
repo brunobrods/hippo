@@ -64,8 +64,10 @@ Usage:
 """
 
 import asyncio
+import functools
 import hashlib
 import hmac
+import json
 import logging
 import sys
 import time
@@ -284,12 +286,15 @@ class BinanceProduct:
         lot     = filters.get("LOT_SIZE", {})
         return {
             "product_id":       f"{self._raw['baseAsset']}-{self._raw['quoteAsset']}",
+            "base_currency":    self._raw["baseAsset"],
+            "quote_currency":   self._raw["quoteAsset"],
             "quote_increment":  filters.get("PRICE_FILTER", {}).get("tickSize", "0.01"),
             "base_increment":   lot.get("stepSize", "0.00000001"),
             "base_min_size":    lot.get("minQty", "0.00000001"),
             "base_max_size":    lot.get("maxQty", "0"),
             "min_market_funds": self._min_notional(filters),
             "status":           self._raw.get("status", ""),
+            "tradable":         self._raw.get("status", "") == "TRADING",
             "raw":              self._raw,
         }
 
@@ -298,6 +303,118 @@ class BinanceProduct:
         # Binance renamed MIN_NOTIONAL to NOTIONAL; both still appear.
         notional = filters.get("NOTIONAL") or filters.get("MIN_NOTIONAL") or {}
         return notional.get("minNotional", "0")
+
+
+# ── Universe ───────────────────────────────────────────────────────────
+
+# One row of /sapi/v1/margin/isolated/allPairs. This endpoint is the only
+# place the isolated-margin universe is enumerated, and — unlike exchangeInfo's
+# symbol string — it carries base and quote as separate fields, so the
+# canonical dashed id comes from the exchange's own data rather than a guess
+# at where to cut "BTCUSDT". See BinanceSymbol above on why that matters.
+class IsolatedPair:
+    def __init__(self, raw: dict[str, Any]) -> None:
+        self._raw = raw
+
+    def symbol(self) -> str:
+        return self._raw["symbol"]
+
+    def product_id(self) -> str:
+        return f"{self._raw['base']}-{self._raw['quote']}"
+
+    def can_long(self) -> bool:
+        return bool(self._raw.get("isMarginTrade")) and bool(self._raw.get("isBuyAllowed"))
+
+    # A short must borrow the base asset to sell it, so it needs the sell leg
+    # specifically — a pair can be margin-enabled and still have shorts halted.
+    def can_short(self) -> bool:
+        return bool(self._raw.get("isMarginTrade")) and bool(self._raw.get("isSellAllowed"))
+
+
+# /api/v3/ticker/24hr with no symbol: every pair's rolling stats in one
+# unauthenticated call. Also carries bidPrice/askPrice, so a spread comes free
+# from a request the universe scan already makes.
+class TwentyFourHourStats:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    @functools.cached_property
+    def by_symbol(self) -> dict[str, dict[str, Any]]:
+        return {row["symbol"]: row for row in self._rows}
+
+    def volume(self, symbol: str) -> float:
+        return float(self.by_symbol.get(symbol, {}).get("quoteVolume", 0.0) or 0.0)
+
+    def change_percent(self, symbol: str) -> float:
+        return float(self.by_symbol.get(symbol, {}).get("priceChangePercent", 0.0) or 0.0)
+
+    # Basis points between best bid and best ask. NaN — not zero — when either
+    # side of the book is empty: an unquoted pair has no spread to measure, and
+    # zero would read as a perfectly tight book and understate its cost floor.
+    # NaN keeps one dead pair from failing the scan while still refusing to
+    # claim a number nobody quoted.
+    def spread_bps(self, symbol: str) -> float:
+        row = self.by_symbol.get(symbol, {})
+        bid = float(row.get("bidPrice", 0.0) or 0.0)
+        ask = float(row.get("askPrice", 0.0) or 0.0)
+        if bid <= 0.0 or ask <= 0.0:
+            return float("nan")
+        return (ask - bid) / ((ask + bid) / 2.0) * 10_000.0
+
+
+class IsolatedCatalog:
+    def __init__(
+        self,
+        pairs: list[dict[str, Any]],
+        symbols: list[dict[str, Any]],
+        stats: TwentyFourHourStats,
+    ) -> None:
+        self._pairs   = pairs
+        self._symbols = symbols
+        self._stats   = stats
+
+    def products(self) -> list[dict]:
+        by_wire = {entry["symbol"]: entry for entry in self._symbols}
+        products: list[dict] = []
+        for raw in self._pairs:
+            pair  = IsolatedPair(raw)
+            entry = by_wire.get(pair.symbol())
+            # An isolated pair absent from exchangeInfo is mid-delisting, not a
+            # bug: skip it rather than raise and lose the other ~200 rows.
+            if entry is None:
+                continue
+            product = BinanceProduct(entry).normalized()
+            product.update({
+                "can_long":             pair.can_long(),
+                "can_short":            pair.can_short(),
+                "volume_24h_quote":     self._stats.volume(pair.symbol()),
+                "price_change_24h_pct": self._stats.change_percent(pair.symbol()),
+                "spread_bps":           self._stats.spread_bps(pair.symbol()),
+            })
+            products.append(product)
+        return products
+
+
+# /sapi/v1/asset/tradeFee returns this account's real rates per symbol, as
+# fractions ("0.001" = 10 bps). Rates are uniform across spot symbols for most
+# accounts, so the median is representative and immune to one odd row.
+class TradeFeeRates:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def maker_bps(self) -> float:
+        return self._median("makerCommission")
+
+    def taker_bps(self) -> float:
+        return self._median("takerCommission")
+
+    def _median(self, key: str) -> float:
+        values = sorted(
+            float(row[key]) * 10_000.0 for row in self._rows if row.get(key) is not None
+        )
+        if not values:
+            raise BinanceError(0, self._rows, f"tradeFee response carried no {key}")
+        return values[len(values) // 2]
 
 
 # Coinbase's order_status vocabulary mapped onto Binance's.
@@ -837,6 +954,82 @@ class BinanceAdapter:
         if not symbols:
             raise BinanceError(0, result, f"Unknown product {product_id}")
         return BinanceProduct(symbols[0]).normalized()
+
+    # The isolated-margin universe, joined to its trading filters and rolling
+    # 24h stats. Three requests rather than one per pair: allPairs must be
+    # signed, the other two are unauthenticated and return every symbol in a
+    # single response, so the whole ~200-pair universe costs three round trips.
+    async def list_products(self) -> list[dict]:
+        pairs   = await self._get("/sapi/v1/margin/isolated/allPairs")
+        symbols = [pair["symbol"] for pair in pairs]
+        info, stats = await asyncio.gather(
+            self._filtered("/api/v3/exchangeInfo", "symbols", symbols),
+            self._filtered("/api/v3/ticker/24hr", "symbols", symbols),
+        )
+        return IsolatedCatalog(
+            pairs,
+            [entry for page in info for entry in page.get("symbols", [])],
+            TwentyFourHourStats([row for page in stats for row in page]),
+        ).products()
+
+    # Both endpoints return the WHOLE venue when unfiltered — exchangeInfo alone
+    # measured 17.5 MB over 3685 symbols and took ~6 s, against this session's
+    # 10 s total timeout shared with every other request in flight. Filtering to
+    # the isolated universe cuts it by an order of magnitude.
+    #
+    # Chunked because the filter travels in the query string: several hundred
+    # symbols in one URL runs past the 8 KB many proxies cap at.
+    async def _filtered(self, path: str, key: str, symbols: list[str], chunk: int = 100) -> list[Any]:
+        pages = await asyncio.gather(*(
+            self._page(path, key, symbols[index : index + chunk])
+            for index in range(0, len(symbols), chunk)
+        ))
+        return [page for page in pages if page is not None]
+
+    # Binance rejects the WHOLE request with -1121 if any one symbol in the
+    # array is unknown to spot — it does not quietly omit it. An isolated pair
+    # mid-delisting is exactly that case, and it would otherwise take the
+    # entire ~200-pair scan down with it, making IsolatedCatalog's skip guard
+    # unreachable. Bisecting isolates the bad symbol in ~log2(chunk) requests
+    # instead of failing the run or re-fetching every symbol one at a time.
+    async def _page(self, path: str, key: str, symbols: list[str]) -> Optional[Any]:
+        if not symbols:
+            return None
+        try:
+            return await self._get(
+                path, {key: json.dumps(symbols, separators=(",", ":"))}, auth=False,
+            )
+        except BinanceError:
+            if len(symbols) == 1:
+                logger.warning("%s rejected symbol %s — skipping it", path, symbols[0])
+                return None
+            middle = len(symbols) // 2
+            halves = await asyncio.gather(
+                self._page(path, key, symbols[:middle]),
+                self._page(path, key, symbols[middle:]),
+            )
+            return self._merged([half for half in halves if half is not None])
+
+    # The two endpoints this serves return different shapes: exchangeInfo a
+    # dict under "symbols", ticker/24hr a bare list.
+    @staticmethod
+    def _merged(pages: list[Any]) -> Optional[Any]:
+        if not pages:
+            return None
+        if isinstance(pages[0], dict):
+            symbols: list[Any] = []
+            for page in pages:
+                symbols.extend(page.get("symbols", []))
+            return {"symbols": symbols}
+        merged: list[Any] = []
+        for page in pages:
+            merged.extend(page)
+        return merged
+
+    async def fee_rates(self) -> tuple[float, float]:
+        rows = await self._get("/sapi/v1/asset/tradeFee")
+        fees = TradeFeeRates(rows)
+        return fees.maker_bps(), fees.taker_bps()
 
     # Shaped like Coinbase's pricebooks response so callers written against
     # CoinbaseAdapter read the same path: ["pricebooks"][0]["bids"][0]["price"].

@@ -44,12 +44,14 @@ class Decision:
 # all, and Ledger.equity() does not deduct interest accrued but not yet paid —
 # an open short reads slightly rich until it closes.
 
+# `maker` defaults to False so every existing caller keeps charging the rate it
+# always charged. A schedule that does not distinguish the two sides ignores it.
 class FeeSchedule(Protocol):
-    def charge(self, notional: float) -> float: ...
+    def charge(self, notional: float, maker: bool = False) -> float: ...
 
 
 class NoFees:
-    def charge(self, notional: float) -> float:
+    def charge(self, notional: float, maker: bool = False) -> float:
         return 0.0
 
 
@@ -57,8 +59,23 @@ class BasisPointFee:
     def __init__(self, basis_points: float) -> None:
         self._basis_points = basis_points
 
-    def charge(self, notional: float) -> float:
+    def charge(self, notional: float, maker: bool = False) -> float:
         return notional * self._basis_points / 10_000.0
+
+
+# Both venues price the two sides of the book differently — Coinbase steeply
+# (its base tier takes twice as much from a taker), Binance not at all at base
+# tier, where the only gain from resting is the spread rather than the fee.
+# A strategy that rests its orders is charged the wrong rate by a flat
+# BasisPointFee, in whichever direction the venue happens to differ.
+class MakerTakerFee:
+    def __init__(self, maker_bps: float, taker_bps: float) -> None:
+        self._maker_bps = maker_bps
+        self._taker_bps = taker_bps
+
+    def charge(self, notional: float, maker: bool = False) -> float:
+        rate = self._maker_bps if maker else self._taker_bps
+        return notional * rate / 10_000.0
 
 
 class BorrowRate(Protocol):
@@ -320,6 +337,14 @@ class Ledger:
     def force_close(self, price: float, timestamp: float = 0.0) -> None:
         if self._position is not None:
             self._close(price, timestamp)
+
+    # Takes a cost out of the book without touching the position. Trade.profit()
+    # deliberately stays gross — every saved genome's recorded performance and
+    # every row of experiments/index.csv is denominated in it, so folding fees
+    # in there would invalidate comparisons across the whole history. A caller
+    # that wants a net book charges on top, here.
+    def charge(self, amount: float) -> None:
+        self._balance -= amount
 
     def balance(self) -> float:
         return self._balance

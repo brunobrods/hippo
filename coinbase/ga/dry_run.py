@@ -2,8 +2,8 @@ import asyncio
 
 from exchange.selection import ConfiguredExchange
 from coinbase.ga.config import ConfigFile
-from coinbase.ga.ga_engine import Genome
-from coinbase.ga.market_data_processor import MarketDataConfig
+from coinbase.ga.ga_engine import BackfilledGenome, Genome
+from coinbase.ga.market_data_processor import LiveBasket, MarketDataConfig
 from coinbase.ga.strategy_evaluator import (
     GaStrategy,
     POSITION_PNL_KEY,
@@ -76,12 +76,21 @@ async def _main() -> None:
     keys = weight_keys + (POSITION_PNL_KEY,)
 
     reloaded = StrategyJsonFile(output_config.strategy_filepath)
-    genome   = Genome(reloaded.weights())
-    strategy = GaStrategy(genome, strategy_config, keys)
+    # Backfilled for the same reason paper_trading does it: a genome saved
+    # before a weight key existed carries no weight for it, and Genome.weight
+    # raises rather than guessing.
+    genome   = BackfilledGenome(Genome(reloaded.weights()), keys)
+    for key in genome.missing():
+        print(f"note: genome predates {key} — running it weighted zero; retrain to use it")
+    strategy = GaStrategy(genome.filled(), strategy_config, keys)
 
     async with ConfiguredExchange(raw_config).adapter() as adapter:
+        basket      = LiveBasket(
+            adapter, market_config.index_pairs(), window.granularity,
+        ) if market_config.index_pairs() else None
         market_row  = LiveMarketRow(
             adapter, window.pair, window.granularity, market_config.periods(), market_config.normalized_columns(),
+            basket=basket, index_period=market_config.index_period(),
         )
         # Charged what the strategy was scored under, so a watched loop and the
         # scheduled paper_trading tick report the same book for the same config.

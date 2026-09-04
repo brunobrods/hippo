@@ -45,8 +45,8 @@ flowchart BT
 | File | Responsibility |
 |---|---|
 | `market_data_processor.py` | Fetches Coinbase OHLCV candles (auto-chunked/paginated, disk-cached), computes SMA/RSI/MACD, min-max normalizes them to `[0, 1]`, splits into train/test, exposes a live account+price snapshot |
-| `ga_engine.py` | Genome (a **signed** weight vector, normalized so the absolute weights sum to 1 — a negative weight reads its indicator as bearish), and the GA operators that evolve a population against a pluggable `FitnessFunction`: tournament selection, uniform crossover, Gaussian mutation, elitism |
-| `strategy_evaluator.py` | Turns a genome's weights into a per-candle `signal_score` — the weighted sum mapped onto `[0, 1]` as `(s + 1) / 2`, so **neutral is 0.5** — walks the candles as a single-position backtest (buy above threshold, sell below, force-close at the end), and reports profit net of fees and borrow interest — this *is* the `FitnessFunction` the GA evolves against |
+| `ga_engine.py` | Genome (a normalized weight vector), and the GA operators that evolve a population against a pluggable `FitnessFunction`: tournament selection, uniform crossover, Gaussian mutation, elitism |
+| `strategy_evaluator.py` | Turns a genome's weights into a per-candle `signal_score`, walks the candles as a single-position backtest (buy above threshold, sell below, force-close at the end), and reports profit **net of fees and borrow interest** — this *is* the `FitnessFunction` the GA evolves against |
 | `strategy_output.py` | Assembles a trained genome + its config + its test-set performance into the `best_strategy.json` schema, saves/reloads it, and logs per-generation GA progress to a run log |
 | `experiment_history.py` | Gives every run a `run_id`, snapshots its resolved config/strategy/log under `experiments/<run_id>/`, and appends one leaderboard row (hyperparameters + performance + git commit) to `experiments/index.csv` |
 | `main.py` | Orchestrates all five: fetch → split → train on `train_df` → evaluate the winner on `test_df` → save (both the "current" strategy file and this run's own history entry) → reload from disk → verify the reload reproduces the same backtest result |
@@ -183,7 +183,7 @@ out-of-sample estimate rather than the (optimistic) number the GA was optimizing
 | | `buy_threshold` / `sell_threshold` | `signal_score` levels that open / close a position (hysteresis band between them = hold) |
 | | `position_size_pct` | Fraction of the *current* simulated balance risked per trade (compounding) |
 | | `starting_balance` | Fixed quote-currency balance a backtest starts from — not read from a live account, so training is deterministic and reproducible |
-| | `weight_keys` | Which `market_data.normalized_columns` the GA assigns a weight to and scores on (must be a subset of `normalized_columns` — checked at startup). Weights are signed; an all-positive genome can never score below 0.5, so it can never sell or short |
+| | `weight_keys` | Which `market_data.normalized_columns` the GA assigns a weight to and scores on (must be a subset of `normalized_columns` — checked at startup) |
 | | `fee_bps` / `borrow_bps_per_hour` | Trading costs, both `0.0` by default. A fee is charged per leg on the notional that changed hands; borrow interest accrues only against an open short, for the hours it is held |
 | | `unwind_at_entry_price` | If true (default), a still-open position at the end of a backtest is force-closed at its own entry price (net-zero, not counted as a win or loss) instead of the window's last market price — so a strategy isn't judged on wherever the window happened to cut off mid-hold |
 | `genetic_algorithm` | `population_size`, `generations`, `mutation_rate`, `crossover_rate`, `tournament_size`, `elitism_count`, `mutation_sigma`, `seed` | Standard GA hyperparameters; fix `seed` for reproducible runs |
