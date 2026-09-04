@@ -336,6 +336,20 @@ def test_config_yaml_still_supplies_the_starting_balance():
     assert config.starting_balance == pytest.approx(250.0)
 
 
+def test_a_strategy_saved_before_signed_weights_is_flagged_as_stale():
+    from coinbase.ga.paper_trading import TrainedStrategyConfig
+
+    # No signal_score_version at all: saved when the score was the raw weighted
+    # sum, so its thresholds were calibrated against a different scale.
+    old = TrainedStrategyConfig(_raw_config(), {"short_entry_threshold": 0.3})
+    assert old.stale_scoring() is True
+
+    current = TrainedStrategyConfig(
+        _raw_config(), {"short_entry_threshold": 0.3, "signal_score_version": 2},
+    )
+    assert current.stale_scoring() is False
+
+
 def test_divergences_name_both_sides():
     from coinbase.ga.paper_trading import TrainedStrategyConfig
 

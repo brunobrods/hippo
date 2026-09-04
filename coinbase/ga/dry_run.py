@@ -15,7 +15,7 @@ from coinbase.ga.strategy_evaluator import (
 from coinbase.ga.strategy_output import DryRunLog, OutputConfigFile, StrategyJsonFile, UtcNow
 from coinbase.market_scanner import GRANULARITY_SECONDS
 from coinbase.strategy import LiveMarketRow, PaperTradingRun
-from coinbase.trading_strategy import Decision, Ledger
+from coinbase.trading_strategy import ConfiguredBorrowRate, ConfiguredFees, Decision, Ledger
 
 
 # ── Console progress ─────────────────────────────────────────────────────
@@ -83,7 +83,13 @@ async def _main() -> None:
         market_row  = LiveMarketRow(
             adapter, window.pair, window.granularity, market_config.periods(), market_config.normalized_columns(),
         )
-        ledger      = Ledger(strategy_config.starting_balance)
+        # Charged what the strategy was scored under, so a watched loop and the
+        # scheduled paper_trading tick report the same book for the same config.
+        ledger      = Ledger(
+            strategy_config.starting_balance, None,
+            ConfiguredFees(strategy_config.fee_bps).schedule(),
+            ConfiguredBorrowRate(strategy_config.borrow_bps_per_hour).rate(),
+        )
         run         = PaperTradingRun(market_row, strategy, ledger)
         console_log = ConsoleDryRunLog(DryRunLog(output_config.dry_run_log_filepath))
         interval    = GRANULARITY_SECONDS[window.granularity]

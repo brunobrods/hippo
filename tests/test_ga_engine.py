@@ -50,22 +50,34 @@ def test_normalized_weights_sum_to_one():
     assert normalized["b"] == pytest.approx(0.75)
 
 
+def test_normalized_weights_keep_signs_and_scale_by_absolute_total():
+    # Scaling by the SIGNED sum would divide by ~0 for weights that cancel, and
+    # flip every sign at once for a genome summing negative.
+    normalized = NormalizedWeights({"a": 1.0, "b": -3.0}).values()
+    assert sum(abs(value) for value in normalized.values()) == pytest.approx(1.0)
+    assert normalized["a"] == pytest.approx(0.25)
+    assert normalized["b"] == pytest.approx(-0.75)
+
+
 def test_normalized_weights_falls_back_to_uniform_on_zero_sum():
     normalized = NormalizedWeights({"a": 0.0, "b": 0.0}).values()
     assert normalized == {"a": 0.5, "b": 0.5}
 
 
-def test_random_weights_generate_sum_to_one():
+def test_random_weights_are_signed_and_sum_to_one_in_absolute_value():
     weights = RandomWeights(_KEYS, random.Random(1)).generate()
     assert set(weights) == set(_KEYS)
-    assert sum(weights.values()) == pytest.approx(1.0)
+    assert sum(abs(value) for value in weights.values()) == pytest.approx(1.0)
+    # Drawn from [-1, 1], so a starting population is mixed rather than
+    # uniformly bullish — an indicator can be read as bearish from generation 0.
+    assert any(value < 0.0 for value in weights.values())
 
 
 def test_random_population_produces_normalized_genomes_of_requested_size():
     genomes = RandomPopulation(10, _KEYS, random.Random(2)).genomes()
     assert len(genomes) == 10
     for genome in genomes:
-        assert sum(genome.weights().values()) == pytest.approx(1.0)
+        assert sum(abs(value) for value in genome.weights().values()) == pytest.approx(1.0)
 
 
 # ── FitnessEvaluation ────────────────────────────────────────────────
@@ -123,8 +135,18 @@ def test_uniform_crossover_varies_the_child_across_seeds():
 def test_gaussian_mutation_always_renormalizes():
     genome  = Genome({"a": 0.5, "b": 0.5})
     mutated = GaussianMutation(genome, mutation_rate=1.0, sigma=0.5, random_source=random.Random(9)).mutated()
-    assert sum(mutated.weights().values()) == pytest.approx(1.0)
-    assert all(value >= 0.0 for value in mutated.weights().values())
+    assert sum(abs(value) for value in mutated.weights().values()) == pytest.approx(1.0)
+
+
+def test_gaussian_mutation_lets_a_gene_cross_into_negative():
+    # Previously clamped at 0.0, which parked a gene that mutated below zero on
+    # exactly 0.0 — it could only come back via another mutation, and could
+    # never express "this indicator is bearish" at all.
+    genome  = Genome({"a": 0.5, "b": 0.5})
+    mutated = GaussianMutation(
+        genome, mutation_rate=1.0, sigma=5.0, random_source=random.Random(3),
+    ).mutated()
+    assert any(value < 0.0 for value in mutated.weights().values())
 
 
 def test_gaussian_mutation_rate_zero_leaves_weights_unchanged_after_renormalization():

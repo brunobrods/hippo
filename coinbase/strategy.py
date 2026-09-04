@@ -165,9 +165,10 @@ class LiveTradingRun:
         # tick is liquidation-checked against this candle's range before a new
         # decision is taken, so a live short obeys the same 1x isolated margin
         # model it was trained and scored under.
-        self._ledger.liquidate(row["high"], row["low"])
+        timestamp = row.get("timestamp", 0.0)
+        self._ledger.liquidate(row["high"], row["low"], timestamp)
         decision = self._strategy.decide(row, self._ledger.position(), balance)
-        self._ledger.apply(decision, row["close"])
+        self._ledger.apply(decision, row["close"], timestamp)
         return decision
 
 
@@ -189,10 +190,11 @@ class PaperTradingRun:
         self._last_price: Optional[float] = None
 
     async def on_timer(self) -> Decision:
-        row = await self._market_row.latest()
-        self._ledger.liquidate(row["high"], row["low"])
+        row       = await self._market_row.latest()
+        timestamp = row.get("timestamp", 0.0)
+        self._ledger.liquidate(row["high"], row["low"], timestamp)
         decision = self._strategy.decide(row, self._ledger.position(), self._ledger.balance())
-        self._ledger.apply(decision, row["close"])
+        self._ledger.apply(decision, row["close"], timestamp)
         self._last_price = row["close"]
         return decision
 

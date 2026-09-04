@@ -60,12 +60,23 @@ class Genome:
         return Genome(self._weights, fitness)
 
 
+# Scaled so the ABSOLUTE weights sum to 1, which keeps a genome's total
+# conviction fixed while letting an individual weight be negative — an
+# indicator the GA learns to read as bearish now subtracts from the score
+# instead of merely contributing nothing. Dividing by the signed sum could not
+# do this: a genome whose weights cancelled would divide by ~0 and explode, and
+# one summing negative would flip every sign at once.
+#
+# For an all-positive genome sum(abs) == sum, so this is exactly the old
+# normalization — the weights in a strategy.json trained before signed weights
+# still normalize to themselves.
+
 class NormalizedWeights:
     def __init__(self, raw: dict[str, float]) -> None:
         self._raw = raw
 
     def values(self) -> dict[str, float]:
-        total = sum(self._raw.values())
+        total = sum(abs(value) for value in self._raw.values())
         if total <= 0.0:
             share = 1.0 / len(self._raw)
             return {key: share for key in self._raw}
@@ -78,7 +89,7 @@ class RandomWeights:
         self._random = random_source
 
     def generate(self) -> dict[str, float]:
-        raw = {key: self._random.random() for key in self._keys}
+        raw = {key: self._random.uniform(-1.0, 1.0) for key in self._keys}
         return NormalizedWeights(raw).values()
 
 
@@ -155,10 +166,13 @@ class GaussianMutation:
         }
         return Genome(NormalizedWeights(raw).values())
 
+    # No floor at zero: clamping there made a weight that mutated negative stick
+    # at exactly 0.0, so the only way back was another mutation — and a gene
+    # could never express "this indicator is bearish" at all.
     def _mutated_gene(self, value: float) -> float:
         if self._random.random() >= self._mutation_rate:
             return value
-        return max(0.0, value + self._random.gauss(0.0, self._sigma))
+        return value + self._random.gauss(0.0, self._sigma)
 
 
 class Elitism:

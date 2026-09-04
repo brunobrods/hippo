@@ -52,6 +52,7 @@ from coinbase.ga.ga_engine import Genome
 from coinbase.ga.market_data_processor import MarketDataConfig
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
+    SIGNAL_SCORE_VERSION,
     GaStrategy,
     StrategyConfig,
     StrategyConfigFile,
@@ -61,7 +62,20 @@ from coinbase.ga.strategy_evaluator import (
 )
 from coinbase.ga.strategy_output import DryRunLog, OutputConfigFile, ParentDirectory, StrategyJsonFile, UtcNow
 from coinbase.strategy import ClosedMarketRow, LiveMarketRow
-from coinbase.trading_strategy import Decision, Direction, Ledger, Position, Strategy
+from coinbase.trading_strategy import (
+    BasisPointFee,
+    BorrowRate,
+    ConfiguredBorrowRate,
+    ConfiguredFees,
+    Decision,
+    Direction,
+    FeeSchedule,
+    Ledger,
+    NoBorrowRate,
+    NoFees,
+    Position,
+    Strategy,
+)
 from exchange.selection import ConfiguredExchange
 
 
@@ -110,6 +124,13 @@ class TrainedStrategyConfig:
     def config(self) -> StrategyConfig:
         section = {**(self._raw_config.get("strategy") or {}), **self._hyperparameters}
         return ValidatedStrategyConfig(StrategyConfigFile({"strategy": section}).config()).config()
+
+    # True when the genome was scored under an older signal_score mapping. Its
+    # thresholds were calibrated against that mapping, so papering it under
+    # today's silently measures a strategy nobody trained — version 1 scored the
+    # raw weighted sum, where version 2 puts neutral at 0.5.
+    def stale_scoring(self) -> bool:
+        return self._hyperparameters.get("signal_score_version", 1) < SIGNAL_SCORE_VERSION
 
     # Keys where the saved strategy and config.yaml disagree — surfaced so a
     # divergence is visible rather than silently resolved.
@@ -175,10 +196,15 @@ class PaperStateFile:
     def _position(raw: Optional[dict[str, Any]]) -> Optional[Position]:
         if not raw:
             return None
+        # entry_timestamp and entry_fee default to 0.0 for a book written before
+        # costs were modelled. A restored position with no entry time accrues no
+        # borrow interest (see BorrowInterest) rather than accruing from 1970.
         return Position(
-            entry_price = float(raw["entry_price"]),
-            size        = float(raw["size"]),
-            direction   = Direction(raw["direction"]),
+            entry_price     = float(raw["entry_price"]),
+            size            = float(raw["size"]),
+            direction       = Direction(raw["direction"]),
+            entry_timestamp = float(raw.get("entry_timestamp", 0.0)),
+            entry_fee       = float(raw.get("entry_fee", 0.0)),
         )
 
     @staticmethod
@@ -186,9 +212,11 @@ class PaperStateFile:
         if position is None:
             return None
         return {
-            "entry_price": position.entry_price(),
-            "size":        position.size(),
-            "direction":   position.direction().value,
+            "entry_price":     position.entry_price(),
+            "size":            position.size(),
+            "direction":       position.direction().value,
+            "entry_timestamp": position.entry_timestamp(),
+            "entry_fee":       position.entry_fee(),
         }
 
 
@@ -219,33 +247,12 @@ class InitialPaperState:
 
 
 # ── Fees ───────────────────────────────────────────────────────────────
-# Trade.profit() stays gross: every saved strategy's recorded performance, and
-# every row in experiments/index.csv, is denominated in it, so charging fees
-# there would silently invalidate comparisons across the whole history.
-# A paper run charges on top instead, leaving the backtest arithmetic alone.
-#
-# Charged on notional, not on a Decision: a closing decision (SELL/COVER)
-# carries size 0.0 because the Ledger closes whatever is open, so pricing off
-# decision.size would silently charge entries only and halve the real cost.
-#
-# Approximations worth knowing: a liquidation close is not charged, and
-# slippage is not modelled at all.
-
-class FeeSchedule(Protocol):
-    def charge(self, notional: float) -> float: ...
-
-
-class NoFees:
-    def charge(self, notional: float) -> float:
-        return 0.0
-
-
-class BasisPointFee:
-    def __init__(self, basis_points: float) -> None:
-        self._basis_points = basis_points
-
-    def charge(self, notional: float) -> float:
-        return notional * self._basis_points / 10_000.0
+# FeeSchedule, BasisPointFee, NoFees and the borrow-rate objects now live in
+# coinbase/trading_strategy.py beside the Ledger that applies them, so a paper
+# run and a backtest cost a round trip identically instead of each carrying its
+# own model. They are re-exported here: paper_engine.py imports them from this
+# module, and a saved config or a caller should not have to care which file
+# they moved to.
 
 
 # ── Tick ───────────────────────────────────────────────────────────────
@@ -261,7 +268,10 @@ class TickOutcome:
     # The candle row the decision was taken on — carried so a caller can report
     # the indicator values behind a decision without fetching them again.
     row:          dict[str, float] = field(default_factory=dict)
+    # Kept apart, not summed into one "cost": which of the two is eating a book
+    # is the question a paper run exists to answer.
     fee:          float = 0.0
+    interest:     float = 0.0
     # The position the decision was taken AGAINST, not the one it produced —
     # what a strategy scored, and so what explains the action it chose.
     position_before: Optional[Position] = None
@@ -275,12 +285,14 @@ class PaperTick:
         state_file: StateStore,
         starting_balance: float,
         fees: FeeSchedule = NoFees(),
+        borrow: BorrowRate = NoBorrowRate(),
     ) -> None:
         self._rows             = rows
         self._strategy         = strategy
         self._state_file       = state_file
         self._starting_balance = starting_balance
         self._fees             = fees
+        self._borrow           = borrow
 
     async def run(self) -> TickOutcome:
         state = (
@@ -297,16 +309,19 @@ class PaperTick:
                 closed_trades=0, row=row, position_before=state.position,
             )
 
-        ledger = Ledger(state.balance, state.position)
+        ledger = Ledger(state.balance, state.position, self._fees, self._borrow)
         # Same order as Backtest.run(): a position carried in is liquidation
         # checked against this candle's range before a new decision is taken.
-        ledger.liquidate(row["high"], row["low"])
+        ledger.liquidate(row["high"], row["low"], candle_start)
         before   = ledger.position()
         decision = self._strategy.decide(row, ledger.position(), ledger.balance())
-        ledger.apply(decision, row["close"])
+        ledger.apply(decision, row["close"], candle_start)
 
-        fee     = self._fees.charge(self._notional(before, ledger.position(), row["close"]))
-        balance = ledger.balance() - fee
+        # The Ledger charges as it opens and closes, so the balance is already
+        # net; these are what it took this tick, for the report.
+        fee      = ledger.fees_charged()
+        interest = ledger.interest_charged()
+        balance  = ledger.balance()
         self._state_file.write(
             PaperState(
                 balance           = balance,
@@ -314,27 +329,17 @@ class PaperTick:
                 last_candle_start = candle_start,
                 realized_trades   = state.realized_trades + len(ledger.trades()),
                 realized_wins     = state.realized_wins + sum(
-                    1 for trade in ledger.trades() if trade.profit() > 0.0
+                    1 for trade in ledger.trades() if trade.net_profit() > 0.0
                 ),
             ),
             self._rows.pair(),
         )
         return TickOutcome(
             acted=True, candle_start=candle_start, decision=decision,
-            balance=balance, equity=ledger.equity(row["close"]) - fee,
-            closed_trades=len(ledger.trades()), row=row, fee=fee,
+            balance=balance, equity=ledger.equity(row["close"]),
+            closed_trades=len(ledger.trades()), row=row, fee=fee, interest=interest,
             position_before=before,
         )
-
-    # What actually changed hands this tick: the size opened, or the size
-    # closed. A tick that neither opened nor closed anything trades nothing.
-    @staticmethod
-    def _notional(before: Optional[Position], after: Optional[Position], price: float) -> float:
-        if before is None and after is not None:
-            return after.size() * price
-        if before is not None and after is None:
-            return before.size() * price
-        return 0.0
 
     @staticmethod
     def _equity(state: PaperState, price: float) -> float:
@@ -391,6 +396,14 @@ async def _main() -> None:
     for key, (from_config, from_strategy) in trained.divergences().items():
         print(f"note: {key} config.yaml={from_config} -> using trained {from_strategy}")
 
+    if trained.stale_scoring():
+        print(
+            "WARNING: this strategy was trained before signed weights, when signal_score "
+            "was the raw weighted sum. Its thresholds were calibrated against that scale "
+            "and do not mean the same thing now that neutral is 0.5 — retrain before "
+            "trusting this book."
+        )
+
     strategy = GaStrategy(
         Genome(saved.weights()),
         strategy_config,
@@ -405,10 +418,14 @@ async def _main() -> None:
             adapter, paper_config.pair, window.granularity,
             market_config.periods(), market_config.normalized_columns(),
         ))
+        # Costs come from the strategy the genome was trained under, so a
+        # paper book is charged what its own scoring assumed it would be.
         outcome = await PaperTick(
             rows, strategy,
             PaperStateFile(paper_config.state_filepath),
             strategy_config.starting_balance,
+            ConfiguredFees(strategy_config.fee_bps).schedule(),
+            ConfiguredBorrowRate(strategy_config.borrow_bps_per_hour).rate(),
         ).run()
 
     ConsoleTickReport(

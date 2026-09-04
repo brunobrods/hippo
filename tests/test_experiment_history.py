@@ -94,7 +94,8 @@ def _record(run_id: str = "run-1") -> ExperimentRecord:
         pair="BTC-USDC", granularity="ONE_HOUR", start_date="2024-01-01", end_date="2024-01-02",
         test_split=0.3, ga_config=_ga_config(), strategy_config=_strategy_config(),
         performance={
-            "gross_profit": 12.5, "annualized_yield": 0.15, "total_trades": 3,
+            "gross_profit": 12.5, "net_profit": 11.0, "fees_paid": 1.0,
+            "interest_paid": 0.5, "annualized_yield": 0.15, "total_trades": 3,
             "win_rate": 0.66, "max_drawdown": 0.1,
         },
     )

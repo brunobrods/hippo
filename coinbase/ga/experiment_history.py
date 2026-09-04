@@ -20,7 +20,9 @@ _INDEX_FIELDS = (
     "tournament_size", "elitism_count", "mutation_sigma",
     "buy_threshold", "sell_threshold", "position_size_pct", "unwind_at_entry_price",
     "allow_short", "short_entry_threshold", "short_exit_threshold",
-    "gross_profit", "annualized_yield", "total_trades", "win_rate", "max_drawdown",
+    "fee_bps", "borrow_bps_per_hour",
+    "gross_profit", "net_profit", "fees_paid", "interest_paid",
+    "annualized_yield", "total_trades", "win_rate", "max_drawdown",
 )
 
 
@@ -128,7 +130,12 @@ class ExperimentRecord:
             "allow_short":           self.strategy_config.allow_short,
             "short_entry_threshold": self.strategy_config.short_entry_threshold,
             "short_exit_threshold":  self.strategy_config.short_exit_threshold,
+            "fee_bps":               self.strategy_config.fee_bps,
+            "borrow_bps_per_hour":   self.strategy_config.borrow_bps_per_hour,
             "gross_profit":          self.performance["gross_profit"],
+            "net_profit":            self.performance["net_profit"],
+            "fees_paid":             self.performance["fees_paid"],
+            "interest_paid":         self.performance["interest_paid"],
             "annualized_yield":      self.performance["annualized_yield"],
             "total_trades":          self.performance["total_trades"],
             "win_rate":              self.performance["win_rate"],

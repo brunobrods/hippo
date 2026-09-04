@@ -57,6 +57,12 @@ paper:
   # state_filepath: "./paper_state.json"
 
 strategy:
+  # NOTE: every threshold below is a signal_score, and signal_score changed
+  # scale when weights were allowed to go negative. It is now
+  # (weighted_sum + 1) / 2, so NEUTRAL IS 0.5 — the numbers here were
+  # calibrated against the old raw-sum scale and are almost certainly wrong
+  # now. Re-sweep them before trusting a run. A genome saved under the old
+  # scale is flagged on load (see signal_score_version).
   position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
   buy_threshold: 0.60       # signal_score above this opens a position
   sell_threshold: 0.40      # signal_score below this closes an open position
@@ -80,6 +86,22 @@ strategy:
   # calibration result so far whose effect clearly exceeds its seed noise.
   # Above 0.50 it degrades sharply and a -9.5%/2-trade failure mode recurs.
   short_exit_threshold: 0.45   # signal_score above this covers an open short
+  # Trading costs. Both default to 0.0, and every run recorded before these
+  # existed was scored at 0.0 — so raising them makes new runs incomparable
+  # with the old ones on annualized_yield. The index records both rates per
+  # run for exactly that reason: group by them before comparing.
+  #
+  # fee_bps is charged per leg on the notional that changed hands (entry AND
+  # exit, including a liquidation and the end-of-window unwind). Binance spot/
+  # margin taker is 10.0 at VIP0; Coinbase Advanced Trade taker starts at 60.0
+  # and falls with volume.
+  fee_bps: 0.0
+  # borrow_bps_per_hour accrues only against an open SHORT, on the base it
+  # borrowed marked at entry. A long borrows nothing on either venue
+  # (sideEffectType NO_SIDE_EFFECT), so it never accrues. Binance publishes
+  # this as a daily rate per asset — divide by 24. This is the cost the GA was
+  # blindest to: a short held for days scored identically to one held an hour.
+  borrow_bps_per_hour: 0.0
   indicators:
     sma_short_period: 9
     sma_long_period: 20
@@ -90,6 +112,10 @@ strategy:
     macd_signal: 9
   # which normalized columns the GA assigns a weight to and scores on. Deliberately
   # excludes market_data.delta_columns, which get normalized but not weighted.
+  # Weights are SIGNED and their absolute values sum to 1: a negative weight
+  # reads its indicator as bearish, subtracting from the score rather than
+  # merely contributing nothing. An all-positive genome can therefore never
+  # score below 0.5, which means it can never sell or short.
   weight_keys: ["sma_short", "sma_long", "sma_extra", "rsi", "macd"]
 
 genetic_algorithm:

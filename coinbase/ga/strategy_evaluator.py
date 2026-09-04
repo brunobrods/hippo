@@ -9,6 +9,8 @@ from coinbase.trading_strategy import (
     Action,
     Backtest,
     BacktestResult,
+    ConfiguredBorrowRate,
+    ConfiguredFees,
     Decision,
     Direction,
     MarketRows,
@@ -30,6 +32,12 @@ class StrategyConfig:
     allow_short:           bool  = False
     short_entry_threshold: float = 0.25  # score below this opens a short
     short_exit_threshold:  float = 0.40  # score above this covers it
+    # Trading costs, both zero by default so an existing config reproduces the
+    # numbers it always produced. fee_bps is charged per leg on the notional
+    # that changed hands; borrow_bps_per_hour accrues only against a short, for
+    # the time it is held (a long borrows nothing on either venue).
+    fee_bps:               float = 0.0
+    borrow_bps_per_hour:   float = 0.0
 
 
 class StrategyConfigFile:
@@ -47,6 +55,8 @@ class StrategyConfigFile:
             allow_short           = section.get("allow_short", False),
             short_entry_threshold = section.get("short_entry_threshold", 0.25),
             short_exit_threshold  = section.get("short_exit_threshold", 0.40),
+            fee_bps               = float(section.get("fee_bps", 0.0)),
+            borrow_bps_per_hour   = float(section.get("borrow_bps_per_hour", 0.0)),
         )
 
 
@@ -88,6 +98,15 @@ class ValidatedStrategyConfig:
                 f"short_entry_threshold ({c.short_entry_threshold}); a short would be "
                 f"covered on the candle it opened"
             )
+        # A negative rate would be read as "no cost" by ConfiguredFees /
+        # ConfiguredBorrowRate, so a sign typo would silently score a run free
+        # of the very costs it was configured to pay.
+        if c.fee_bps < 0.0:
+            found.append(f"strategy.fee_bps must not be negative, got {c.fee_bps}")
+        if c.borrow_bps_per_hour < 0.0:
+            found.append(
+                f"strategy.borrow_bps_per_hour must not be negative, got {c.borrow_bps_per_hour}"
+            )
         return found
 
 
@@ -116,6 +135,12 @@ class ValidatedWeightKeys:
 # ── GA-driven strategy ───────────────────────────────────────────────────
 
 POSITION_PNL_KEY = "position_pnl"
+
+# Bumped whenever signal_score's mapping changes, because a genome's thresholds
+# only mean anything against the mapping it was calibrated on. Version 1 scored
+# the raw weighted sum of non-negative weights; version 2 allows signed weights
+# and maps the sum onto [0, 1] as (s + 1) / 2, which moves neutral to 0.5.
+SIGNAL_SCORE_VERSION = 2
 
 
 class GaStrategy:
@@ -148,6 +173,18 @@ class GaStrategy:
     # Public because it is the number that explains a decision: a monitor
     # showing why a strategy is holding needs the score, not just the action.
     # A pure query — asking for it never changes what decide() would return.
+    #
+    # Weights are signed and their absolute values sum to 1, so the weighted sum
+    # of norm_ columns (each in [0, 1]) lands in [-1, 1]. Mapping that onto
+    # [0, 1] keeps every threshold in config.yaml in the vocabulary it was
+    # written in: buy_threshold 0.60 still reads as "well above neutral", where
+    # a raw signed score would silently invert what those numbers mean.
+    #
+    # Neutral is now 0.5 rather than wherever a positive-only genome happened to
+    # sit, so THRESHOLDS CALIBRATED BEFORE SIGNED WEIGHTS DO NOT CARRY OVER.
+    # The POSITION_PNL_KEY term is a fractional return rather than a norm_
+    # column, so it can still push the total outside [-1, 1] — as it always
+    # could, and the thresholds have always had to tolerate.
     def signal_score(self, row: dict[str, float], position: Optional[Position]) -> float:
         total = sum(
             self._genome.weight(key) * row[f"norm_{key}"]
@@ -155,7 +192,7 @@ class GaStrategy:
         )
         if POSITION_PNL_KEY in self._keys:
             total += self._genome.weight(POSITION_PNL_KEY) * self._unrealized_return(row, position)
-        return total
+        return (total + 1.0) / 2.0
 
     def _unrealized_return(self, row: dict[str, float], position: Optional[Position]) -> float:
         if position is None:
@@ -168,13 +205,22 @@ class GaStrategy:
 class AnnualizedYield:
     _SECONDS_PER_YEAR = 365.25 * 24 * 3600
 
-    def __init__(self, gross_profit: float, starting_balance: float, duration_seconds: float) -> None:
-        self._gross_profit     = gross_profit
+    # `profit` rather than `gross_profit`: the caller decides whether costs are
+    # already taken out, and StrategyEvaluator now hands it the net figure.
+    def __init__(self, profit: float, starting_balance: float, duration_seconds: float) -> None:
+        self._profit           = profit
         self._starting_balance = starting_balance
         self._duration_seconds = duration_seconds
 
     def value(self) -> float:
-        total_return = self._gross_profit / self._starting_balance
+        # Floored at a total loss. Gross profit could never fall below
+        # -starting_balance (position_size_pct <= 1.0 bounds it), but fees and
+        # interest are charged ON TOP of the price loss, so a liquidated short
+        # that then pays its exit fee and its accrued interest can leave the
+        # balance negative. Below -1.0 the base of the power is negative and
+        # Python returns a COMPLEX number, which makes every fitness comparison
+        # in the GA raise TypeError and kills a multi-hour training run.
+        total_return = max(-1.0, self._profit / self._starting_balance)
         if self._duration_seconds <= 0.0:
             return total_return
         return (1.0 + total_return) ** (self._SECONDS_PER_YEAR / self._duration_seconds) - 1.0
@@ -214,10 +260,15 @@ class StrategyEvaluator:
         strategy = GaStrategy(genome, self._config, self._keys)
         return Backtest(
             self._rows, strategy, self._config.starting_balance, self._config.unwind_at_entry_price,
+            ConfiguredFees(self._config.fee_bps).schedule(),
+            ConfiguredBorrowRate(self._config.borrow_bps_per_hour).rate(),
         ).run()
 
+    # Net, so the GA pays for the trading it does: a genome that churns for a
+    # thin edge now scores below one that waits for a wide one. With both rates
+    # at their 0.0 default this is identical to the gross figure it used to be.
     def annualized_yield(self, result: BacktestResult) -> float:
-        return AnnualizedYield(result.gross_profit(), self._config.starting_balance, self._duration_seconds()).value()
+        return AnnualizedYield(result.net_profit(), self._config.starting_balance, self._duration_seconds()).value()
 
     def _duration_seconds(self) -> float:
         if len(self._frame) < 2:

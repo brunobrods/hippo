@@ -30,6 +30,11 @@ engine:
   # see what fee drag does — at 30-minute granularity it is the largest single
   # gap between a backtest and reality. Slippage is still not modelled.
   fee_bps: 0.0
+  # Hourly borrow cost, charged only against an open SHORT on the base it
+  # borrowed. Binance publishes a daily rate per asset — divide by 24. Left at
+  # 0 a short costs nothing to hold, which is the one place a paper book can
+  # still flatter a multi-day short exactly the way the backtest used to.
+  borrow_bps_per_hour: 0.0
   # Both default under ~/.coinbase/ga/paper/ — outside the repo, so every
   # worktree shares one set of books instead of each keeping its own.
   # state_dir: null
