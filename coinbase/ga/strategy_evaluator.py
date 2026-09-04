@@ -36,6 +36,10 @@ class StrategyConfig:
     # full, 0.0 restores the historical behaviour of scoring the realized total
     # with no regard for how few trades produced it.
     fitness_confidence:    float = 1.0
+    # Fraction above (long) or below (short) entry at which a post-only limit
+    # rests from the moment the position opens. 0.0 leaves every fill at a
+    # close, which is what every run so far was scored under.
+    take_profit_pct:       float = 0.0
 
 
 class StrategyConfigFile:
@@ -54,6 +58,7 @@ class StrategyConfigFile:
             short_entry_threshold = section.get("short_entry_threshold", 0.25),
             short_exit_threshold  = section.get("short_exit_threshold", 0.40),
             fitness_confidence    = float(section.get("fitness_confidence", 1.0)),
+            take_profit_pct       = float(section.get("take_profit_pct", 0.0)),
         )
 
 
@@ -369,7 +374,8 @@ class StrategyEvaluator:
     def result(self, genome: Genome) -> BacktestResult:
         strategy = GaStrategy(genome, self._config, self._keys)
         return Backtest(
-            self._rows, strategy, self._config.starting_balance, self._config.unwind_at_entry_price,
+            self._rows, strategy, self._config.starting_balance,
+            self._config.unwind_at_entry_price, self._config.take_profit_pct,
         ).run()
 
     def annualized_yield(self, result: BacktestResult) -> float:
