@@ -13,7 +13,7 @@ from coinbase.ga.pair_selector import (
     WilsonInterval,
 )
 from coinbase.ga.paper_trading import BasisPointFee, NoFees
-from coinbase.ga.strategy_evaluator import GaStrategy, StrategyConfig
+from coinbase.ga.strategy_evaluator import GaStrategy, SignalDesign, StrategyConfig
 from coinbase.trading_strategy import Action, Direction
 
 
@@ -35,7 +35,9 @@ def _config(buy: float = 0.6, sell: float = 0.4, short: bool = False,
 # One weight on one key, so signal_score is exactly the norm_rsi column and a
 # test can dictate the score candle by candle.
 def _strategy(config: StrategyConfig) -> GaStrategy:
-    return GaStrategy(Genome({"rsi": 1.0}), config, ("rsi",))
+    return GaStrategy(
+        SignalDesign(config.design).model(Genome({"rsi": 1.0}), ("rsi",)), config,
+    )
 
 
 def _frame(scores: list[float], closes: list[float], step: int = 3600) -> pd.DataFrame:

@@ -8,6 +8,7 @@ import pandas as pd
 
 from coinbase.ga.config import ConfigFile
 from coinbase.ga.experiment_history import ExperimentDirectory
+from coinbase.ga.strategy_evaluator import LINEAR_DESIGN
 from coinbase.ga.strategy_output import OutputConfigFile
 
 DEFAULT_METRIC = "annualized_yield"
@@ -66,7 +67,14 @@ class ExperimentConfigs:
         # either without knowing which is which produces a meaningless average.
         frame["negative_weights"]   = frame["run_id"].map(self._negative_weights)
         frame["fitness_confidence"] = frame["run_id"].map(self._fitness_confidence)
+        # Which model design scored the run. Averaging a linear run together
+        # with one from another design compares two different functions and
+        # reports the mean as if it meant something.
+        frame["design"]             = frame["run_id"].map(self._design)
         return frame
+
+    def _design(self, run_id: str) -> str:
+        return str((self._raw(run_id).get("strategy") or {}).get("design", LINEAR_DESIGN))
 
     def _negative_weights(self, run_id: str) -> bool:
         return bool((self._raw(run_id).get("genetic_algorithm") or {}).get("allow_negative_weights", False))

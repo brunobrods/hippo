@@ -52,6 +52,7 @@ from coinbase.ga.ga_engine import BackfilledGenome, Genome
 from coinbase.ga.market_data_processor import MarketDataConfig
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
+    SignalDesign,
     GaStrategy,
     StrategyConfig,
     StrategyConfigFile,
@@ -398,7 +399,8 @@ async def _main() -> None:
     for key in backfilled.missing():
         print(f"note: genome predates {key} — running it weighted zero; retrain to use it")
 
-    strategy = GaStrategy(backfilled.filled(), strategy_config, keys)
+    model    = SignalDesign(strategy_config.design).model(backfilled.filled(), keys)
+    strategy = GaStrategy(model, strategy_config)
 
     # The paper run follows its own market, which need not be the one the
     # genome was trained on — ConfiguredExchange is asked for that exchange

@@ -110,20 +110,41 @@ class NormalizedWeights:
         return {key: value / total for key, value in self._raw.items()}
 
 
+# How a genome's raw numbers are rescaled after every operator that produces
+# new ones. This is a property of the MODEL, not of the search: L1 scaling
+# means "one unit of conviction spread across the indicators", which is exactly
+# what a weighted sum needs and exactly what a network's internal parameters
+# must not have — scaling those would change the function the network computes.
+#
+# The engine therefore takes it rather than assuming it, and every operator
+# defaults to L1 so the linear design and every test written against it behave
+# as they always did.
+
+class WeightScaling(Protocol):
+    def scaled(self, raw: dict[str, float]) -> dict[str, float]: ...
+
+
+class L1Scaling:
+    def scaled(self, raw: dict[str, float]) -> dict[str, float]:
+        return NormalizedWeights(raw).values()
+
+
 class RandomWeights:
     def __init__(
         self,
         keys: tuple[str, ...],
         random_source: random.Random,
         allow_negative: bool = False,
+        scaling: WeightScaling = L1Scaling(),
     ) -> None:
         self._keys           = keys
         self._random         = random_source
         self._allow_negative = allow_negative
+        self._scaling        = scaling
 
     def generate(self) -> dict[str, float]:
         raw = {key: self._gene() for key in self._keys}
-        return NormalizedWeights(raw).values()
+        return self._scaling.scaled(raw)
 
     # Sampled symmetrically about zero when signs are allowed, so the initial
     # population explores inverse relationships from the first generation
@@ -141,14 +162,18 @@ class RandomPopulation:
         keys: tuple[str, ...],
         random_source: random.Random,
         allow_negative: bool = False,
+        scaling: WeightScaling = L1Scaling(),
     ) -> None:
         self._size           = size
         self._keys           = keys
         self._random         = random_source
         self._allow_negative = allow_negative
+        self._scaling        = scaling
 
     def genomes(self) -> list[Genome]:
-        random_weights = RandomWeights(self._keys, self._random, self._allow_negative)
+        random_weights = RandomWeights(
+            self._keys, self._random, self._allow_negative, self._scaling,
+        )
         return [Genome(random_weights.generate()) for _ in range(self._size)]
 
 
@@ -181,17 +206,24 @@ class TournamentSelection:
 
 
 class UniformCrossover:
-    def __init__(self, parent1: Genome, parent2: Genome, random_source: random.Random) -> None:
+    def __init__(
+        self,
+        parent1: Genome,
+        parent2: Genome,
+        random_source: random.Random,
+        scaling: WeightScaling = L1Scaling(),
+    ) -> None:
         self._parent1 = parent1
         self._parent2 = parent2
         self._random  = random_source
+        self._scaling = scaling
 
     def child(self) -> Genome:
         raw = {
             key: (self._parent1.weight(key) if self._random.random() < 0.5 else self._parent2.weight(key))
             for key in self._parent1.weights()
         }
-        return Genome(NormalizedWeights(raw).values())
+        return Genome(self._scaling.scaled(raw))
 
 
 class GaussianMutation:
@@ -202,19 +234,21 @@ class GaussianMutation:
         sigma: float,
         random_source: random.Random,
         allow_negative: bool = False,
+        scaling: WeightScaling = L1Scaling(),
     ) -> None:
         self._genome         = genome
         self._mutation_rate  = mutation_rate
         self._sigma          = sigma
         self._random         = random_source
         self._allow_negative = allow_negative
+        self._scaling        = scaling
 
     def mutated(self) -> Genome:
         raw = {
             key: self._mutated_gene(value)
             for key, value in self._genome.weights().items()
         }
-        return Genome(NormalizedWeights(raw).values())
+        return Genome(self._scaling.scaled(raw))
 
     # The clamp at zero is what made an inverse relationship inexpressible: a
     # genome could learn "RSI high means buy harder" but never "RSI high means
@@ -249,15 +283,24 @@ class GenerationStats:
 # ── Engine ─────────────────────────────────────────────────────────────
 
 class GeneticAlgorithm:
-    def __init__(self, config: GaConfig, keys: tuple[str, ...]) -> None:
-        self._config = config
-        self._keys   = keys
-        self._random = random.Random(config.seed)
+    # `scaling` comes from the model design being trained — the engine evolves
+    # numbers and does not know what they mean. It defaults to L1 so a caller
+    # training the linear design need not say so.
+    def __init__(
+        self,
+        config: GaConfig,
+        keys: tuple[str, ...],
+        scaling: WeightScaling = L1Scaling(),
+    ) -> None:
+        self._config  = config
+        self._keys    = keys
+        self._scaling = scaling
+        self._random  = random.Random(config.seed)
 
     def initial_population(self) -> list[Genome]:
         return RandomPopulation(
             self._config.population_size, self._keys, self._random,
-            self._config.allow_negative_weights,
+            self._config.allow_negative_weights, self._scaling,
         ).genomes()
 
     def evolve(
@@ -283,10 +326,10 @@ class GeneticAlgorithm:
         parent1   = selection.winner()
         parent2   = selection.winner()
         if self._random.random() < self._config.crossover_rate:
-            candidate = UniformCrossover(parent1, parent2, self._random).child()
+            candidate = UniformCrossover(parent1, parent2, self._random, self._scaling).child()
         else:
             candidate = parent1
         return GaussianMutation(
             candidate, self._config.mutation_rate, self._config.mutation_sigma,
-            self._random, self._config.allow_negative_weights,
+            self._random, self._config.allow_negative_weights, self._scaling,
         ).mutated()

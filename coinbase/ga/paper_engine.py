@@ -65,6 +65,7 @@ from coinbase.ga.paper_trading import (
 )
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
+    SignalDesign,
     GaStrategy,
     ValidatedWeightKeys,
     WeightKeysConfig,
@@ -725,7 +726,10 @@ class PaperEngine:
             config   = entry,
             rows     = rows,
             strategy = GaStrategy(
-                genome.filled(), trained.config(), keys + (POSITION_PNL_KEY,),
+                SignalDesign(trained.config().design).model(
+                    genome.filled(), keys + (POSITION_PNL_KEY,),
+                ),
+                trained.config(),
             ),
             book     = self.books[entry.name],
             fees     = ConfiguredFees(self._config.fee_bps).schedule(),

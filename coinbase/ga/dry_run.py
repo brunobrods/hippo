@@ -7,6 +7,7 @@ from coinbase.ga.market_data_processor import LiveBasket, MarketDataConfig
 from coinbase.ga.strategy_evaluator import (
     GaStrategy,
     POSITION_PNL_KEY,
+    SignalDesign,
     StrategyConfigFile,
     ValidatedStrategyConfig,
     ValidatedWeightKeys,
@@ -82,7 +83,8 @@ async def _main() -> None:
     genome   = BackfilledGenome(Genome(reloaded.weights()), keys)
     for key in genome.missing():
         print(f"note: genome predates {key} — running it weighted zero; retrain to use it")
-    strategy = GaStrategy(genome.filled(), strategy_config, keys)
+    model    = SignalDesign(strategy_config.design).model(genome.filled(), keys)
+    strategy = GaStrategy(model, strategy_config)
 
     async with ConfiguredExchange(raw_config).adapter() as adapter:
         basket      = LiveBasket(

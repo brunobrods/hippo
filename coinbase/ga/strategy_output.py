@@ -108,6 +108,12 @@ class TrainedStrategy:
                 # in keys that are recorded here.
                 "fee_bps":               self._config.fee_bps,
                 "borrow_bps_per_hour":   self._config.borrow_bps_per_hour,
+                # Which model design produced these weights. Without it a
+                # genome is just a bag of numbers, and a loader would score it
+                # through whatever design happened to be configured. Absent in
+                # anything saved before designs were named, where it reads as
+                # "linear" — which is what those runs were.
+                "design":                self._config.design,
             },
         }
 

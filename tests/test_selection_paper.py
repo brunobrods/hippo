@@ -9,7 +9,7 @@ from coinbase.ga.selection_paper import (
     SelectionStateFile,
     SelectionTick,
 )
-from coinbase.ga.strategy_evaluator import GaStrategy, StrategyConfig
+from coinbase.ga.strategy_evaluator import GaStrategy, SignalDesign, StrategyConfig
 from coinbase.trading_strategy import Action, Direction, Position
 
 
@@ -31,7 +31,10 @@ class FakeTrained:
         self.config = config
 
     def strategy(self) -> GaStrategy:
-        return GaStrategy(Genome({"rsi": 1.0}), self.config, ("rsi",))
+        return GaStrategy(
+            SignalDesign(self.config.design).model(Genome({"rsi": 1.0}), ("rsi",)),
+            self.config,
+        )
 
 
 def _config(buy: float = 0.6, sell: float = 0.4, short: bool = False) -> StrategyConfig:

@@ -2,11 +2,13 @@ import pandas as pd
 import pytest
 
 import coinbase.ga.strategy_evaluator as strategy_evaluator
-from coinbase.ga.ga_engine import Genome
+from coinbase.ga.ga_engine import Genome, L1Scaling
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
     AnnualizedYield,
     GaStrategy,
+    LinearSignal,
+    SignalDesign,
     StrategyConfig,
     StrategyConfigFile,
     StrategyEvaluator,
@@ -50,6 +52,14 @@ def _row(close: float, sma_short: float) -> dict[str, float]:
 
 def _all_weight_on_sma_short() -> Genome:
     return Genome({"sma_short": 1.0, "sma_long": 0.0, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
+
+
+
+# GaStrategy now takes a SignalModel rather than a genome, because the model is
+# a separate design from the policy. These tests are about the policy, so they
+# go through the configured design exactly as every production caller does.
+def _ga_strategy(genome: Genome, config: StrategyConfig, keys: tuple[str, ...]) -> GaStrategy:
+    return GaStrategy(SignalDesign(config.design).model(genome, keys), config)
 
 
 # ── StrategyConfigFile ───────────────────────────────────────────────
@@ -148,32 +158,32 @@ def test_validated_weight_keys_rejects_a_key_missing_from_normalized_columns():
 # ── GaStrategy ────────────────────────────────────────────────────────
 
 def test_ga_strategy_buys_when_flat_and_score_above_buy_threshold():
-    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _config(), _KEYS)
     decision = strategy.decide(_row(close=100.0, sma_short=0.8), position=None, balance=1000.0)
     assert decision.action is Action.BUY
     assert decision.size == pytest.approx(1.0)  # 10% of 1000 / 100
 
 
 def test_ga_strategy_holds_when_flat_and_score_between_thresholds():
-    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _config(), _KEYS)
     decision = strategy.decide(_row(close=100.0, sma_short=0.5), position=None, balance=1000.0)
     assert decision.action is Action.HOLD
 
 
 def test_ga_strategy_never_re_buys_while_already_positioned():
-    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _config(), _KEYS)
     decision = strategy.decide(_row(close=100.0, sma_short=0.9), position=Position(90.0, 1.0), balance=1000.0)
     assert decision.action is Action.HOLD
 
 
 def test_ga_strategy_sells_when_positioned_and_score_below_sell_threshold():
-    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _config(), _KEYS)
     decision = strategy.decide(_row(close=100.0, sma_short=0.2), position=Position(90.0, 1.0), balance=1000.0)
     assert decision.action is Action.SELL
 
 
 def test_ga_strategy_holds_position_when_score_between_thresholds():
-    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _config(), _KEYS)
     decision = strategy.decide(_row(close=100.0, sma_short=0.5), position=Position(90.0, 1.0), balance=1000.0)
     assert decision.action is Action.HOLD
 
@@ -186,14 +196,14 @@ def _all_weight_on_position_pnl() -> Genome:
 
 def test_ga_strategy_position_pnl_is_zero_while_flat():
     keys     = _KEYS + (POSITION_PNL_KEY,)
-    strategy = GaStrategy(_all_weight_on_position_pnl(), _config(), keys)
+    strategy = _ga_strategy(_all_weight_on_position_pnl(), _config(), keys)
     decision = strategy.decide(_row(close=100.0, sma_short=0.0), position=None, balance=1000.0)
     assert decision.action is Action.HOLD  # score is 0.0, not above buy_threshold
 
 
 def test_ga_strategy_position_pnl_pulls_score_down_on_a_loss_and_triggers_sell():
     keys     = _KEYS + (POSITION_PNL_KEY,)
-    strategy = GaStrategy(_all_weight_on_position_pnl(), _config(), keys)
+    strategy = _ga_strategy(_all_weight_on_position_pnl(), _config(), keys)
     position = Position(entry_price=100.0, size=1.0)
     decision = strategy.decide(_row(close=70.0, sma_short=0.0), position=position, balance=1000.0)
     # unrealized_return = (70-100)/100 = -0.3, weight 1.0 -> score -0.3 < sell_threshold 0.4
@@ -202,7 +212,7 @@ def test_ga_strategy_position_pnl_pulls_score_down_on_a_loss_and_triggers_sell()
 
 def test_ga_strategy_position_pnl_holds_a_winning_position():
     keys     = _KEYS + (POSITION_PNL_KEY,)
-    strategy = GaStrategy(_all_weight_on_position_pnl(), _config(), keys)
+    strategy = _ga_strategy(_all_weight_on_position_pnl(), _config(), keys)
     position = Position(entry_price=100.0, size=1.0)
     decision = strategy.decide(_row(close=150.0, sma_short=0.0), position=position, balance=1000.0)
     # unrealized_return = (150-100)/100 = 0.5, not below sell_threshold 0.4 -> stays in
@@ -211,7 +221,7 @@ def test_ga_strategy_position_pnl_holds_a_winning_position():
 
 def test_ga_strategy_ignores_position_pnl_when_key_not_in_use():
     # confirms no behavior change for callers that don't opt into POSITION_PNL_KEY
-    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _config(), _KEYS)
     position = Position(entry_price=100.0, size=1.0)
     decision = strategy.decide(_row(close=1.0, sma_short=0.5), position=position, balance=1000.0)
     assert decision.action is Action.HOLD  # a huge unrealized loss on close=1.0 has zero effect
@@ -224,34 +234,34 @@ def _shorting_config(**overrides) -> StrategyConfig:
 
 
 def test_ga_strategy_opens_a_short_when_score_falls_below_short_entry():
-    strategy = GaStrategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
     decision = strategy.decide(_row(close=100.0, sma_short=0.1), position=None, balance=1000.0)
     assert decision.action is Action.SHORT
     assert decision.size == pytest.approx(1.0)  # 10% of 1000 / 100, same sizing as a long
 
 
 def test_ga_strategy_stays_flat_in_the_band_between_short_entry_and_buy():
-    strategy = GaStrategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
     for score in (0.3, 0.5):
         decision = strategy.decide(_row(close=100.0, sma_short=score), position=None, balance=1000.0)
         assert decision.action is Action.HOLD
 
 
 def test_ga_strategy_never_shorts_when_allow_short_is_off():
-    strategy = GaStrategy(_all_weight_on_sma_short(), _config(), _KEYS)  # allow_short defaults False
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _config(), _KEYS)  # allow_short defaults False
     decision = strategy.decide(_row(close=100.0, sma_short=0.0), position=None, balance=1000.0)
     assert decision.action is Action.HOLD
 
 
 def test_ga_strategy_covers_a_short_when_score_rises_above_short_exit():
-    strategy = GaStrategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
     position = Position(entry_price=100.0, size=1.0, direction=Direction.SHORT)
     decision = strategy.decide(_row(close=90.0, sma_short=0.5), position=position, balance=1000.0)
     assert decision.action is Action.COVER
 
 
 def test_ga_strategy_holds_a_short_while_score_stays_below_short_exit():
-    strategy = GaStrategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
     position = Position(entry_price=100.0, size=1.0, direction=Direction.SHORT)
     decision = strategy.decide(_row(close=90.0, sma_short=0.2), position=position, balance=1000.0)
     assert decision.action is Action.HOLD
@@ -260,7 +270,7 @@ def test_ga_strategy_holds_a_short_while_score_stays_below_short_exit():
 def test_ga_strategy_closes_a_long_rather_than_flipping_straight_to_short():
     # score crosses the whole range in one candle: the long must close first,
     # leaving the short to a later candle from flat.
-    strategy = GaStrategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
+    strategy = _ga_strategy(_all_weight_on_sma_short(), _shorting_config(), _KEYS)
     position = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
     decision = strategy.decide(_row(close=100.0, sma_short=0.0), position=position, balance=1000.0)
     assert decision.action is Action.SELL
@@ -268,7 +278,7 @@ def test_ga_strategy_closes_a_long_rather_than_flipping_straight_to_short():
 
 def test_ga_strategy_position_pnl_reads_a_winning_short_as_positive():
     keys     = _KEYS + (POSITION_PNL_KEY,)
-    strategy = GaStrategy(_all_weight_on_position_pnl(), _shorting_config(), keys)
+    strategy = _ga_strategy(_all_weight_on_position_pnl(), _shorting_config(), keys)
     position = Position(entry_price=100.0, size=1.0, direction=Direction.SHORT)
     # price fell 50% -> the short is up 0.5, which is above short_exit 0.40 -> take profit
     decision = strategy.decide(_row(close=50.0, sma_short=0.0), position=position, balance=1000.0)
@@ -496,16 +506,56 @@ def _signed_row(**cols) -> dict:
     return base
 
 
+# ── SignalDesign ─────────────────────────────────────────────────────
+
+def test_the_linear_design_builds_a_linear_signal():
+    model = SignalDesign("linear").model(_all_weight_on_sma_short(), _KEYS)
+    assert isinstance(model, LinearSignal)
+    assert isinstance(SignalDesign("linear").scaling(), L1Scaling)
+
+
+def test_an_unknown_design_raises_rather_than_scoring_through_the_wrong_function():
+    # A genome trained under a design this build does not have is a bag of
+    # numbers; scoring it linearly would produce a plausible, wrong answer.
+    with pytest.raises(ValueError, match="unknown strategy.design"):
+        SignalDesign("mlp").model(_all_weight_on_sma_short(), _KEYS)
+    with pytest.raises(ValueError, match="unknown strategy.design"):
+        SignalDesign("mlp").scaling()
+
+
+def test_a_misspelled_design_is_rejected_before_training_starts():
+    with pytest.raises(ValueError, match="strategy.design"):
+        ValidatedStrategyConfig(_config(design="linnear")).config()
+
+
+def test_the_design_defaults_to_linear_for_a_config_that_predates_it():
+    raw = {
+        "strategy": {
+            "position_size_pct": 0.2, "buy_threshold": 0.7,
+            "sell_threshold": 0.3, "starting_balance": 500.0,
+        }
+    }
+    assert StrategyConfigFile(raw).config().design == "linear"
+
+
+def test_the_model_scores_the_same_through_the_design_as_directly():
+    # GaStrategy delegates; the seam must not change the number.
+    genome = _all_weight_on_sma_short()
+    row    = _row(close=100.0, sma_short=0.8)
+    direct = LinearSignal(genome, _KEYS).score(row, None)
+    assert _ga_strategy(genome, _config(), _KEYS).signal_score(row, None) == pytest.approx(direct)
+
+
 def test_an_all_positive_genome_scores_exactly_as_before():
     # The backward-compatibility guarantee: no offset, no change.
     genome = Genome({"sma_short": 0.5, "sma_long": 0.5, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
-    score  = GaStrategy(genome, _config(), _KEYS).signal_score(_signed_row(sma_short=1.0, sma_long=0.4), None)
+    score  = _ga_strategy(genome, _config(), _KEYS).signal_score(_signed_row(sma_short=1.0, sma_long=0.4), None)
     assert score == pytest.approx(0.5 * 1.0 + 0.5 * 0.4)
 
 
 def test_a_negative_weight_inverts_a_columns_contribution():
     genome   = Genome({"sma_short": 0.5, "sma_long": -0.5, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
-    strategy = GaStrategy(genome, _config(), _KEYS)
+    strategy = _ga_strategy(genome, _config(), _KEYS)
     # sma_long high should now push the score DOWN relative to sma_long low.
     high = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=1.0), None)
     low  = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=0.0), None)
@@ -517,7 +567,7 @@ def test_a_negative_weight_inverts_a_columns_contribution():
 # this change exists to escape.
 def test_the_score_floor_stays_at_zero_for_a_signed_genome():
     genome   = Genome({"sma_short": 0.5, "sma_long": -0.5, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
-    strategy = GaStrategy(genome, _config(), _KEYS)
+    strategy = _ga_strategy(genome, _config(), _KEYS)
     worst    = strategy.signal_score(_signed_row(sma_short=0.0, sma_long=1.0), None)
     best     = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=0.0), None)
     assert worst == pytest.approx(0.0)
@@ -526,7 +576,7 @@ def test_the_score_floor_stays_at_zero_for_a_signed_genome():
 
 def test_a_signed_genome_can_still_reach_the_buy_threshold():
     genome   = Genome({"sma_short": 0.7, "sma_long": -0.3, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
-    strategy = GaStrategy(genome, _config(buy_threshold=0.6), _KEYS)
+    strategy = _ga_strategy(genome, _config(buy_threshold=0.6), _KEYS)
     best     = strategy.signal_score(_signed_row(sma_short=1.0, sma_long=0.0), None)
     assert best > 0.6
     assert strategy.decide(_signed_row(sma_short=1.0, sma_long=0.0), None, 1000.0).action is Action.BUY
@@ -534,12 +584,12 @@ def test_a_signed_genome_can_still_reach_the_buy_threshold():
 
 def test_the_ceiling_counts_absolute_weight_mass():
     genome = Genome({"sma_short": 0.7, "sma_long": -0.3, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
-    assert GaStrategy(genome, _config(), _KEYS).flat_score_ceiling() == pytest.approx(1.0)
+    assert _ga_strategy(genome, _config(), _KEYS).flat_score_ceiling() == pytest.approx(1.0)
 
 
 def test_the_ceiling_is_unchanged_for_an_all_positive_genome():
     genome = Genome({"sma_short": 0.4, "sma_long": 0.2, "sma_extra": 0.0, "rsi": 0.0, "macd": 0.0})
-    assert GaStrategy(genome, _config(), _KEYS).flat_score_ceiling() == pytest.approx(0.6)
+    assert _ga_strategy(genome, _config(), _KEYS).flat_score_ceiling() == pytest.approx(0.6)
 
 
 # ── StudentT ─────────────────────────────────────────────────────────
