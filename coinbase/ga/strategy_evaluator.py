@@ -44,6 +44,10 @@ class StrategyConfig:
     # the time it is held (a long borrows nothing on either venue).
     fee_bps:               float = 0.0
     borrow_bps_per_hour:   float = 0.0
+    # Fraction above (long) or below (short) entry at which a post-only limit
+    # rests from the moment the position opens. 0.0 leaves every fill at a
+    # close, which is what every run so far was scored under.
+    take_profit_pct:       float = 0.0
 
 
 class StrategyConfigFile:
@@ -64,6 +68,7 @@ class StrategyConfigFile:
             fitness_confidence    = float(section.get("fitness_confidence", 1.0)),
             fee_bps               = float(section.get("fee_bps", 0.0)),
             borrow_bps_per_hour   = float(section.get("borrow_bps_per_hour", 0.0)),
+            take_profit_pct       = float(section.get("take_profit_pct", 0.0)),
         )
 
 
@@ -404,6 +409,7 @@ class StrategyEvaluator:
             self._rows, strategy, self._config.starting_balance, self._config.unwind_at_entry_price,
             ConfiguredFees(self._config.fee_bps).schedule(),
             ConfiguredBorrowRate(self._config.borrow_bps_per_hour).rate(),
+            self._config.take_profit_pct,
         ).run()
 
     # Net, so the GA pays for the trading it does: a genome that churns for a

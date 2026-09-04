@@ -21,6 +21,7 @@ from coinbase.trading_strategy import (
     NoBorrowRate,
     NoFees,
     Position,
+    TakeProfit,
     Trade,
 )
 
@@ -588,3 +589,79 @@ def test_the_end_of_window_unwind_pays_its_exit_leg():
     assert trade.profit()      == pytest.approx(0.0)
     assert trade.fee()         == pytest.approx(0.2)    # 100 in, 100 out, 1 unit
     assert result.net_profit() == pytest.approx(-0.2)
+
+# ── TakeProfit ───────────────────────────────────────────────────────
+# A post-only limit resting on the opposite side from entry, filled by the
+# market reaching it rather than by a decision on some later close.
+
+# Opens one short on the first candle and then never acts again, so the test
+# controls the exit entirely through the candle's range.
+class _OpensOneShort:
+    def __init__(self) -> None:
+        self._opened = False
+
+    def decide(self, row: dict[str, float], position: Optional[Position], balance: float) -> Decision:
+        if position is None and not self._opened:
+            self._opened = True
+            return Decision(Action.SHORT, (balance * 0.10) / row["close"])
+        return Decision(Action.HOLD)
+
+def test_a_long_target_sits_above_entry_and_a_short_target_below():
+    long_exit  = TakeProfit(Position(100.0, 1.0, Direction.LONG), 0.03)
+    short_exit = TakeProfit(Position(100.0, 1.0, Direction.SHORT), 0.03)
+    assert long_exit.price() == pytest.approx(103.0)
+    assert short_exit.price() == pytest.approx(97.0)
+
+
+def test_a_long_fills_on_the_candle_high_not_its_close():
+    exit_order = TakeProfit(Position(100.0, 1.0, Direction.LONG), 0.03)
+    assert exit_order.reached_by(high=104.0, low=99.0) is True     # spiked through
+    assert exit_order.reached_by(high=102.0, low=99.0) is False    # never got there
+
+
+def test_a_short_fills_on_the_candle_low():
+    exit_order = TakeProfit(Position(100.0, 1.0, Direction.SHORT), 0.03)
+    assert exit_order.reached_by(high=101.0, low=96.0) is True
+    assert exit_order.reached_by(high=101.0, low=98.0) is False
+
+
+def test_a_zero_target_never_fills():
+    exit_order = TakeProfit(Position(100.0, 1.0, Direction.LONG), 0.0)
+    assert exit_order.reached_by(high=1e9, low=0.0) is False
+
+
+# The whole point of the feature: the wick is captured, not the close.
+def test_a_spike_that_closes_flat_is_still_booked_at_the_target():
+    frame = pd.DataFrame({
+        "timestamp":      [0, 3600, 7200],
+        "close":          [100.0, 100.0, 100.0],   # closes flat throughout
+        "high":           [100.0, 108.0, 100.0],   # but candle 1 spiked +8%
+        "low":            [100.0, 100.0, 100.0],
+        "norm_sma_short": [1.0, 0.5, 0.5],         # buys on candle 0, then holds
+    })
+    plain = Backtest(MarketRows(frame), _strategy([0.9, 0.5, 0.5]), 1000.0).run()
+    resting = Backtest(
+        MarketRows(frame), _strategy([0.9, 0.5, 0.5]), 1000.0, take_profit_pct=0.03,
+    ).run()
+    # size = 1000 * 0.10 / 100 = 1.0, filled at 103.0 rather than the 100.0 close
+    assert plain.gross_profit() == pytest.approx(0.0)      # closes flat, books nothing
+    assert resting.trades()[0].profit() == pytest.approx(3.0)
+
+
+# The trap this feature lives or dies on. A candle that reaches BOTH the
+# take-profit and the liquidation gives no way to know which came first, and
+# OHLC never will. Assuming the favourable one invents money, so the adverse
+# one has to win — Backtest runs liquidate() before the resting exit.
+def test_a_candle_reaching_both_the_target_and_the_liquidation_takes_the_loss():
+    # A short at 100 with 1000 collateral liquidates well above entry; the
+    # candle spikes through that AND dips to the take-profit in the same bar.
+    frame = pd.DataFrame({
+        "timestamp":      [0, 3600],
+        "close":          [100.0, 100.0],
+        "high":           [100.0, 100000.0],   # blows through the liquidation
+        "low":            [100.0, 50.0],       # and also reaches the target
+        "norm_sma_short": [0.0, 0.5],          # opens a short on candle 0
+    })
+    result = Backtest(MarketRows(frame), _OpensOneShort(), 1000.0, take_profit_pct=0.03).run()
+    assert len(result.trades()) == 1
+    assert result.trades()[0].profit() < 0.0   # the liquidation won the tie, not the target

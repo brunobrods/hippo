@@ -285,6 +285,45 @@ class IsolatedMargin:
         return low <= self.liquidation_price()
 
 
+# ── Resting exit ─────────────────────────────────────────────────────────
+# A post-only limit resting on the opposite side from entry, placed the moment
+# a position opens and filled by the market reaching it — not by a decision
+# taken on some later close.
+#
+# Two things this buys. A position that spikes intraday and closes flat books
+# the close today; a resting exit books the spike. And it is a MAKER order, so
+# it earns the spread instead of crossing it, which on this account is the only
+# thing resting an order earns — measured maker and taker rates are identical.
+#
+# Two things it cannot honestly claim, both of which flatter a naive backtest:
+#
+#   Touching is not filling. A post-only order sits behind everyone already
+#   resting at that price, and OHLC cannot say whether the queue cleared. Every
+#   number this produces is an UPPER bound on what the level would have earned.
+#
+#   OHLC has no chronology. A candle whose high reaches the target and whose
+#   low reaches the liquidation gives no way to know which came first, and
+#   assuming the favourable one invents money. Backtest therefore runs
+#   liquidate() BEFORE this, so the adverse event always wins a tie.
+class TakeProfit:
+    def __init__(self, position: Position, fraction: float) -> None:
+        self._position = position
+        self._fraction = fraction
+
+    def price(self) -> float:
+        entry = self._position.entry_price()
+        if self._position.direction() is Direction.LONG:
+            return entry * (1.0 + self._fraction)
+        return entry * (1.0 - self._fraction)
+
+    def reached_by(self, high: float, low: float) -> bool:
+        if self._fraction <= 0.0:
+            return False
+        if self._position.direction() is Direction.LONG:
+            return high >= self.price()
+        return low <= self.price()
+
+
 # ── Strategy contract ────────────────────────────────────────────────────
 
 class Strategy(Protocol):
@@ -446,6 +485,7 @@ class Backtest:
         unwind_at_entry_price: bool = True,
         fees: FeeSchedule = NoFees(),
         borrow: BorrowRate = NoBorrowRate(),
+        take_profit_pct: float = 0.0,
     ) -> None:
         self._rows                  = rows
         self._strategy              = strategy
@@ -453,6 +493,9 @@ class Backtest:
         self._unwind_at_entry_price = unwind_at_entry_price
         self._fees                  = fees
         self._borrow                = borrow
+        # 0.0 disables it, which is the behaviour every run so far was scored
+        # under — no resting exit, every fill at a close.
+        self._take_profit_pct       = take_profit_pct
 
     def run(self) -> BacktestResult:
         ledger = Ledger(self._starting_balance, None, self._fees, self._borrow)
@@ -461,10 +504,18 @@ class Backtest:
 
         for row in records:
             price     = row["close"]
+            high      = row.get("high", price)
+            low       = row.get("low", price)
             timestamp = row.get("timestamp", 0.0)
             # A position carried in from the previous candle lives through this
             # candle's range before any new decision is taken on its close.
-            ledger.liquidate(row.get("high", price), row.get("low", price), timestamp)
+            #
+            # Liquidation is checked FIRST and the resting exit second, and the
+            # order is the whole safety of it: a candle that reaches both gives
+            # no way to know which came first, so the adverse one is assumed to
+            # have. Reversing these two lines would invent money.
+            ledger.liquidate(high, low, timestamp)
+            self._take_profit(ledger, high, low, timestamp)
             decision = self._strategy.decide(row, ledger.position(), ledger.balance())
             ledger.apply(decision, price, timestamp)
             equity_curve.append(ledger.equity(price))
@@ -479,6 +530,21 @@ class Backtest:
                 self._final_close_price(ledger, last["close"]), last.get("timestamp", 0.0),
             )
         return BacktestResult(ledger.trades(), equity_curve)
+
+    # Fills the resting exit at its OWN price, not the candle's close — the
+    # point of the order is that it executed while the candle was forming.
+    #
+    # It is charged the TAKER rate, because Ledger has one fee path. A post-only
+    # order is a maker fill and should pay the maker rate, so this overcharges
+    # — the safe direction, and numerically identical on the measured Binance
+    # tier where the two rates are equal. It is not identical on Coinbase.
+    def _take_profit(self, ledger: Ledger, high: float, low: float, timestamp: float) -> None:
+        position = ledger.position()
+        if position is None or self._take_profit_pct <= 0.0:
+            return
+        exit_order = TakeProfit(position, self._take_profit_pct)
+        if exit_order.reached_by(high, low):
+            ledger.force_close(exit_order.price(), timestamp)
 
     def _final_close_price(self, ledger: Ledger, market_price: float) -> float:
         position = ledger.position()

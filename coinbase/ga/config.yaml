@@ -88,6 +88,29 @@ strategy:
   # untouched either way, so experiments/index.csv stays comparable across every
   # run ever recorded.
   fitness_confidence: 1.0
+  # A post-only limit resting on the opposite side from entry, placed the
+  # moment a position opens: a fraction ABOVE entry for a long, below it for a
+  # short. 0.0 leaves every fill at a candle close, which is what every run
+  # recorded so far was scored under.
+  #
+  # It exists because a position that spikes intraday and closes flat books the
+  # close. It is also a maker order, so it earns the spread rather than crossing
+  # it — which on this account is all resting one earns, since the measured
+  # maker and taker rates are identical.
+  #
+  # Two things it cannot claim. Touching a level is not filling at it: the order
+  # sits behind whatever is already resting there and OHLC cannot say whether
+  # the queue cleared, so every result is an UPPER bound. And OHLC has no
+  # chronology, so Backtest checks liquidation BEFORE this — a candle reaching
+  # both takes the loss, because assuming otherwise invents money.
+  #
+  # OPTIMISE IT AS A SWEEP AXIS, not by reading test results. Measured across
+  # 60 trained genomes, tight targets actively hurt (1% cut gross by 22% and
+  # sent trades from 7 to 46, capping winners while losers ran) and wide ones
+  # helped (12% added 22%). But the best level ranged from 0% to beyond 20%
+  # depending on the pair, so a single figure is the wrong shape — scale it by
+  # the pair's own volatility, or sweep it per pair.
+  take_profit_pct: 0.0
   position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
   buy_threshold: 0.60       # signal_score above this opens a position
   sell_threshold: 0.40      # signal_score below this closes an open position
