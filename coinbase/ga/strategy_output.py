@@ -114,6 +114,11 @@ class TrainedStrategy:
                 # anything saved before designs were named, where it reads as
                 # "linear" — which is what those runs were.
                 "design":                self._config.design,
+                # The resting target decides when a position closes, so a genome
+                # papered without it exits on signal alone and trades a strategy
+                # nobody scored. Measured: at 1% it takes 61 trades where the
+                # same genome at 0.0 takes 5.
+                "take_profit_pct":       self._config.take_profit_pct,
             },
         }
 

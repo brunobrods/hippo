@@ -209,11 +209,16 @@ def test_main_run_log_mode(tmp_path, capsys):
 # run's own config.json.
 
 def _run_config(experiments_dir, run_id: str, keys: list, index_pairs: list = None,
-                negatives: bool = False, confidence: float = 0.0) -> None:
+                negatives: bool = False, confidence: float = 0.0,
+                take_profit: float = 0.0) -> None:
     directory = experiments_dir / run_id
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "config.json").write_text(json.dumps({
-        "strategy":          {"weight_keys": keys, "fitness_confidence": confidence},
+        "strategy": {
+            "weight_keys":        keys,
+            "fitness_confidence": confidence,
+            "take_profit_pct":    take_profit,
+        },
         "market_data":       {"index_pairs": index_pairs or []},
         "genetic_algorithm": {"allow_negative_weights": negatives},
     }))
@@ -228,6 +233,18 @@ def test_weight_keys_are_read_back_from_each_runs_config(tmp_path):
     enriched = ExperimentConfigs(frame, str(experiments)).enriched()
     assert list(enriched["weight_keys"]) == ["rsi,macd", "rsi,macd,index_z"]
     assert list(enriched["index_pairs"]) == [0, 1]
+
+
+def test_the_take_profit_target_is_recovered_for_grouping(tmp_path):
+    # The knob that decides how long a position is held, and so how often the
+    # round trip is paid. A horizon sweep is unreadable without it.
+    experiments = tmp_path / "experiments"
+    _run_config(experiments, "run-1", ["rsi"], take_profit=0.0)
+    _run_config(experiments, "run-2", ["rsi"], take_profit=0.04)
+    frame = pd.DataFrame({"run_id": ["run-1", "run-2"]})
+
+    enriched = ExperimentConfigs(frame, str(experiments)).enriched()
+    assert list(enriched["take_profit_pct"]) == [0.0, 0.04]
 
 
 # A run recorded before ResolvedConfigFile existed, or a directory pruned by

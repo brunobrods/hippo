@@ -71,7 +71,14 @@ class ExperimentConfigs:
         # with one from another design compares two different functions and
         # reports the mean as if it meant something.
         frame["design"]             = frame["run_id"].map(self._design)
+        # The knob that decides how long a position is held, and so how often
+        # the round trip is paid. Not an index column, and a sweep over it is
+        # unreadable without this.
+        frame["take_profit_pct"]    = frame["run_id"].map(self._take_profit_pct)
         return frame
+
+    def _take_profit_pct(self, run_id: str) -> float:
+        return float((self._raw(run_id).get("strategy") or {}).get("take_profit_pct", 0.0))
 
     def _design(self, run_id: str) -> str:
         return str((self._raw(run_id).get("strategy") or {}).get("design", LINEAR_DESIGN))
