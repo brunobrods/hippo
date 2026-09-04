@@ -8,11 +8,18 @@ import pytest
 from coinbase.trading_strategy import (
     Action,
     Backtest,
+    BasisPointFee,
+    BorrowInterest,
+    ConfiguredBorrowRate,
+    ConfiguredFees,
     Decision,
     Direction,
+    HourlyBasisPointRate,
     IsolatedMargin,
     Ledger,
     MarketRows,
+    NoBorrowRate,
+    NoFees,
     Position,
     TakeProfit,
     Trade,
@@ -430,6 +437,158 @@ def test_backtest_empty_when_signal_never_crosses_buy_threshold():
     assert result.trades() == []
     assert result.gross_profit() == 0.0
 
+
+# ── Costs ────────────────────────────────────────────────────────────
+
+def test_no_fees_charges_nothing():
+    assert NoFees().charge(1000.0) == 0.0
+
+
+def test_a_basis_point_fee_charges_its_share_of_the_notional():
+    assert BasisPointFee(10.0).charge(1000.0) == pytest.approx(1.0)
+
+
+def test_an_hourly_borrow_rate_prorates_by_the_time_held():
+    rate = HourlyBasisPointRate(10.0)
+    assert rate.interest(1000.0, 3600.0) == pytest.approx(1.0)
+    assert rate.interest(1000.0, 1800.0) == pytest.approx(0.5)
+
+
+def test_a_zero_rate_configures_the_no_op_object():
+    # Not an arithmetic no-op: a run without costs takes the same code path it
+    # took before costs existed, so its recorded numbers reproduce exactly.
+    assert isinstance(ConfiguredFees(0.0).schedule(), NoFees)
+    assert isinstance(ConfiguredBorrowRate(0.0).rate(), NoBorrowRate)
+    assert isinstance(ConfiguredFees(10.0).schedule(), BasisPointFee)
+    assert isinstance(ConfiguredBorrowRate(10.0).rate(), HourlyBasisPointRate)
+
+
+def test_a_long_accrues_no_borrow_interest():
+    # Longs are sent with sideEffectType NO_SIDE_EFFECT — nothing is borrowed,
+    # so nothing accrues however long the position is held.
+    position = Position(100.0, 2.0, Direction.LONG, entry_timestamp=1000.0)
+    assert BorrowInterest(position, 1000.0 + 7200.0, HourlyBasisPointRate(10.0)).amount() == 0.0
+
+
+def test_a_short_accrues_interest_on_what_it_borrowed():
+    position = Position(100.0, 2.0, Direction.SHORT, entry_timestamp=1000.0)
+    # 200 borrowed at entry, 10 bps an hour, held two hours.
+    assert BorrowInterest(
+        position, 1000.0 + 7200.0, HourlyBasisPointRate(10.0),
+    ).amount() == pytest.approx(0.4)
+
+
+def test_a_short_with_no_recorded_entry_time_accrues_nothing():
+    # A book restored from a state file written before entry times existed:
+    # accruing from the epoch would charge it decades of interest.
+    position = Position(100.0, 2.0, Direction.SHORT, entry_timestamp=0.0)
+    assert BorrowInterest(
+        position, 1_700_000_000.0, HourlyBasisPointRate(10.0),
+    ).amount() == 0.0
+
+
+def test_the_ledger_charges_a_fee_on_both_legs():
+    ledger = Ledger(1000.0, fees=BasisPointFee(10.0))
+    ledger.apply(Decision(Action.BUY, 1.0), 100.0)
+    ledger.apply(Decision(Action.SELL), 110.0)
+
+    trade = ledger.trades()[0]
+    assert trade.profit()     == pytest.approx(10.0)    # gross is untouched
+    assert trade.fee()        == pytest.approx(0.21)    # 0.10 in, 0.11 out
+    assert trade.net_profit() == pytest.approx(9.79)
+    assert ledger.balance()   == pytest.approx(1009.79)
+    assert ledger.charged()   == pytest.approx(0.21)
+
+
+def test_the_ledger_charges_a_short_for_the_time_it_was_held():
+    ledger = Ledger(1000.0, borrow=HourlyBasisPointRate(10.0))
+    ledger.apply(Decision(Action.SHORT, 2.0), 100.0, 1000.0)
+    ledger.apply(Decision(Action.COVER), 90.0, 1000.0 + 7200.0)
+
+    trade = ledger.trades()[0]
+    assert trade.profit()     == pytest.approx(20.0)
+    assert trade.interest()   == pytest.approx(0.4)
+    assert trade.net_profit() == pytest.approx(19.6)
+    assert ledger.balance()   == pytest.approx(1019.6)
+
+
+def test_the_ledger_reports_fees_and_interest_apart():
+    # A report that merges them cannot answer which cost is eating the book —
+    # the split is the whole point of charging the two separately.
+    ledger = Ledger(1000.0, fees=BasisPointFee(10.0), borrow=HourlyBasisPointRate(10.0))
+    ledger.apply(Decision(Action.SHORT, 2.0), 100.0, 1000.0)
+    ledger.apply(Decision(Action.COVER), 90.0, 1000.0 + 7200.0)
+
+    assert ledger.fees_charged()     == pytest.approx(0.38)   # 0.20 in @100, 0.18 out @90
+    assert ledger.interest_charged() == pytest.approx(0.4)    # 200 borrowed, 10 bps/h, 2h
+    assert ledger.charged()          == pytest.approx(0.78)
+    assert ledger.balance()          == pytest.approx(1019.22)
+
+
+def test_a_liquidated_position_still_pays_its_exit_fee():
+    # The exchange does not waive taker on a forced close.
+    ledger = Ledger(1000.0, fees=BasisPointFee(10.0))
+    ledger.apply(Decision(Action.SHORT, 2.0), 100.0, 1000.0)
+    ledger.liquidate(10_000.0, 9_000.0, 1000.0 + 3600.0)
+
+    trade = ledger.trades()[0]
+    assert ledger.position() is None
+    assert trade.fee() > 0.1                            # the entry leg alone is 0.10
+    assert ledger.charged() == pytest.approx(trade.fee())
+
+
+def test_an_entry_fee_survives_a_book_restored_between_the_two_legs():
+    # A scheduled paper run opens on one invocation and closes on another, with
+    # the position reloaded from disk in between — the closing Trade still has
+    # to report what the whole round trip cost.
+    opening = Ledger(1000.0, fees=BasisPointFee(10.0))
+    opening.apply(Decision(Action.BUY, 1.0), 100.0, 1000.0)
+
+    closing = Ledger(opening.balance(), opening.position(), BasisPointFee(10.0))
+    closing.apply(Decision(Action.SELL), 110.0, 1000.0 + 3600.0)
+
+    trade = closing.trades()[0]
+    assert trade.fee()       == pytest.approx(0.21)     # both legs
+    assert closing.charged() == pytest.approx(0.11)     # only this one left THIS balance
+    assert closing.balance() == pytest.approx(1009.79)
+
+
+def test_a_backtest_without_costs_reports_net_equal_to_gross():
+    # The regression guard for every run already recorded: at the 0.0 defaults
+    # the arithmetic is exactly what it was before costs existed.
+    rows   = MarketRows(_frame([100.0, 110.0, 100.0]))
+    result = Backtest(rows, _strategy([0.7, 0.3, 0.5]), 1000.0).run()
+
+    assert result.gross_profit()  == pytest.approx(10.0)
+    assert result.net_profit()    == pytest.approx(result.gross_profit())
+    assert result.fees_paid()     == 0.0
+    assert result.interest_paid() == 0.0
+
+
+def test_a_backtest_charges_fees_without_disturbing_gross():
+    rows   = MarketRows(_frame([100.0, 110.0, 100.0]))
+    result = Backtest(
+        rows, _strategy([0.7, 0.3, 0.5]), 1000.0, True, BasisPointFee(10.0),
+    ).run()
+
+    assert result.gross_profit() == pytest.approx(10.0)
+    assert result.fees_paid()    == pytest.approx(0.21)
+    assert result.net_profit()   == pytest.approx(9.79)
+
+
+def test_the_end_of_window_unwind_pays_its_exit_leg():
+    # unwind_at_entry_price prices the forced close at entry, so the position is
+    # neither credited nor penalized for where the window cut off — but it is
+    # still charged what holding it actually cost.
+    rows   = MarketRows(_frame([100.0, 105.0]))
+    result = Backtest(
+        rows, _strategy([0.7, 0.5]), 1000.0, True, BasisPointFee(10.0),
+    ).run()
+
+    trade = result.trades()[0]
+    assert trade.profit()      == pytest.approx(0.0)
+    assert trade.fee()         == pytest.approx(0.2)    # 100 in, 100 out, 1 unit
+    assert result.net_profit() == pytest.approx(-0.2)
 
 # ── TakeProfit ───────────────────────────────────────────────────────
 # A post-only limit resting on the opposite side from entry, filled by the

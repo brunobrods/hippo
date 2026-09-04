@@ -16,7 +16,7 @@ from coinbase.ga.paper_engine import (
     PriceMarks,
 )
 from coinbase.ga.paper_metrics import EquityCurve
-from coinbase.ga.paper_trading import BasisPointFee, NoFees, PaperState, PaperStateFile
+from coinbase.ga.paper_trading import BasisPointFee, NoBorrowRate, NoFees, PaperState, PaperStateFile
 from coinbase.ga.strategy_output import DryRunLog
 from coinbase.trading_strategy import Action, Decision, Direction, Position
 from exchange.adapter import ExchangeError
@@ -108,13 +108,16 @@ def _algo_config(tmp_path, name: str = "btc", balance: float = 1000.0) -> AlgoCo
     )
 
 
-def _algo(tmp_path, rows: FakeRows, actions: list[Action], fees=NoFees(), name="btc") -> PaperAlgo:
+def _algo(
+    tmp_path, rows: FakeRows, actions: list[Action], fees=NoFees(),
+    name="btc", borrow=NoBorrowRate(),
+) -> PaperAlgo:
     config = _algo_config(tmp_path, name)
     return PaperAlgo(
         config=config, rows=rows, strategy=_ScriptedStrategy(actions),
         book=PaperBook(PaperStateFile(config.state_filepath), config.starting_balance,
                        config.pair),
-        fees=fees, curve=EquityCurve(), log=DryRunLog(config.log_filepath),
+        fees=fees, borrow=borrow, curve=EquityCurve(), log=DryRunLog(config.log_filepath),
     )
 
 
@@ -504,7 +507,8 @@ async def test_the_same_pair_on_two_venues_does_not_cross_contaminate(tmp_path):
             config=config, rows=FakeRows([_row(1800, 100.0)]),
             strategy=_ScriptedStrategy([Action.BUY]),
             book=PaperBook(PaperStateFile(config.state_filepath), 1000.0, config.pair),
-            fees=NoFees(), curve=EquityCurve(), log=DryRunLog(config.log_filepath),
+            fees=NoFees(), borrow=NoBorrowRate(), curve=EquityCurve(),
+            log=DryRunLog(config.log_filepath),
         )
         await algo.tick()
         algos.append(IsolatedAlgo(algo))

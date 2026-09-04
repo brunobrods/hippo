@@ -78,6 +78,8 @@ class TrainingSummary:
             f"Saved strategy to {self._output_path}\n"
             f"Experiment run_id:      {self._run_id}\n"
             f"Test-set gross profit:  {performance['gross_profit']:.2f}\n"
+            f"Test-set net profit:    {performance['net_profit']:.2f}"
+            f"  (fees {performance['fees_paid']:.2f}, interest {performance['interest_paid']:.2f})\n"
             f"Test-set annualized yield: {performance['annualized_yield']:+.1%}\n"
             f"Total trades:           {performance['total_trades']}\n"
             f"Win rate:               {performance['win_rate']:.1%}\n"

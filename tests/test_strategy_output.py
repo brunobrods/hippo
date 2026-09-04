@@ -162,6 +162,8 @@ def test_trained_strategy_as_dict():
         "allow_short": False,
         "short_entry_threshold": 0.25,
         "short_exit_threshold": 0.40,
+        "fee_bps": 0.0,
+        "borrow_bps_per_hour": 0.0,
     }
 
 
@@ -202,6 +204,31 @@ def test_performance_report_handles_no_trades():
     assert report["avg_profit_per_trade"] == 0.0
 
 
+def test_performance_report_separates_costs_from_gross():
+    trades = [Trade(100.0, 110.0, 1.0, fee=0.2, interest=0.3)]
+    result = BacktestResult(trades, equity_curve=[1000.0, 1010.0])
+    report = PerformanceReport(result, annualized_yield=0.0).as_dict()
+    assert report["gross_profit"]  == pytest.approx(10.0)
+    assert report["fees_paid"]     == pytest.approx(0.2)
+    assert report["interest_paid"] == pytest.approx(0.3)
+    assert report["net_profit"]    == pytest.approx(9.5)
+
+
+def test_a_trade_that_did_not_pay_for_itself_is_not_a_win():
+    # Up on the move, down after costs. Counting it as a win is how a strategy
+    # that churns for a spread thinner than its fees looks profitable.
+    trades = [Trade(100.0, 101.0, 1.0, fee=2.0)]
+    result = BacktestResult(trades, equity_curve=[1000.0, 1001.0])
+    report = PerformanceReport(result, annualized_yield=0.0).as_dict()
+    assert report["gross_profit"] == pytest.approx(1.0)
+    assert report["net_profit"]   == pytest.approx(-1.0)
+    assert report["win_rate"]     == 0.0
+    # The gross average stays positive — it is the historical field. The net one
+    # is what agrees with win_rate.
+    assert report["avg_profit_per_trade"]     == pytest.approx(1.0)
+    assert report["avg_net_profit_per_trade"] == pytest.approx(-1.0)
+
+
 # ── StrategyJson / StrategyJsonFile ──────────────────────────────────
 
 def test_strategy_json_round_trips_through_disk(tmp_path):
@@ -234,6 +261,8 @@ def test_strategy_json_round_trips_through_disk(tmp_path):
         "allow_short": False,
         "short_entry_threshold": 0.25,
         "short_exit_threshold": 0.40,
+        "fee_bps": 0.0,
+        "borrow_bps_per_hour": 0.0,
     }
 
 

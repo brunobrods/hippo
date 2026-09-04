@@ -101,6 +101,13 @@ class TrainedStrategy:
                 "allow_short":           self._config.allow_short,
                 "short_entry_threshold": self._config.short_entry_threshold,
                 "short_exit_threshold":  self._config.short_exit_threshold,
+                # The costs the genome was selected under. Saved for the same
+                # reason the thresholds are: a paper run charged at a rate the
+                # scoring never assumed is measuring a different strategy, and
+                # TrainedStrategyConfig.divergences() can only report a drift
+                # in keys that are recorded here.
+                "fee_bps":               self._config.fee_bps,
+                "borrow_bps_per_hour":   self._config.borrow_bps_per_hour,
             },
         }
 
@@ -126,14 +133,23 @@ class PerformanceReport:
         self._result           = result
         self._annualized_yield = annualized_yield
 
+    # gross_profit and avg_profit_per_trade stay gross so every strategy.json
+    # written before costs existed still means what it says. net_profit,
+    # fees_paid and interest_paid are the new truth, and win_rate counts a trade
+    # a win only if it paid for itself — with both rates at 0.0 that is the same
+    # count it always was.
     def as_dict(self) -> dict[str, Any]:
         return {
             "gross_profit":         self._result.gross_profit(),
+            "net_profit":           self._result.net_profit(),
+            "fees_paid":            self._result.fees_paid(),
+            "interest_paid":        self._result.interest_paid(),
             "annualized_yield":     self._annualized_yield,
             "total_trades":         self._total_trades(),
             "win_rate":             self._win_rate(),
             "max_drawdown":         MaxDrawdown(self._result.equity_curve()).fraction(),
             "avg_profit_per_trade": self._avg_profit_per_trade(),
+            "avg_net_profit_per_trade": self._avg_net_profit_per_trade(),
         }
 
     def _total_trades(self) -> int:
@@ -143,7 +159,7 @@ class PerformanceReport:
         trades = self._result.trades()
         if not trades:
             return 0.0
-        wins = sum(1 for trade in trades if trade.profit() > 0.0)
+        wins = sum(1 for trade in trades if trade.net_profit() > 0.0)
         return wins / len(trades)
 
     def _avg_profit_per_trade(self) -> float:
@@ -151,6 +167,15 @@ class PerformanceReport:
         if not trades:
             return 0.0
         return self._result.gross_profit() / len(trades)
+
+    # win_rate counts net while avg_profit_per_trade stays gross, so a strategy
+    # churning for less than its fees reports 0% wins beside a positive average
+    # and reads like a bug. This is the number that agrees with win_rate.
+    def _avg_net_profit_per_trade(self) -> float:
+        trades = self._result.trades()
+        if not trades:
+            return 0.0
+        return self._result.net_profit() / len(trades)
 
 
 # ── Persistence ─────────────────────────────────────────────────────────

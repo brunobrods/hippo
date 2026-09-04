@@ -71,6 +71,7 @@ class AlgoStatus:
     macd:              float
     signal_score:      float
     fee_paid:          float
+    interest_paid:     float = 0.0
 
 
 # ── Equity curve ───────────────────────────────────────────────────────
@@ -236,6 +237,7 @@ class StatusPayload:
             "macd":              status.macd,
             "signal_score":      status.signal_score,
             "fee_paid":          status.fee_paid,
+            "interest_paid":     status.interest_paid,
             "position":          StatusPayload._position(status.position),
         }
 
