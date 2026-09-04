@@ -13,10 +13,12 @@ strength spends the edge it is chasing.
 
 Two things here are not in `Backtest`, deliberately:
 
-  Fees are charged.  `Backtest`/`Ledger` are gross, and every saved genome's
-  recorded performance is denominated that way. A selector that re-enters on
+  Fees are charged unconditionally.  `Ledger` can now charge them too, but
+  only when `strategy.fee_bps` is set, and it defaults to 0.0 — so a genome's
+  recorded performance is usually still gross. A selector that re-enters on
   every exit trades far more than a single-pair strategy, so the fee drag is
-  the difference between a result and a fantasy.
+  the difference between a result and a fantasy, and it is not left optional
+  here.
 
   Direction accuracy is measured.  It is the number the screener's
   `required_accuracy` column is a bar for, and the only honest way to ask
@@ -63,6 +65,7 @@ from coinbase.ga.market_data_processor import (
 from coinbase.ga.paper_trading import BasisPointFee, FeeSchedule, NoFees
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
+    SignalDesign,
     GaStrategy,
     StrategyConfig,
     WeightKeysConfig,
@@ -600,7 +603,10 @@ class TrainedPair:
                 "retrain to let the GA actually use them",
                 self._pair, ", ".join(backfilled.missing()),
             )
-        return GaStrategy(backfilled.filled(), self.config, self._weight_keys)
+        model = SignalDesign(self.config.design).model(
+            backfilled.filled(), self._weight_keys,
+        )
+        return GaStrategy(model, self.config)
 
 
 # ── Report ─────────────────────────────────────────────────────────────

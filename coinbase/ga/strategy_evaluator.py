@@ -1,10 +1,10 @@
 import functools
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
 
 import pandas as pd
 
-from coinbase.ga.ga_engine import Genome
+from coinbase.ga.ga_engine import Genome, L1Scaling, WeightScaling
 from coinbase.trading_strategy import (
     Action,
     Backtest,
@@ -17,6 +17,11 @@ from coinbase.trading_strategy import (
     Position,
     Trade,
 )
+
+# The weighted sum every run so far was trained under. Named here, above the
+# config that defaults to it, because a design name is part of a strategy's
+# identity — see SignalDesign below.
+LINEAR_DESIGN = "linear"
 
 
 # ── Config ─────────────────────────────────────────────────────────────
@@ -44,6 +49,10 @@ class StrategyConfig:
     # the time it is held (a long borrows nothing on either venue).
     fee_bps:               float = 0.0
     borrow_bps_per_hour:   float = 0.0
+    # Which model design turns a candle into a score. "linear" is the weighted
+    # sum every run so far was trained under, and is the default so an existing
+    # config and an existing strategy.json both keep meaning what they meant.
+    design:                str = LINEAR_DESIGN
     # Fraction above (long) or below (short) entry at which a post-only limit
     # rests from the moment the position opens. 0.0 leaves every fill at a
     # close, which is what every run so far was scored under.
@@ -68,6 +77,7 @@ class StrategyConfigFile:
             fitness_confidence    = float(section.get("fitness_confidence", 1.0)),
             fee_bps               = float(section.get("fee_bps", 0.0)),
             borrow_bps_per_hour   = float(section.get("borrow_bps_per_hour", 0.0)),
+            design                = str(section.get("design", LINEAR_DESIGN)),
             take_profit_pct       = float(section.get("take_profit_pct", 0.0)),
         )
 
@@ -119,6 +129,12 @@ class ValidatedStrategyConfig:
             found.append(
                 f"strategy.borrow_bps_per_hour must not be negative, got {c.borrow_bps_per_hour}"
             )
+        # Checked here so a misspelled design fails before a multi-hour training
+        # run, not after it — the same reason ExperimentIndex is checked up front.
+        if c.design != LINEAR_DESIGN:
+            found.append(
+                f"strategy.design must be {LINEAR_DESIGN!r}, got {c.design!r}"
+            )
         return found
 
 
@@ -149,37 +165,36 @@ class ValidatedWeightKeys:
 POSITION_PNL_KEY = "position_pnl"
 
 
-class GaStrategy:
-    def __init__(self, genome: Genome, config: StrategyConfig, keys: tuple[str, ...]) -> None:
+# ── Signal models ────────────────────────────────────────────────────────
+# A design is the FUNCTION that turns a candle into a score. It is deliberately
+# separate from the policy that acts on that score (GaStrategy below: the three
+# bands, sizing, the thresholds), because those are what every recorded run and
+# every paper book are calibrated against, and they should not have to change
+# for a new kind of model to exist.
+#
+# A design also owns how the GA rescales its numbers — see WeightScaling in
+# ga_engine — since L1 scaling is a statement about a weighted sum, not about
+# search.
+#
+# LINEAR is the only design today. It is named rather than assumed so that a
+# saved strategy.json records what produced it, and so a second design becomes
+# an addition rather than an edit.
+
+class SignalModel(Protocol):
+    def score(self, row: dict[str, float], position: Optional[Position]) -> float: ...
+
+    # Every design must be able to say how high it can score while flat, because
+    # the cross-sectional selector ranks conviction across genomes and cannot do
+    # that against a fixed 1.0 — see the note on LinearSignal's implementation.
+    def flat_score_ceiling(self) -> float: ...
+
+
+class LinearSignal:
+    def __init__(self, genome: Genome, keys: tuple[str, ...]) -> None:
         self._genome = genome
-        self._config = config
         self._keys   = keys
 
-    # Three bands: a high score opens a long, a low score opens a short, and the
-    # span between the two exit thresholds is the hold band. A position is only
-    # ever opened from flat, so a score that crosses the whole range in one
-    # candle closes the current position and leaves the reversal to the next.
-    def decide(self, row: dict[str, float], position: Optional[Position], balance: float) -> Decision:
-        score = self.signal_score(row, position)
-        if position is None:
-            if score > self._config.buy_threshold:
-                return Decision(Action.BUY, self._size(balance, row))
-            if self._config.allow_short and score < self._config.short_entry_threshold:
-                return Decision(Action.SHORT, self._size(balance, row))
-            return Decision(Action.HOLD)
-        if position.direction() is Direction.LONG and score < self._config.sell_threshold:
-            return Decision(Action.SELL)
-        if position.direction() is Direction.SHORT and score > self._config.short_exit_threshold:
-            return Decision(Action.COVER)
-        return Decision(Action.HOLD)
-
-    def _size(self, balance: float, row: dict[str, float]) -> float:
-        return (balance * self._config.position_size_pct) / row["close"]
-
-    # Public because it is the number that explains a decision: a monitor
-    # showing why a strategy is holding needs the score, not just the action.
-    # A pure query — asking for it never changes what decide() would return.
-    def signal_score(self, row: dict[str, float], position: Optional[Position]) -> float:
+    def score(self, row: dict[str, float], position: Optional[Position]) -> float:
         total = sum(
             self._genome.weight(key) * row[f"norm_{key}"]
             for key in self._keys if key != POSITION_PNL_KEY
@@ -216,8 +231,8 @@ class GaStrategy:
             return 0.0
         return position.unrealized_return(row["close"])
 
-    # The highest score reachable with no position open. Every norm_* column
-    # is in [0, 1] and NormalizedWeights forces the weights to sum to 1.0
+    # The highest score reachable with no position open. Every norm_* column is
+    # in [0, 1] and NormalizedWeights forces the weights to sum to 1.0
     # INCLUDING position_pnl — which contributes exactly 0 when flat — so the
     # ceiling is the weight mass on the indicator keys, not 1.0.
     #
@@ -225,14 +240,79 @@ class GaStrategy:
     # can never cross a 0.6 buy_threshold, so it is structurally short-only.
     # Anything ranking scores across genomes has to measure against this rather
     # than against 1.0, or it ranks on whose position_pnl weight is smallest.
-    # Absolute, because signal_score shifts the floor to zero: a genome's
-    # reachable span becomes [0, sum of |weight|] over the indicator keys.
-    # Identical to the signed sum whenever no weight is negative.
+    # Absolute, because score() shifts the floor to zero: a genome's reachable
+    # span becomes [0, sum of |weight|] over the indicator keys. Identical to
+    # the signed sum whenever no weight is negative.
     def flat_score_ceiling(self) -> float:
         return sum(
             abs(self._genome.weight(key))
             for key in self._keys if key != POSITION_PNL_KEY
         )
+
+
+# The one place that maps a design NAME to its objects. Every caller that
+# rebuilds a strategy from a saved genome goes through here, so an unknown
+# design fails loudly at the single point that knows the list, rather than
+# scoring silently through the wrong function.
+class SignalDesign:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def model(self, genome: Genome, keys: tuple[str, ...]) -> SignalModel:
+        if self._name == LINEAR_DESIGN:
+            return LinearSignal(genome, keys)
+        raise ValueError(self._unknown())
+
+    def scaling(self) -> WeightScaling:
+        if self._name == LINEAR_DESIGN:
+            return L1Scaling()
+        raise ValueError(self._unknown())
+
+    def _unknown(self) -> str:
+        return (
+            f"unknown strategy.design {self._name!r}; this build knows "
+            f"{LINEAR_DESIGN!r}. A genome trained under a design this code does "
+            f"not have would be scored by the wrong function."
+        )
+
+
+# ── GA-driven strategy ───────────────────────────────────────────────────
+
+class GaStrategy:
+    def __init__(self, model: SignalModel, config: StrategyConfig) -> None:
+        self._model  = model
+        self._config = config
+
+    # Three bands: a high score opens a long, a low score opens a short, and the
+    # span between the two exit thresholds is the hold band. A position is only
+    # ever opened from flat, so a score that crosses the whole range in one
+    # candle closes the current position and leaves the reversal to the next.
+    def decide(self, row: dict[str, float], position: Optional[Position], balance: float) -> Decision:
+        score = self.signal_score(row, position)
+        if position is None:
+            if score > self._config.buy_threshold:
+                return Decision(Action.BUY, self._size(balance, row))
+            if self._config.allow_short and score < self._config.short_entry_threshold:
+                return Decision(Action.SHORT, self._size(balance, row))
+            return Decision(Action.HOLD)
+        if position.direction() is Direction.LONG and score < self._config.sell_threshold:
+            return Decision(Action.SELL)
+        if position.direction() is Direction.SHORT and score > self._config.short_exit_threshold:
+            return Decision(Action.COVER)
+        return Decision(Action.HOLD)
+
+    def _size(self, balance: float, row: dict[str, float]) -> float:
+        return (balance * self._config.position_size_pct) / row["close"]
+
+    # Public because it is the number that explains a decision: a monitor
+    # showing why a strategy is holding needs the score, not just the action.
+    # A pure query — asking for it never changes what decide() would return.
+    def signal_score(self, row: dict[str, float], position: Optional[Position]) -> float:
+        return self._model.score(row, position)
+
+
+    def flat_score_ceiling(self) -> float:
+        return self._model.flat_score_ceiling()
 
 
 # ── Yield ────────────────────────────────────────────────────────────────
@@ -404,7 +484,8 @@ class StrategyEvaluator:
         ).value()
 
     def result(self, genome: Genome) -> BacktestResult:
-        strategy = GaStrategy(genome, self._config, self._keys)
+        model    = SignalDesign(self._config.design).model(genome, self._keys)
+        strategy = GaStrategy(model, self._config)
         return Backtest(
             self._rows, strategy, self._config.starting_balance, self._config.unwind_at_entry_price,
             ConfiguredFees(self._config.fee_bps).schedule(),

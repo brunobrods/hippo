@@ -11,6 +11,7 @@ from coinbase.ga.ga_engine import (
     GaussianMutation,
     Genome,
     GeneticAlgorithm,
+    L1Scaling,
     NormalizedWeights,
     RandomPopulation,
     RandomWeights,
@@ -74,6 +75,36 @@ def test_normalizing_is_unchanged_for_all_positive_weights():
 def test_normalized_weights_falls_back_to_uniform_on_zero_sum():
     normalized = NormalizedWeights({"a": 0.0, "b": 0.0}).values()
     assert normalized == {"a": 0.5, "b": 0.5}
+
+
+# ── WeightScaling ────────────────────────────────────────────────────
+
+def test_l1_scaling_is_the_normalization_the_engine_has_always_applied():
+    raw = {"a": 2.0, "b": -3.0, "c": 5.0}
+    assert L1Scaling().scaled(raw) == pytest.approx(NormalizedWeights(raw).values())
+
+
+def test_every_operator_takes_the_scaling_rather_than_assuming_l1():
+    # The seam that lets a design whose parameters must NOT be rescaled — a
+    # network's internals — be evolved by the same engine. Identity scaling is
+    # not a design this build ships; it stands in here for any non-linear one.
+    class _Identity:
+        def scaled(self, raw: dict[str, float]) -> dict[str, float]:
+            return dict(raw)
+
+    genome  = Genome({"a": 2.0, "b": 6.0})
+    mutated = GaussianMutation(
+        genome, mutation_rate=0.0, sigma=0.5,
+        random_source=random.Random(1), scaling=_Identity(),
+    ).mutated()
+    # Untouched by mutation AND untouched by scaling: still the raw magnitudes.
+    assert mutated.weights() == pytest.approx({"a": 2.0, "b": 6.0})
+
+    child = UniformCrossover(genome, genome, random.Random(1), scaling=_Identity()).child()
+    assert child.weights() == pytest.approx({"a": 2.0, "b": 6.0})
+
+    weights = RandomWeights(("a", "b"), random.Random(1), scaling=_Identity()).generate()
+    assert sum(abs(value) for value in weights.values()) != pytest.approx(1.0)
 
 
 def test_random_weights_generate_sum_to_one():

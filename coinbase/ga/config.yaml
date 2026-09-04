@@ -87,6 +87,19 @@ strategy:
   # is how a pre-existing run is reproduced. The REPORTED annualized_yield is
   # untouched either way, so experiments/index.csv stays comparable across every
   # run ever recorded.
+  # Which model design turns a candle into a signal_score — the FUNCTION, as
+  # opposed to the thresholds below, which are the policy acting on its output.
+  #
+  # "linear" is the weighted sum every run so far was trained under: one weight
+  # per weight_key, L1-normalized, summed against the norm_* columns. It is the
+  # only design this build has, and it is named rather than assumed so that a
+  # saved strategy.json records what produced it — a genome is otherwise just a
+  # bag of numbers, and a loader would score it through whatever design happened
+  # to be configured.
+  #
+  # Adding a design is therefore additive: an existing genome keeps its own, and
+  # two designs can be papered side by side as separate algos in paper.yaml.
+  design: "linear"
   fitness_confidence: 1.0
   # A post-only limit resting on the opposite side from entry, placed the
   # moment a position opens: a fraction ABOVE entry for a long, below it for a
