@@ -22,9 +22,15 @@
 
     Re-running this script replaces any existing task of the same name.
 
+    Restarting goes through -Restart, not Stop-ScheduledTask followed by
+    Start-ScheduledTask. Stopping the task kills only its powershell wrapper
+    and orphans the python underneath, which keeps holding the dashboard port
+    long enough for the replacement to die on bind.
+
 .EXAMPLE
     ./scripts/register_engine_task.ps1
     ./scripts/register_engine_task.ps1 -Start
+    ./scripts/register_engine_task.ps1 -Restart
     ./scripts/register_engine_task.ps1 -Remove
 #>
 [CmdletBinding()]
@@ -33,20 +39,69 @@ param(
     [string] $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string] $Python   = "",
     [string] $LogFile  = "",
+    [int]    $Port     = 8787,
     [switch] $Start,
+    [switch] $Restart,
     [switch] $Remove
 )
 
 $ErrorActionPreference = "Stop"
 
+# ── Stopping ───────────────────────────────────────────────────────────
+# `Stop-ScheduledTask` kills the task's own process — the powershell wrapper —
+# and leaves the python it launched running as an orphan, still holding the
+# dashboard port. Starting again then dies on bind:
+#
+#     OSError: [Errno 10048] error while attempting to bind on ('127.0.0.1', 8787)
+#
+# So the stop is not complete until the port is free. Engine processes are
+# matched on their command line rather than on whoever holds the port, so this
+# never kills an unrelated listener that happens to be sitting on it.
+
+function Stop-Engine {
+    param([string] $TaskName, [int] $Port, [int] $TimeoutSeconds = 20)
+
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    }
+
+    $orphans = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+               Where-Object { $_.CommandLine -and $_.CommandLine -match 'coinbase\.ga\.paper_engine' }
+    foreach ($o in $orphans) {
+        Stop-Process -Id $o.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
 if ($Remove) {
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        Stop-ScheduledTask   -TaskName $TaskName -ErrorAction SilentlyContinue
+        [void] (Stop-Engine -TaskName $TaskName -Port $Port)
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         Write-Host "Removed scheduled task '$TaskName'."
     } else {
         Write-Host "No scheduled task named '$TaskName'."
     }
+    return
+}
+
+if ($Restart) {
+    if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+        throw "No scheduled task named '$TaskName' - register it first."
+    }
+    if (-not (Stop-Engine -TaskName $TaskName -Port $Port)) {
+        $held = (Get-NetTCPConnection -LocalPort $Port -State Listen | Select-Object -First 1).OwningProcess
+        throw "Port $Port is still held by PID $held - not starting, it would fail to bind."
+    }
+    Start-ScheduledTask -TaskName $TaskName
+    Write-Host "Restarted '$TaskName'. Dashboard: http://127.0.0.1:$Port"
     return
 }
 
@@ -114,7 +169,10 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
 
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    Stop-ScheduledTask       -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not (Stop-Engine -TaskName $TaskName -Port $Port)) {
+        $held = (Get-NetTCPConnection -LocalPort $Port -State Listen | Select-Object -First 1).OwningProcess
+        throw "Port $Port is still held by PID $held - re-registering now would leave a task that cannot bind."
+    }
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
@@ -129,7 +187,7 @@ Write-Host "Registered '$TaskName'"
 Write-Host "  python   : $Python"
 Write-Host "  repo     : $RepoRoot"
 Write-Host "  starts   : at logon, and restarts within 1 min if it exits"
-Write-Host "  dashboard: http://127.0.0.1:8787"
+Write-Host "  dashboard: http://127.0.0.1:$Port"
 Write-Host "  log      : $LogFile"
 
 if ($Start) {
@@ -141,6 +199,6 @@ if ($Start) {
     Write-Host "Start now:    Start-ScheduledTask -TaskName '$TaskName'"
 }
 
-Write-Host "Stop:         Stop-ScheduledTask  -TaskName '$TaskName'"
+Write-Host "Restart:      ./scripts/register_engine_task.ps1 -Restart"
 Write-Host "Watch log:    Get-Content '$LogFile' -Wait -Tail 20"
 Write-Host "Remove:       ./scripts/register_engine_task.ps1 -Remove"
