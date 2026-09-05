@@ -26,11 +26,11 @@ engine:
   # the bound that keeps requests inside their timeout.
   max_concurrent_requests: 8
   # Binance's measured taker rate for this account (/sapi/v1/asset/tradeFee,
-  # 2026-09-05: maker 10, taker 10), on the plan that execution lands there.
-  # This is engine-wide — AlgoConfig carries no fee of its own — so the same 10
-  # applies to any algo pointed at Coinbase, where this account actually pays
-  # 40 taker. Any Coinbase algo is therefore charged a quarter of its real cost
-  # and its results are flattered until it moves to Binance.
+  # 2026-09-05: maker 10, taker 10). Correct for every algo below because they
+  # all execute on Binance. This is engine-wide — AlgoConfig carries no fee of
+  # its own, unlike granularity — so adding a Coinbase algo would charge it 10
+  # where this account really pays 40 taker, flattering it fourfold. Move the
+  # fee onto AlgoConfig before mixing venues again.
   fee_bps: 10.0
   # Hourly borrow cost, charged only against an open SHORT on the base it
   # borrowed. Binance publishes a daily rate per asset — divide by 24. ETH
@@ -48,16 +48,25 @@ dashboard:
 
 # Merged under every algo below; an algo's own key wins.
 defaults:
-  exchange: "coinbase"
+  # Every algo executes on Binance now, which is what makes engine.fee_bps of
+  # 10 the right number for all of them. An algo pointed back at Coinbase would
+  # be charged a quarter of what this account really pays there.
+  exchange: "binance"
   starting_balance: 10000.0
 
 # Point strategy_filepath at a run's own experiments/<run_id>/strategy.json
 # rather than best_strategy.json — the latter is overwritten by every training
 # run, so a papered algo would silently swap strategy mid-flight.
 algos:
-  - name: "btc"
-    pair: "BTC-USDC"
-    strategy_filepath: "~/.coinbase/ga/best_strategy.json"
+  # Was "btc" on Coinbase BTC-USDC. Renamed rather than repointed: the state
+  # file is keyed on the algo name and PaperStateFile.read() ignores the `pair`
+  # it stores, so keeping the name would have loaded a USDC position entered at
+  # 79929.90 and marked it against USDT prices without complaint. The old
+  # btc.json is left on disk as the record of that book.
+  - name: "btc-binance"
+    exchange: "binance"
+    pair: "BTC-USDT"
+    strategy_filepath: "~/.coinbase/ga/experiments/20260905T093423388865Z-e741e033/strategy.json"
   # Trained on Binance ETH-USDT, so it is papered against that same pair on the
   # same venue — its thresholds were tuned against this book, not Coinbase's.
   # There is no ETH-USDC genome; every ETH run in the index is ETH-USDT.
