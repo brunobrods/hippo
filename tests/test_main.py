@@ -160,6 +160,30 @@ def test_training_summary_as_text_reports_round_trip_mismatch():
     assert "Reload round-trip:      MISMATCH" in summary.as_text()
 
 
+# A design owns how the GA rescales its genomes, and GeneticAlgorithm defaults
+# to L1 — so a training run that forgets to ask the design trains every future
+# non-linear one as if it were linear, silently and only in the numbers. This
+# pins the wiring rather than the default.
+@pytest.mark.asyncio
+async def test_training_asks_the_design_for_its_weight_scaling(tmp_path, monkeypatch):
+    import coinbase.ga.main as main_module
+    from coinbase.ga.ga_engine import L1Scaling
+
+    seen = []
+    original = main_module.GeneticAlgorithm
+
+    class _Recording(original):
+        def __init__(self, config, keys, scaling=None, *args, **kwargs):
+            seen.append(scaling)
+            super().__init__(config, keys, scaling, *args, **kwargs)
+
+    monkeypatch.setattr(main_module, "GeneticAlgorithm", _Recording)
+    await TrainingRun(FakeAdapter(_oscillating_candles(60)), _raw_config(tmp_path)).train()
+
+    assert len(seen) == 1
+    assert isinstance(seen[0], L1Scaling)  # config.yaml's design is "linear"
+
+
 # ── TrainingRun (end-to-end, fake adapter) ───────────────────────────
 
 @pytest.mark.asyncio
