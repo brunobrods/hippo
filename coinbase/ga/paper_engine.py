@@ -295,8 +295,6 @@ class PaperAlgo:
         self._outcome: Optional[TickOutcome] = None
         self._last_tick_at: Optional[str]    = None
         self._mark_price: float              = 0.0
-        self._fee_paid: float                = 0.0
-        self._interest_paid: float           = 0.0
 
     def config(self) -> AlgoConfig:
         return self._config
@@ -309,8 +307,6 @@ class PaperAlgo:
         self._outcome      = outcome
         self._last_tick_at = UtcNow().iso()
         if outcome.acted:
-            self._fee_paid      += outcome.fee
-            self._interest_paid += outcome.interest
             self._mark_price = outcome.row["close"]
             self._log.append(
                 self._last_tick_at, outcome.decision, outcome.balance, outcome.equity,
@@ -348,8 +344,11 @@ class PaperAlgo:
             rsi               = self._row_value("rsi"),
             macd              = self._row_value("macd"),
             signal_score      = self._signal_score(),
-            fee_paid          = self._fee_paid,
-            interest_paid     = self._interest_paid,
+            # Read off the book, not off a counter this process kept: the
+            # engine restarts at every logon, and a per-process tally showed
+            # a book that had paid fees as one that had paid nothing.
+            fee_paid          = state.fees_paid,
+            interest_paid     = state.interest_paid,
         )
 
     def _last_action(self) -> str:
@@ -463,6 +462,13 @@ class PaperJournal:
         # appending to an existing file must never insert one mid-stream. A
         # journal started before `interest` existed keeps its old header and
         # will be one column short of its later rows; delete it to restart.
+        #
+        # `fee` and `interest` are the book's whole cost since it opened, and
+        # were the running process's own tally before those totals moved onto
+        # PaperState. Rows on either side of that change are not comparable:
+        # the old ones restart from zero at every logon, the new ones only
+        # climb. Plotting the column across the boundary shows a step that is
+        # an artefact of the definition, not of anything the book did.
         if not os.path.exists(self._filepath):
             with open(self._filepath, "w", encoding="utf-8") as handle:
                 handle.write("\t".join(self._COLUMNS) + "\n")

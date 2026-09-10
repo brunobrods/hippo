@@ -296,6 +296,34 @@ async def test_fees_reduce_the_balance_by_exactly_both_legs(tmp_path):
     assert gross.status().balance - net.status().balance == pytest.approx(expected)
 
 
+# The engine starts at logon, so this is the ordinary case rather than an edge
+# one: a tally kept on the PaperAlgo reset every night, and the dashboard
+# showed a book that had paid fees as one that had traded for free.
+@pytest.mark.asyncio
+async def test_the_cost_tally_survives_a_restart(tmp_path):
+    config = _algo_config(tmp_path, "btc")
+    fees   = BasisPointFee(10.0)
+    book   = PaperBook(PaperStateFile(config.state_filepath),
+                       config.starting_balance, config.pair)
+    before = PaperAlgo(
+        config=config, rows=FakeRows([_row(1800, 100.0)]),
+        strategy=_ScriptedStrategy([Action.BUY]), book=book, fees=fees,
+        borrow=NoBorrowRate(), curve=EquityCurve(), log=DryRunLog(config.log_filepath),
+    )
+
+    await before.tick()
+    book.snapshot()
+    paid = before.status().fee_paid
+
+    # A brand new PaperAlgo over the same state file, as a relaunched engine
+    # builds — its first tick a no-op on the candle the old process already saw.
+    after = _algo(tmp_path, FakeRows([_row(1800, 100.0)]), [Action.HOLD], fees)
+    await after.tick()
+
+    assert paid > 0.0
+    assert after.status().fee_paid == pytest.approx(paid)
+
+
 # ── IsolatedAlgo ─────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

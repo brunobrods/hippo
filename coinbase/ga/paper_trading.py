@@ -149,6 +149,14 @@ class PaperState:
     # themselves are not recoverable from a resumed book — a running win count
     # is the only way a win rate survives a restart.
     realized_wins:      int = 0
+    # What this book has spent since it opened, for the same reason: fees and
+    # interest are charged into balance as they are taken, leaving nothing to
+    # add up afterwards. Held here rather than counted in the process that
+    # happens to be running, which reset them to zero on every restart —
+    # nightly, since the engine starts at logon — and so reported a book that
+    # had paid its way as one that had traded for free.
+    fees_paid:          float = 0.0
+    interest_paid:      float = 0.0
 
 
 class PaperStateFile:
@@ -161,13 +169,27 @@ class PaperStateFile:
     def read(self) -> PaperState:
         with open(self._filepath, encoding="utf-8") as handle:
             raw = json.load(handle)
+        position = self._position(raw.get("position"))
         return PaperState(
             balance           = float(raw["balance"]),
-            position          = self._position(raw.get("position")),
+            position          = position,
             last_candle_start = int(raw.get("last_candle_start", 0)),
             realized_trades   = int(raw.get("realized_trades", 0)),
             realized_wins     = int(raw.get("realized_wins", 0)),
+            fees_paid         = self._fees_paid(raw, position),
+            interest_paid     = float(raw.get("interest_paid", 0.0)),
         )
+
+    # A book written before this field existed still knows one of its costs:
+    # an open position carries the fee it was opened with. Seeding from it
+    # recovers exactly what is recoverable — every earlier round trip is gone,
+    # folded into balance. Self-retiring: the next write puts the key in the
+    # file and this branch never fires for that book again.
+    @staticmethod
+    def _fees_paid(raw: dict[str, Any], position: Optional[Position]) -> float:
+        if "fees_paid" in raw:
+            return float(raw["fees_paid"])
+        return position.entry_fee() if position else 0.0
 
     def write(self, state: PaperState, pair: str) -> None:
         ParentDirectory(self._filepath).ensure()
@@ -178,6 +200,8 @@ class PaperStateFile:
             "last_candle_start": state.last_candle_start,
             "realized_trades":   state.realized_trades,
             "realized_wins":     state.realized_wins,
+            "fees_paid":         state.fees_paid,
+            "interest_paid":     state.interest_paid,
             "updated_at":        UtcNow().iso(),
         }
         # Atomic: a crash mid-write must never leave a truncated book behind.
@@ -237,6 +261,8 @@ class InitialPaperState:
             last_candle_start = 0,
             realized_trades   = 0,
             realized_wins     = 0,
+            fees_paid         = 0.0,
+            interest_paid     = 0.0,
         )
 
 
@@ -263,7 +289,10 @@ class TickOutcome:
     # the indicator values behind a decision without fetching them again.
     row:          dict[str, float] = field(default_factory=dict)
     # Kept apart, not summed into one "cost": which of the two is eating a book
-    # is the question a paper run exists to answer.
+    # is the question a paper run exists to answer. What THIS tick was charged,
+    # which is no longer what any caller reports — the running totals moved
+    # onto PaperState, where they survive a restart. They stay because they are
+    # the only per-tick figure there is, and a journal row is a per-tick record.
     fee:          float = 0.0
     interest:     float = 0.0
     # The position the decision was taken AGAINST, not the one it produced —
@@ -325,6 +354,8 @@ class PaperTick:
                 realized_wins     = state.realized_wins + sum(
                     1 for trade in ledger.trades() if trade.net_profit() > 0.0
                 ),
+                fees_paid         = state.fees_paid + fee,
+                interest_paid     = state.interest_paid + interest,
             ),
             self._rows.pair(),
         )
