@@ -211,6 +211,28 @@ genetic_algorithm:
   # shifts its floor back to zero, so a signed genome is not penalised by
   # thresholds calibrated for a [0, 1] score. Both are exact no-ops for a
   # genome whose weights are all non-negative.
+  #
+  # LEAVE IT OFF, and do not be persuaded otherwise by the older runs in
+  # experiments/index.csv. Measured twice, on the same twenty pairs and window:
+  #
+  #                                       off        on     paired
+  #   old five keys (three of them levels)   -10.4%   +28.9%   16/20 pairs
+  #   the stationary seven, at SIX_HOUR      +16.1%   +13.0%    9/20 pairs
+  #
+  # The +39pp the flag appears to be worth in the index is not the flag. It is
+  # the flag compensating for the three price-level columns that used to be
+  # scored. A model that can only read a LEVEL and can only add to its score is
+  # genuinely crippled, and signed weights rescued it; with the levels gone the
+  # constraint costs nothing. Note which arm moved: dropping the levels took
+  # the OFF arm from -10.4% to +16.1%, while the ON arm barely changed.
+  #
+  # At THIRTY_MINUTE it is not neutral but harmful: -26.6pp, worse in all ten
+  # matched (pair, seed) cells, Welch t = -4.61 over twenty runs, and median
+  # max_drawdown rising from 0.19 to 0.44. Costs charged in every arm.
+  #
+  # Re-measure with sweep_signed_weights_{6h,30m}_{off,on}.yaml before changing
+  # this line — and re-measure it again if weight_keys changes, because that is
+  # exactly the dependency that made the first reading wrong.
   # allow_negative_weights: true
   population_size: 100
   generations: 50
