@@ -25,16 +25,18 @@ engine:
   # Shared across every candle fetch on one venue, so N algos cannot multiply
   # the bound that keeps requests inside their timeout.
   max_concurrent_requests: 8
-  # 0 = gross, matching Backtest and every recorded strategy's performance.
-  # Set to a realistic taker rate (Coinbase is well above 10 at low volume) to
-  # see what fee drag does — at 30-minute granularity it is the largest single
-  # gap between a backtest and reality. Slippage is still not modelled.
-  fee_bps: 0.0
+  # Binance's measured taker rate for this account (/sapi/v1/asset/tradeFee,
+  # 2026-09-05: maker 10, taker 10). Correct for every algo below because they
+  # all execute on Binance. This is engine-wide — AlgoConfig carries no fee of
+  # its own, unlike granularity — so adding a Coinbase algo would charge it 10
+  # where this account really pays 40 taker, flattering it fourfold. Move the
+  # fee onto AlgoConfig before mixing venues again.
+  fee_bps: 10.0
   # Hourly borrow cost, charged only against an open SHORT on the base it
-  # borrowed. Binance publishes a daily rate per asset — divide by 24. Left at
-  # 0 a short costs nothing to hold, which is the one place a paper book can
-  # still flatter a multi-day short exactly the way the backtest used to.
-  borrow_bps_per_hour: 0.0
+  # borrowed. Binance publishes a daily rate per asset — divide by 24. ETH
+  # isolated read 0.00005864/day on 2026-09-05, so 0.5864 bps/day ÷ 24. Also
+  # engine-wide: a short of any other base is priced at ETH's rate.
+  borrow_bps_per_hour: 0.0244
   # Both default under ~/.coinbase/ga/paper/ — outside the repo, so every
   # worktree shares one set of books instead of each keeping its own.
   # state_dir: null
@@ -46,16 +48,25 @@ dashboard:
 
 # Merged under every algo below; an algo's own key wins.
 defaults:
-  exchange: "coinbase"
+  # Every algo executes on Binance now, which is what makes engine.fee_bps of
+  # 10 the right number for all of them. An algo pointed back at Coinbase would
+  # be charged a quarter of what this account really pays there.
+  exchange: "binance"
   starting_balance: 10000.0
 
 # Point strategy_filepath at a run's own experiments/<run_id>/strategy.json
 # rather than best_strategy.json — the latter is overwritten by every training
 # run, so a papered algo would silently swap strategy mid-flight.
 algos:
-  - name: "btc"
-    pair: "BTC-USDC"
-    strategy_filepath: "~/.coinbase/ga/best_strategy.json"
+  # Was "btc" on Coinbase BTC-USDC. Renamed rather than repointed: the state
+  # file is keyed on the algo name and PaperStateFile.read() ignores the `pair`
+  # it stores, so keeping the name would have loaded a USDC position entered at
+  # 79929.90 and marked it against USDT prices without complaint. The old
+  # btc.json is left on disk as the record of that book.
+  - name: "btc-binance"
+    exchange: "binance"
+    pair: "BTC-USDT"
+    strategy_filepath: "~/.coinbase/ga/experiments/20260905T093423388865Z-e741e033/strategy.json"
   # Trained on Binance ETH-USDT, so it is papered against that same pair on the
   # same venue — its thresholds were tuned against this book, not Coinbase's.
   # There is no ETH-USDC genome; every ETH run in the index is ETH-USDT.
