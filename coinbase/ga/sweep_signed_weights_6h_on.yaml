@@ -1,0 +1,64 @@
+# The treatment arm of the signed-weights comparison — allow_negative_weights
+# pinned ON. Identical to sweep_signed_weights_6h_off.yaml but for that one
+# line; see that file for the question, why the flag should matter, the
+# runtimes, and the warning about how the result must be read.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_signed_weights_6h_on.yaml --workers 8
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  # THE ONLY LINE THAT DIFFERS FROM THE `off` ARM.
+  genetic_algorithm.allow_negative_weights: true
+
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+
+  # The original comparison's window, to the day. This sweep changes the
+  # feature set relative to that comparison and nothing else, so the window
+  # has to be held where it was — and all twenty pairs are cached for it.
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-02-28"
+
+  # Costs on. Signed weights let a genome take the other side of a move, and a
+  # model that reverses more readily trades more often, so the flag's effect
+  # and its cost move together. An edge that only survives at zero fees is not
+  # one worth adopting.
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+
+  # Pinned off for the reason the feature sweep pinned it off: at a live
+  # take-profit the exit rule rather than the weights decides the outcome, and
+  # measuring the weights through it would measure the wrong thing.
+  strategy.take_profit_pct: 0.0
+
+# Three, matching the original comparison exactly rather than the usual five —
+# this arm's job is to reproduce that design on new features, and changing the
+# seed count would change two things at once.
+seeds: [1, 2, 3]
+
+axes:
+  # The same twenty pairs, in the same order. Every one is verified present in
+  # the candle cache for the window pinned above.
+  - path: "data.pair"
+    values:
+      - "AAVE-USDT"
+      - "ADA-USDT"
+      - "AVAX-USDT"
+      - "BICO-USDT"
+      - "DASH-USDT"
+      - "DEXE-USDT"
+      - "DOGE-USDT"
+      - "ETH-USDT"
+      - "FET-USDT"
+      - "LINK-USDT"
+      - "NEAR-USDT"
+      - "ONG-USDT"
+      - "PROM-USDT"
+      - "SOL-USDT"
+      - "SUI-USDT"
+      - "UNI-USDT"
+      - "WLD-USDT"
+      - "XLM-USDT"
+      - "XRP-USDT"
+      - "ZEC-USDT"
