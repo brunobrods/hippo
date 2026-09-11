@@ -31,9 +31,15 @@ market_data:
   # Optional — defaults to ~/.coinbase/ga/candle_cache (shared across every
   # worktree of this checkout). Uncomment to override:
   # cache_dir: "./candle_cache"
-  # columns min-max normalized into norm_<column> before scoring/training.
-  normalized_columns: ["sma_short", "sma_long", "sma_extra", "rsi", "macd"]
-  delta_columns: ["delta_1", "delta_3", "delta_5", "delta_10"]
+  # Columns min-max normalized into norm_<column> before scoring/training.
+  # Only these are weightable — strategy.weight_keys must be a subset, checked
+  # at startup. The deltas moved here from delta_columns below so the GA can
+  # actually weight them; see the note on weight_keys for what that measured.
+  normalized_columns: ["rsi", "macd", "macd_histogram", "delta_1", "delta_3", "delta_5", "delta_10"]
+  # Normalized but NOT weightable. Empty now that the deltas are weighted —
+  # kept as the seam for adding a column to the frame before deciding whether
+  # the model should score on it.
+  delta_columns: []
 
   # Wider-market context. `index_pairs` is an equal-weight basket standing in
   # for "the market"; with it set, every frame gains an `index_z` column — the
@@ -171,13 +177,27 @@ strategy:
     macd_fast: 12
     macd_slow: 26
     macd_signal: 9
-  # which normalized columns the GA assigns a weight to and scores on. Deliberately
-  # excludes market_data.delta_columns, which get normalized but not weighted.
-  # Weights are SIGNED and their absolute values sum to 1: a negative weight
-  # reads its indicator as bearish, subtracting from the score rather than
-  # merely contributing nothing. An all-positive genome can therefore never
-  # score below 0.5, which means it can never sell or short.
-  weight_keys: ["sma_short", "sma_long", "sma_extra", "rsi", "macd"]
+  # Which normalized columns the GA assigns a weight to and scores on.
+  #
+  # STATIONARY COLUMNS ONLY, as of the two-pair sweep in
+  # sweep_features_30m.yaml / sweep_features_eth_30m.yaml. The three moving
+  # averages that used to be here are LEVELS — essentially the price path —
+  # with a lag-1 autocorrelation of 1.0000 over the training half, and a model
+  # fitted on a level learns where price WAS, which is the one thing that does
+  # not transfer. Measured at THIRTY_MINUTE with costs charged:
+  #
+  #            annualized yield        BTC-USDT   ETH-USDT
+  #   these 7 keys                       +20.3%     +36.4%
+  #   the old 5 (three of them levels)    +8.1%     -20.4%
+  #
+  # Every seed was positive on both pairs, and the worst seed of the new set
+  # beat the mean of the old one on both. The GA had already been saying so:
+  # given the old five, all three seeds drove the three SMA weights to zero.
+  #
+  # Weights may go negative only when genetic_algorithm.allow_negative_weights
+  # is on; signal_score then lifts its floor back to zero so these thresholds
+  # keep their calibration either way.
+  weight_keys: ["rsi", "macd", "macd_histogram", "delta_1", "delta_3", "delta_5", "delta_10"]
 
 genetic_algorithm:
   # Whether a weight may be NEGATIVE, i.e. whether the model can express an

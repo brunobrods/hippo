@@ -1,0 +1,100 @@
+# Stationary features against level features, at THIRTY_MINUTE candles.
+#
+# The question it answers: is the linear model feature-starved, or is it the
+# feature SET that is wrong? Those want opposite responses — the first argues
+# for a bigger model, the second for better inputs to the one we have.
+#
+# Two measurements pointed here, and they agree:
+#
+#   Lag-1 autocorrelation of the scored columns over the training half is
+#   1.0000 for all three SMAs — they are levels, essentially the price path, so
+#   the effective-sample formula degenerates. RSI comes out at 0.9174 and MACD
+#   at 0.9931, giving 905 and 73 independent-equivalent observations out of
+#   21,000 rows. A model with more capacity fitted on level features will fit
+#   the level, which is the one thing that cannot transfer.
+#
+#   The horizon sweep then found the GA doing this by itself: all three seeds
+#   put ~0 weight on sma_short, sma_long and sma_extra and kept macd, rsi and
+#   position_pnl. Three independent populations discarded exactly the three
+#   non-stationary inputs.
+#
+# So this asks whether the search has been spending its weight budget on
+# columns that cannot carry signal, and whether the stationary columns the
+# pipeline already computes but never scores do better.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_features_30m.yaml --workers 8
+#
+# 15 points at roughly 9 minutes each: ~2.2 h sequential, ~20 min across 8
+# workers.
+#
+# NOTE on what is NOT here. AverageTrueRange and CandleRange are implemented in
+# market_data_processor.py but only pair_screener.py uses them — they are not
+# columns in IndicatorFrame, so they cannot be weighted from config alone.
+# Adding them is a code change and a separate experiment.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  data.exchange: "binance"
+  data.pair: "BTC-USDT"
+  data.granularity: "THIRTY_MINUTE"
+
+  # Costs on, as in the horizon sweep — a feature that only earns its keep
+  # before fees has not earned it.
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+
+  # Pinned OFF, and this one matters. At 0.01 the take-profit mechanic
+  # produced bit-identical results from different genomes: the weights stopped
+  # mattering entirely. Measuring features through that would measure nothing.
+  # Held at 0.0 so what varies is the signal, not the exit rule.
+  strategy.take_profit_pct: 0.0
+
+  # Every candidate column is normalized so each arm can weight any subset;
+  # min-max scales each column independently, so widening this leaves the
+  # existing columns' norm_* values exactly as they were. That is what makes
+  # the first arm below a true reproduction of today's baseline.
+  market_data.normalized_columns:
+    - "sma_short"
+    - "sma_long"
+    - "sma_extra"
+    - "rsi"
+    - "macd"
+    - "macd_signal"
+    - "macd_histogram"
+    - "delta_1"
+    - "delta_3"
+    - "delta_5"
+    - "delta_10"
+
+seeds: [1, 2, 3]
+
+axes:
+  # position_pnl is appended to every set by the training run itself, so it is
+  # never listed here.
+  - path: "strategy.weight_keys"
+    values:
+      # Today's set, and the control: it must reproduce the horizon sweep's
+      # 0.0-target arm. If it does not, widening normalized_columns changed
+      # something it should not have, and nothing below can be trusted.
+      - ["sma_short", "sma_long", "sma_extra", "rsi", "macd"]
+
+      # The levels removed and nothing put back. If this matches or beats the
+      # control, the three SMA columns were dead weight — which is what the GA
+      # zeroing them already suggests.
+      - ["rsi", "macd"]
+
+      # The cheapest addition: macd minus its own signal line, which is far
+      # more stationary than either.
+      - ["rsi", "macd", "macd_histogram"]
+
+      # The stationary set proper — momentum over four horizons, which is the
+      # closest thing available to "how far has price moved recently" without
+      # encoding where price IS.
+      - ["rsi", "macd", "macd_histogram", "delta_1", "delta_3", "delta_5", "delta_10"]
+
+      # Everything at once. Worth one arm to see whether the search can find
+      # the stationary subset on its own when handed the levels too — it did in
+      # the horizon sweep, on a smaller set.
+      - ["sma_short", "sma_long", "sma_extra", "rsi", "macd", "macd_signal",
+         "macd_histogram", "delta_1", "delta_3", "delta_5", "delta_10"]
