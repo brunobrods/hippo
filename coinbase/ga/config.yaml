@@ -105,6 +105,44 @@ strategy:
   #
   # Adding a design is therefore additive: an existing genome keeps its own, and
   # two designs can be papered side by side as separate algos in paper.yaml.
+  #
+  # "dual" is the second design: an ENTRY model scored while flat and an EXIT
+  # model scored while holding, each with its own L1 budget. It exists because
+  # linear shares one budget between both jobs while only the exit half can use
+  # position_pnl, so weight spent on exits lowers the ceiling the entry score
+  # must clear — a live genome topped out at 0.5196 against a buy_threshold of
+  # 0.60 and could only ever short. Set strategy.exit_keys alongside it.
+  #
+  # It removes that failure completely, and this is not an argument but a count.
+  # Over 70 runs on the same window, measured entry-side ceilings:
+  #
+  #                 min      mean     max     runs that can never open a long
+  #   linear      0.3875    0.7538   0.9571   6 of 70
+  #   dual        1.0000    1.0000   1.0000   0 of 70
+  #
+  # LINEAR IS STILL THE DEFAULT, because as currently calibrated dual costs
+  # yield. Twenty pairs at SIX_HOUR, three seeds, costs charged:
+  #
+  #                 yield    trades   gross    fees    max_dd
+  #   linear       +16.1%      8.0    1672      92      0.348
+  #   dual          +3.2%     29.6     617     341      0.481
+  #
+  # Mean difference -12.9pp, better on 8 of 20 pairs, paired t(19) = -1.335 —
+  # not significant, but consistently negative, and THIRTY_MINUTE agrees in
+  # direction (+27.9% against +12.6%, worse on both pairs).
+  #
+  # READ THE TRADE COUNT BEFORE CONCLUDING THE DESIGN IS WORSE. Dual trades
+  # roughly four times as often, which is what a separately normalized exit
+  # score would do against thresholds calibrated for a compressed one: under
+  # linear the exit score's reachable range is squeezed by whatever the entry
+  # columns take, while dual's exit model spans the full [0, 1], so sell_
+  # threshold and short_exit_threshold are crossed far more readily. Gross
+  # profit falls too, not only net, so it is not purely fees — the extra exits
+  # are also worse exits.
+  #
+  # That makes this comparison a confound: it measures a new design against a
+  # policy calibrated for the old one. The honest next step is to sweep
+  # sell_threshold and short_exit_threshold under dual before judging it.
   design: "linear"
   fitness_confidence: 1.0
   # A post-only limit resting on the opposite side from entry, placed the
