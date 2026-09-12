@@ -22,8 +22,10 @@ from coinbase.ga.market_data_processor import (
 )
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
+    SignalDesign,
     StrategyConfigFile,
     StrategyEvaluator,
+    TwoSidedModel,
     ValidatedStrategyConfig,
     ValidatedWeightKeys,
     WeightKeysConfig,
@@ -131,7 +133,16 @@ class TrainingRun:
         weight_keys = ValidatedWeightKeys(
             WeightKeysConfig(self._raw_config).keys(), market_config.normalized_columns(),
         ).keys()
-        keys = weight_keys + (POSITION_PNL_KEY,)
+        # Both lists are checked against normalized_columns, because an exit
+        # column that is not normalized would raise on the first row scored
+        # rather than at startup.
+        exit_keys = ValidatedWeightKeys(
+            strategy_config.exit_keys, market_config.normalized_columns(),
+        ).keys()
+        # The design owns the genome's shape: linear appends position_pnl to one
+        # flat list, dual builds two prefixed groups. Asking it here is what lets
+        # a second design exist without this function knowing anything about it.
+        keys = SignalDesign(strategy_config.design).keys(weight_keys, exit_keys)
 
         train_evaluator = StrategyEvaluator(split.train(), strategy_config, keys)
         test_evaluator  = StrategyEvaluator(split.test(), strategy_config, keys)
@@ -156,7 +167,16 @@ class TrainingRun:
             strategy_config = strategy_config,
             ga_config       = ga_config,
         ))
-        best_genome = GeneticAlgorithm(ga_config, keys).evolve(train_evaluator, on_generation=console_log.append)
+        # The design supplies the scaling, because how a genome's numbers are
+        # rescaled is a property of the model rather than of the search: L1
+        # means "one unit of conviction spread across the indicators", which is
+        # right for a weighted sum and wrong for anything whose parameters are
+        # not weights. GeneticAlgorithm defaults to L1, so omitting this trains
+        # every future design as if it were linear — silently, and only in the
+        # numbers.
+        best_genome = GeneticAlgorithm(
+            ga_config, keys, SignalDesign(strategy_config.design).scaling(),
+        ).evolve(train_evaluator, on_generation=console_log.append)
 
         metadata = StrategyMetadata(
             pair            = window.pair,
@@ -165,6 +185,21 @@ class TrainingRun:
             ga_config       = ga_config,
             created_at      = UtcNow().iso(),
         )
+        # Warned, not raised: here a one-sided genome is a measurement the run
+        # honestly produced, and aborting would throw away the evidence. The
+        # paper paths raise on the same condition, because there it is about to
+        # trade. See TwoSidedModel.
+        if TwoSidedModel(
+            SignalDesign(strategy_config.design).model(best_genome, keys),
+            strategy_config,
+        ).is_one_sided():
+            print(
+                f"warning: best genome can never open a long — weight on "
+                f"position_pnl leaves its flat ceiling at or below "
+                f"buy_threshold {strategy_config.buy_threshold}, so it is "
+                f"short-only. It will be refused if papered."
+            )
+
         strategy      = TrainedStrategy(best_genome, strategy_config)
         test_result   = test_evaluator.result(best_genome)
         test_yield    = test_evaluator.annualized_yield(test_result)

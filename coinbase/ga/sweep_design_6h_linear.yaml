@@ -1,0 +1,109 @@
+# The dual design against the linear one. CONTROL ARM — design "linear".
+# Its sibling sweep_design_6h_dual.yaml is identical but for the design and the
+# exit_keys it needs, and the two together are the comparison.
+#
+# ── What is being tested ──────────────────────────────────────────────
+#
+# "linear" scores one weight vector for both jobs a strategy does: deciding
+# whether to enter, and deciding whether to leave. "dual" splits them — one
+# model scored while flat, one while holding — each with its own L1 budget.
+#
+# The split exists because sharing a budget has a structural cost that was
+# found live. position_pnl is useless for entry: it contributes exactly zero
+# while flat. But under flat L1 the weight it carries still comes out of the
+# same 1.0, lowering the highest score the ENTRY side can reach, while the
+# entry thresholds are calibrated against 1.0. A papered genome holding 0.4804
+# on position_pnl topped out at 0.5196 against a buy_threshold of 0.60 and
+# could only ever short — for its whole live history, silently.
+#
+# It is not rare where it matters. Across 182 saved genomes on this feature set
+# position_pnl averages 0.245, and at THIRTY_MINUTE it averages 0.352 — roughly
+# double the strongest market input. One of the five ETH seeds in the
+# signed-weights control arm is one-sided.
+#
+# Under "dual" that cannot happen: the entry group is normalized on its own, so
+# flat_score_ceiling() is 1.0 by construction however much weight the exit model
+# takes. A smoke run put 0.5477 of the exit budget on position_pnl and left the
+# entry ceiling at exactly 1.0.
+#
+# ── So what is this sweep actually measuring? ─────────────────────────
+#
+# NOT whether dual removes the one-sided failure — that is arithmetic, not a
+# question. This measures the PRICE of removing it. A dual genome carries more
+# weights (11 here against 8), and a bigger search space at the same population
+# and generation budget is a real cost: eleven COLUMNS measured worse and
+# noisier than two on this data. The exit model is deliberately kept to three
+# columns for that reason.
+#
+# So the result to look for is whether dual matches linear. Matching is a win,
+# because it buys the structural guarantee for nothing. Losing badly would mean
+# the search cannot afford the extra dimensions, and the guard is the better
+# answer.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_design_6h_linear.yaml --workers 8
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_design_6h_dual.yaml   --workers 8
+#
+# 60 points each at roughly 70 s: ~9 min per arm across 8 workers. Every window
+# is already in the candle cache.
+#
+# ── Reading it ────────────────────────────────────────────────────────
+#
+# --group-by design needs "design" in results.py's _CONFIG_COLUMNS, which it is
+# not — the column is enriched but never triggers enrichment, so the group-by
+# raises KeyError. Filter index.csv on git_commit and group by the design read
+# from each run's config.json, as the signed-weights comparison did.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  # THE LINE THAT DIFFERS FROM THE `dual` ARM (which also sets exit_keys).
+  strategy.design: "linear"
+
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+  # The window every other cross-sectional comparison in this repo uses, and
+  # the one all twenty pairs are cached for.
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-02-28"
+
+  # Costs on. The dual design's exit model changes when positions are closed,
+  # so it changes how often the book trades — an effect that has to be paid for
+  # to count.
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+
+  # Off, as measured: on the stationary seven this is worth nothing at SIX_HOUR
+  # and costs 26.6pp at THIRTY_MINUTE.
+  genetic_algorithm.allow_negative_weights: false
+
+  # Pinned off so what varies is the model, not the exit rule. At a live
+  # take-profit the mechanic can dominate the genome entirely — three different
+  # genomes produced an identical book at 0.08 — which would measure nothing
+  # about either design.
+  strategy.take_profit_pct: 0.0
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "AAVE-USDT"
+      - "ADA-USDT"
+      - "AVAX-USDT"
+      - "BICO-USDT"
+      - "DASH-USDT"
+      - "DEXE-USDT"
+      - "DOGE-USDT"
+      - "ETH-USDT"
+      - "FET-USDT"
+      - "LINK-USDT"
+      - "NEAR-USDT"
+      - "ONG-USDT"
+      - "PROM-USDT"
+      - "SOL-USDT"
+      - "SUI-USDT"
+      - "UNI-USDT"
+      - "WLD-USDT"
+      - "XLM-USDT"
+      - "XRP-USDT"
+      - "ZEC-USDT"

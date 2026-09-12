@@ -25,6 +25,8 @@ def _status(
     position: PositionView = None,
     running: bool = True,
     error: str = None,
+    max_drawdown: float = 0.0,
+    equity_peak: float = 0.0,
 ) -> AlgoStatus:
     return AlgoStatus(
         name=name, exchange="coinbase", pair="BTC-USDC", granularity="THIRTY_MINUTE",
@@ -33,6 +35,7 @@ def _status(
         mark_price=100.0, equity=equity, position=position,
         realized_pnl=balance - starting, unrealized_pnl=equity - balance,
         trades=trades, wins=wins, rsi=55.0, macd=0.25, signal_score=0.5, fee_paid=0.0,
+        max_drawdown=max_drawdown, equity_peak=equity_peak,
     )
 
 
@@ -62,6 +65,42 @@ def test_max_drawdown_measures_the_worst_peak_to_trough():
     performance = AlgoPerformance(_status(), _curve([100.0, 120.0, 90.0, 110.0]), 86400.0)
 
     assert performance.max_drawdown() == pytest.approx(0.25)
+
+
+# The curve is rebuilt at every launch, so on its own it forgets a fall that
+# happened before this process started — which, with the engine on a logon
+# trigger, means every night.
+def test_max_drawdown_remembers_a_fall_this_process_never_saw():
+    # A flat session: the curve alone would report no drawdown at all.
+    performance = AlgoPerformance(
+        _status(max_drawdown=0.3), _curve([1000.0, 1000.0]), 86400.0,
+    )
+
+    assert performance.max_drawdown() == pytest.approx(0.3)
+
+
+# The book samples once per candle, so a trough between two closes is only
+# ever in the live curve. Whichever is deeper is the drawdown.
+def test_max_drawdown_prefers_an_intraday_trough_the_book_missed():
+    performance = AlgoPerformance(
+        _status(max_drawdown=0.1), _curve([120.0, 90.0]), 86400.0,
+    )
+
+    assert performance.max_drawdown() == pytest.approx(0.25)
+
+
+# The live curve is measured against the BOOK's high-water mark, not against
+# this session's own peak. Unanchored, a session that opened below the book's
+# peak understates every fall inside it: peaking at 900 today against a real
+# 1000 turns a 19% drawdown into a 10% one.
+def test_a_dip_is_measured_against_the_books_peak_not_this_sessions():
+    performance = AlgoPerformance(
+        _status(max_drawdown=0.1, equity_peak=1000.0),
+        _curve([900.0, 810.0, 890.0]),
+        86400.0,
+    )
+
+    assert performance.max_drawdown() == pytest.approx(0.19)
 
 
 def test_total_return_is_measured_against_the_starting_balance():

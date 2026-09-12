@@ -67,6 +67,7 @@ from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
     SignalDesign,
     GaStrategy,
+    TwoSidedModel,
     ValidatedWeightKeys,
     WeightKeysConfig,
 )
@@ -295,8 +296,6 @@ class PaperAlgo:
         self._outcome: Optional[TickOutcome] = None
         self._last_tick_at: Optional[str]    = None
         self._mark_price: float              = 0.0
-        self._fee_paid: float                = 0.0
-        self._interest_paid: float           = 0.0
 
     def config(self) -> AlgoConfig:
         return self._config
@@ -309,8 +308,6 @@ class PaperAlgo:
         self._outcome      = outcome
         self._last_tick_at = UtcNow().iso()
         if outcome.acted:
-            self._fee_paid      += outcome.fee
-            self._interest_paid += outcome.interest
             self._mark_price = outcome.row["close"]
             self._log.append(
                 self._last_tick_at, outcome.decision, outcome.balance, outcome.equity,
@@ -348,8 +345,14 @@ class PaperAlgo:
             rsi               = self._row_value("rsi"),
             macd              = self._row_value("macd"),
             signal_score      = self._signal_score(),
-            fee_paid          = self._fee_paid,
-            interest_paid     = self._interest_paid,
+            # Read off the book, not off a counter this process kept: the
+            # engine restarts at every logon, and a per-process tally showed
+            # a book that had paid fees as one that had paid nothing.
+            fee_paid          = state.fees_paid,
+            interest_paid     = state.interest_paid,
+            max_drawdown      = state.max_drawdown,
+            equity_peak       = state.equity_peak,
+            opened_at         = state.opened_at,
         )
 
     def _last_action(self) -> str:
@@ -463,6 +466,13 @@ class PaperJournal:
         # appending to an existing file must never insert one mid-stream. A
         # journal started before `interest` existed keeps its old header and
         # will be one column short of its later rows; delete it to restart.
+        #
+        # `fee` and `interest` are the book's whole cost since it opened, and
+        # were the running process's own tally before those totals moved onto
+        # PaperState. Rows on either side of that change are not comparable:
+        # the old ones restart from zero at every logon, the new ones only
+        # climb. Plotting the column across the boundary shows a step that is
+        # an artefact of the definition, not of anything the book did.
         if not os.path.exists(self._filepath):
             with open(self._filepath, "w", encoding="utf-8") as handle:
                 handle.write("\t".join(self._COLUMNS) + "\n")
@@ -629,11 +639,10 @@ class StatusBoard:
     def payload(self) -> dict[str, Any]:
         now      = time.time()
         statuses = tuple(algo.status() for algo in self._algos)
-        elapsed  = now - self._started_at
         return StatusPayload(
             statuses            = statuses,
             performances        = tuple(
-                AlgoPerformance(status, self._curves[status.name], elapsed)
+                AlgoPerformance(status, self._curves[status.name], self._elapsed(now, status))
                 for status in statuses
             ),
             portfolio           = PortfolioStatus(statuses),
@@ -645,6 +654,13 @@ class StatusBoard:
             seconds_since_price = now - self._prices.marked_at() if self._prices.marked_at() else -1.0,
         ).as_dict()
 
+    # How long the BOOK has been running, not this process. Per algo, because
+    # books are added at different times. Falling back to the process start is
+    # the old behaviour, and applies only to a book with no recorded open time
+    # and no open position to bound it — until its next tick stamps one.
+    def _elapsed(self, now: float, status: AlgoStatus) -> float:
+        return now - (status.opened_at or self._started_at)
+
 
 # ── Assembly ───────────────────────────────────────────────────────────
 
@@ -655,9 +671,24 @@ class PaperEngine:
         self._pool   = pool
         self._baskets: dict[tuple[str, str], LiveBasket] = {}
 
+    # Construction is isolated for the same reason tick, mark and status are:
+    # this engine runs several books at once, and one that cannot be built —
+    # an unreadable strategy file, a genome TwoSidedModel refuses — must not
+    # stop the others. Without this the whole tuple raises and every book stops,
+    # which is how a single bad genome would take a healthy one down with it.
+    #
+    # Logged at error rather than swallowed: a book that is missing from the
+    # dashboard has to say why in the log, or it looks like it was never
+    # configured.
     @functools.cached_property
     def algos(self) -> tuple[IsolatedAlgo, ...]:
-        return tuple(IsolatedAlgo(self._algo(entry)) for entry in self._config.algos)
+        built: list[IsolatedAlgo] = []
+        for entry in self._config.algos:
+            try:
+                built.append(IsolatedAlgo(self._algo(entry)))
+            except Exception as exc:
+                logger.error("algo %s refused, and will not run: %s", entry.name, exc)
+        return tuple(built)
 
     # Books and curves are shared between the algos, the snapshotter and the
     # status board, so every caller must see the same instance per name.
@@ -714,9 +745,14 @@ class PaperEngine:
         # Backfilled for the same reason paper_trading does it: this engine
         # runs MANY older genomes at once, so it is the likeliest place for a
         # genome saved before a weight key existed to meet a config that has it.
-        genome = BackfilledGenome(
-            Genome(saved.weights()), keys + (POSITION_PNL_KEY,),
+        # Built from the GENOME's own design and exit_keys — both recorded in
+        # its strategy.json — rather than config.yaml's. This engine runs many
+        # genomes at once and they need not share a design, so rebuilding any
+        # of them in the configured shape would score it as a different model.
+        shape  = SignalDesign(trained.config().design).keys(
+            keys, trained.config().exit_keys,
         )
+        genome = BackfilledGenome(Genome(saved.weights()), shape)
         if genome.missing():
             logger.warning(
                 "%s: genome predates %s — running it with those weighted zero",
@@ -726,9 +762,14 @@ class PaperEngine:
             config   = entry,
             rows     = rows,
             strategy = GaStrategy(
-                SignalDesign(trained.config().design).model(
-                    genome.filled(), keys + (POSITION_PNL_KEY,),
-                ),
+                # Refuses a genome whose score cannot reach its own
+                # buy_threshold while flat. This engine is the likeliest place
+                # for it: it runs many older genomes at once, and a one-sided
+                # book looks identical to a book that simply has not bought yet.
+                TwoSidedModel(
+                    SignalDesign(trained.config().design).model(genome.filled(), shape),
+                    trained.config(),
+                ).model(),
                 trained.config(),
             ),
             book     = self.books[entry.name],

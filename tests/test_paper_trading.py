@@ -388,3 +388,221 @@ def test_maker_taker_fee_defaults_to_the_taker_rate():
 def test_flat_schedules_ignore_the_maker_flag():
     assert BasisPointFee(20.0).charge(1000.0, maker=True) == pytest.approx(2.0)
     assert NoFees().charge(1000.0, maker=True) == 0.0
+
+
+# ── Costs across a restart ───────────────────────────────────────────
+# Fees and interest are charged into balance as they are taken, so a book that
+# does not carry a running total cannot recover one afterwards. The engine
+# restarts at every logon, which is what made a per-process tally report a
+# book that had paid its way as one that had traded for free.
+
+def test_costs_round_trip_through_the_state_file(tmp_path):
+    file = PaperStateFile(str(tmp_path / "state.json"))
+    file.write(
+        PaperState(
+            balance=1000.0, position=None, last_candle_start=1, realized_trades=2,
+            fees_paid=12.5, interest_paid=0.75,
+        ),
+        "BTC-USDT",
+    )
+
+    state = file.read()
+    assert state.fees_paid == pytest.approx(12.5)
+    assert state.interest_paid == pytest.approx(0.75)
+
+
+@pytest.mark.asyncio
+async def test_fees_accumulate_across_ticks_rather_than_being_replaced(tmp_path):
+    state_file = PaperStateFile(str(tmp_path / "state.json"))
+    rows       = FakeRows([_row(100, 50.0), _row(200, 55.0)])
+    fees       = BasisPointFee(100.0)
+
+    await PaperTick(rows, _ScriptedStrategy([Action.BUY]), state_file, 1000.0, fees).run()
+    after_entry = state_file.read().fees_paid
+    # A brand new PaperTick, as the engine builds after a restart.
+    await PaperTick(rows, _ScriptedStrategy([Action.SELL]), state_file, 1000.0, fees).run()
+
+    assert after_entry > 0.0
+    assert state_file.read().fees_paid > after_entry
+
+
+def test_an_older_book_recovers_the_fee_its_open_position_paid(tmp_path):
+    path = tmp_path / "state.json"
+    # Written before fees_paid existed — entry_fee is the one cost still on the
+    # book, every earlier round trip having been folded into balance.
+    path.write_text(json.dumps({
+        "pair": "BTC-USDT",
+        "balance": 9994.0,
+        "position": {
+            "entry_price": 79609.28, "size": 0.075, "direction": "SHORT",
+            "entry_timestamp": 1788607800, "entry_fee": 6.0,
+        },
+        "last_candle_start": 1788908400,
+        "realized_trades": 0,
+    }))
+
+    state = PaperStateFile(str(path)).read()
+    assert state.fees_paid == pytest.approx(6.0)
+    assert state.interest_paid == pytest.approx(0.0)
+
+
+def test_an_older_flat_book_starts_its_tally_at_zero(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "pair": "BTC-USDT", "balance": 9994.0, "position": None,
+        "last_candle_start": 1788908400, "realized_trades": 3,
+    }))
+
+    assert PaperStateFile(str(path)).read().fees_paid == pytest.approx(0.0)
+
+
+# An explicit zero must not be mistaken for a missing key and re-seeded from
+# the open position — that would revive the entry fee on a book that had
+# already recorded paying nothing.
+def test_a_recorded_zero_is_not_re_seeded_from_the_position(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "pair": "BTC-USDT",
+        "balance": 1000.0,
+        "position": {
+            "entry_price": 50.0, "size": 1.0, "direction": "LONG",
+            "entry_timestamp": 100, "entry_fee": 6.0,
+        },
+        "last_candle_start": 100,
+        "realized_trades": 0,
+        "fees_paid": 0.0,
+    }))
+
+    assert PaperStateFile(str(path)).read().fees_paid == pytest.approx(0.0)
+
+
+# ── Drawdown and age across a restart ────────────────────────────────
+# An equity curve held in memory is rebuilt at every launch, and the process
+# start time is not the book's. Both statistics derived from them reset
+# nightly; these numbers are what a book needs to keep instead.
+
+def test_the_high_water_mark_and_drawdown_round_trip(tmp_path):
+    file = PaperStateFile(str(tmp_path / "state.json"))
+    file.write(
+        PaperState(
+            balance=900.0, position=None, last_candle_start=1, realized_trades=1,
+            equity_peak=1200.0, max_drawdown=0.25, opened_at=1788607800.0,
+        ),
+        "BTC-USDT",
+    )
+
+    state = file.read()
+    assert state.equity_peak == pytest.approx(1200.0)
+    assert state.max_drawdown == pytest.approx(0.25)
+    assert state.opened_at == pytest.approx(1788607800.0)
+
+
+@pytest.mark.asyncio
+async def test_the_worst_drawdown_is_kept_after_equity_recovers(tmp_path):
+    state_file = PaperStateFile(str(tmp_path / "state.json"))
+    # Bought 5 units at 100 with half of 1000; marked at 60, then at 110. The
+    # trough is 500 cash + 5 units at 60 = 800, against a 1000 peak.
+    rows = FakeRows([_row(100, 100.0), _row(200, 60.0), _row(300, 110.0)])
+
+    for action in (Action.BUY, Action.HOLD, Action.HOLD):
+        await PaperTick(rows, _ScriptedStrategy([action]), state_file, 1000.0).run()
+
+    state = state_file.read()
+    assert state.max_drawdown == pytest.approx(0.2)
+    assert state.equity_peak == pytest.approx(1050.0)   # 500 cash + 5 units at 110
+
+
+# A book upgraded mid-flight has never recorded a peak, and its equity today
+# says nothing about where it has been. That it opened at its starting balance
+# is not a guess, though, so the first reading is right rather than zero.
+@pytest.mark.asyncio
+async def test_an_older_book_measures_drawdown_from_its_starting_balance(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "pair": "BTC-USDT", "balance": 900.0, "position": None,
+        "last_candle_start": 50, "realized_trades": 1,
+    }))
+    state_file = PaperStateFile(str(path))
+
+    await PaperTick(FakeRows([_row(100, 100.0)]), _ScriptedStrategy([Action.HOLD]),
+                    state_file, 1000.0).run()
+
+    # 900 against a 1000 start it cannot have opened below.
+    assert state_file.read().max_drawdown == pytest.approx(0.1)
+
+
+@pytest.mark.asyncio
+async def test_a_new_book_is_dated_from_its_first_candle(tmp_path):
+    state_file = PaperStateFile(str(tmp_path / "state.json"))
+
+    await PaperTick(FakeRows([_row(100, 100.0)]), _ScriptedStrategy([Action.HOLD]),
+                    state_file, 1000.0).run()
+
+    assert state_file.read().opened_at == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_a_books_open_time_is_not_moved_by_a_later_tick(tmp_path):
+    state_file = PaperStateFile(str(tmp_path / "state.json"))
+    rows       = FakeRows([_row(100, 100.0), _row(200, 105.0)])
+
+    await PaperTick(rows, _ScriptedStrategy([Action.HOLD]), state_file, 1000.0).run()
+    await PaperTick(rows, _ScriptedStrategy([Action.HOLD]), state_file, 1000.0).run()
+
+    assert state_file.read().opened_at == pytest.approx(100.0)
+
+
+# Nothing an older book carries dates it, and every candidate is LATER than
+# its real open — which shortens the window an annualized figure divides by
+# and so inflates it without limit. Undated is the honest answer.
+@pytest.mark.asyncio
+async def test_an_older_book_stays_undated_rather_than_claiming_today(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "pair": "BTC-USDT",
+        "balance": 1000.0,
+        "position": {
+            "entry_price": 50.0, "size": 1.0, "direction": "SHORT",
+            "entry_timestamp": 1788607800, "entry_fee": 0.5,
+        },
+        "last_candle_start": 1788607800,
+        "realized_trades": 0,
+    }))
+    state_file = PaperStateFile(str(path))
+
+    assert state_file.read().opened_at == pytest.approx(0.0)
+    await PaperTick(FakeRows([_row(1788700000, 50.0)]), _ScriptedStrategy([Action.HOLD]),
+                    state_file, 1000.0).run()
+
+    assert state_file.read().opened_at == pytest.approx(0.0)
+
+
+# starting_balance is config. A permanent floor under the peak would let a
+# retrain that raises it write a drawdown the book never suffered.
+@pytest.mark.asyncio
+async def test_a_raised_starting_balance_does_not_lift_an_established_peak(tmp_path):
+    state_file = PaperStateFile(str(tmp_path / "state.json"))
+    rows       = FakeRows([_row(100, 100.0), _row(200, 100.0)])
+
+    await PaperTick(rows, _ScriptedStrategy([Action.HOLD]), state_file, 1000.0).run()
+    # The same book, ticked again by an entry point configured far higher.
+    await PaperTick(rows, _ScriptedStrategy([Action.HOLD]), state_file, 5000.0).run()
+
+    state = state_file.read()
+    assert state.equity_peak == pytest.approx(1000.0)
+    assert state.max_drawdown == pytest.approx(0.0)
+
+
+# A trough between two closes is a real fall. Both extremes are already
+# fetched for the liquidation check, so the book can sample the worse of them.
+@pytest.mark.asyncio
+async def test_drawdown_sees_a_trough_inside_a_candle(tmp_path):
+    state_file = PaperStateFile(str(tmp_path / "state.json"))
+    # Enters long 5 units at 100, then a candle that dips to 60 and closes flat
+    # back at 100: equity troughs at 500 cash + 5 units at 60 = 800.
+    rows = FakeRows([_row(100, 100.0), _row(200, 100.0, high=100.0, low=60.0)])
+
+    await PaperTick(rows, _ScriptedStrategy([Action.BUY]), state_file, 1000.0).run()
+    await PaperTick(rows, _ScriptedStrategy([Action.HOLD]), state_file, 1000.0).run()
+
+    assert state_file.read().max_drawdown == pytest.approx(0.2)
