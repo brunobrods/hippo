@@ -74,7 +74,10 @@ async def _main() -> None:
     weight_keys     = ValidatedWeightKeys(
         WeightKeysConfig(raw_config).keys(), market_config.normalized_columns(),
     ).keys()
-    keys = weight_keys + (POSITION_PNL_KEY,)
+    # The design decides the genome's shape — see SignalDesign.keys().
+    keys = SignalDesign(strategy_config.design).keys(
+        weight_keys, strategy_config.exit_keys,
+    )
 
     reloaded = StrategyJsonFile(output_config.strategy_filepath)
     # Backfilled for the same reason paper_trading does it: a genome saved

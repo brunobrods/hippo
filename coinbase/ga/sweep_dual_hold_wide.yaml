@@ -1,0 +1,83 @@
+# Re-calibrating the hold band for the dual design — MODERATE widening.
+#
+# ── Why this exists ───────────────────────────────────────────────────
+#
+# The dual design removes the one-sided-genome failure completely (0 of 70 runs
+# against 6 of 70 for linear) but measured 12.9pp BELOW linear, and traded about
+# four times as often: 29.6 round trips against 8.0 over the same twenty pairs.
+#
+# Four times the trading is what a separately normalized exit score should do
+# against thresholds calibrated for a compressed one. Under linear, the exit
+# score's reachable range is squeezed by whatever weight the entry columns take;
+# under dual the exit model spans the full [0, 1], so `score < sell_threshold`
+# and `score > short_exit_threshold` are crossed far more readily. The first
+# comparison therefore measured a new design against a policy calibrated for the
+# old one, which is a confound, not a result.
+#
+# This sweep widens the HOLD BAND — the span between the two exit thresholds —
+# so a dual genome is not forced out of a position by thresholds that were never
+# meant for its score range. Lowering sell_threshold makes a long harder to
+# close; raising short_exit_threshold makes a short harder to cover.
+#
+# ── What would falsify the explanation ────────────────────────────────
+#
+# If trade count falls toward linear's 8.0 and yield rises toward +16.1%, the
+# gap was calibration. If trade count falls but yield does NOT recover, it was
+# not: the extra exits were not merely frequent but better-timed than what
+# replaces them, and the design costs real performance.
+#
+# The second reading is already the more likely one. Dual's GROSS profit was
+# also lower (617 against 1672), not only its net, so fees alone never explained
+# the gap — the extra exits were leaving money behind before costs.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_dual_hold_wide.yaml --workers 8
+#
+# 60 points at roughly 70 s: ~9 min across 8 workers. All twenty windows cached.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  strategy.design: "dual"
+  strategy.exit_keys: ["rsi", "delta_1", "macd_histogram"]
+  # Hold band widened from 0.05 to 0.35 of the score range. Still clear of
+  # ValidatedStrategyConfig's bounds: sell_threshold stays below
+  # buy_threshold (0.60) and short_exit_threshold stays above
+  # short_entry_threshold (0.25).
+  strategy.sell_threshold: 0.25
+  strategy.short_exit_threshold: 0.60
+
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-02-28"
+
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+  genetic_algorithm.allow_negative_weights: false
+  strategy.take_profit_pct: 0.0
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "AAVE-USDT"
+      - "ADA-USDT"
+      - "AVAX-USDT"
+      - "BICO-USDT"
+      - "DASH-USDT"
+      - "DEXE-USDT"
+      - "DOGE-USDT"
+      - "ETH-USDT"
+      - "FET-USDT"
+      - "LINK-USDT"
+      - "NEAR-USDT"
+      - "ONG-USDT"
+      - "PROM-USDT"
+      - "SOL-USDT"
+      - "SUI-USDT"
+      - "UNI-USDT"
+      - "WLD-USDT"
+      - "XLM-USDT"
+      - "XRP-USDT"
+      - "ZEC-USDT"

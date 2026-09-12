@@ -1,0 +1,74 @@
+# The smallest possible dual genome: an exit model of position_pnl ALONE.
+#
+# The three-column exit model takes the genome from 8 weights to 11, and the
+# dual design measured 12.9pp below linear. Two explanations fit that, and they
+# want opposite responses:
+#
+#   The SPLIT is wrong — separating entry from exit loses something real.
+#   The SIZE is wrong — three extra dimensions cost more search than they buy,
+#   which is what eleven columns already did against two on this data.
+#
+# This arm separates them. It keeps the split and removes the extra dimensions:
+# exit_keys is empty, so the exit model is a single weight on position_pnl — a
+# learned trailing stop.
+#
+# That makes it an EXACTLY matched comparison against linear. Both genomes carry
+# 8 weights: seven indicator columns plus position_pnl. The only difference is
+# which budget position_pnl comes out of — its own, or the entry model's. So a
+# gap here cannot be dimensionality, and cannot be the columns; it is the
+# grouping alone.
+#
+# The structural guarantee is unchanged, because the entry group is still
+# normalized by itself and its ceiling is still exactly 1.0.
+#
+# If this recovers the gap, the split is fine and the exit model was simply too
+# big. If it does not, the split itself is what costs, and the guard in #31 is
+# the better answer to the one-sided failure than a second design is.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_dual_exit_pnl_only.yaml --workers 8
+#
+# 60 points at roughly 70 s: ~9 min across 8 workers.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  strategy.design: "dual"
+  # Empty: SignalDesign appends exit:position_pnl regardless, so the exit
+  # model is that one weight and nothing else.
+  strategy.exit_keys: []
+
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-02-28"
+
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+  genetic_algorithm.allow_negative_weights: false
+  strategy.take_profit_pct: 0.0
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "AAVE-USDT"
+      - "ADA-USDT"
+      - "AVAX-USDT"
+      - "BICO-USDT"
+      - "DASH-USDT"
+      - "DEXE-USDT"
+      - "DOGE-USDT"
+      - "ETH-USDT"
+      - "FET-USDT"
+      - "LINK-USDT"
+      - "NEAR-USDT"
+      - "ONG-USDT"
+      - "PROM-USDT"
+      - "SOL-USDT"
+      - "SUI-USDT"
+      - "UNI-USDT"
+      - "WLD-USDT"
+      - "XLM-USDT"
+      - "XRP-USDT"
+      - "ZEC-USDT"

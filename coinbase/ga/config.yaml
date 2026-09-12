@@ -105,7 +105,85 @@ strategy:
   #
   # Adding a design is therefore additive: an existing genome keeps its own, and
   # two designs can be papered side by side as separate algos in paper.yaml.
-  design: "linear"
+  #
+  # "dual" is the second design: an ENTRY model scored while flat and an EXIT
+  # model scored while holding, each with its own L1 budget. It exists because
+  # linear shares one budget between both jobs while only the exit half can use
+  # position_pnl, so weight spent on exits lowers the ceiling the entry score
+  # must clear — a live genome topped out at 0.5196 against a buy_threshold of
+  # 0.60 and could only ever short. Set strategy.exit_keys alongside it.
+  #
+  # It removes that failure completely, and this is not an argument but a count.
+  # Over 70 runs on the same window, measured entry-side ceilings:
+  #
+  #                 min      mean     max     runs that can never open a long
+  #   linear      0.3875    0.7538   0.9571   6 of 70
+  #   dual        1.0000    1.0000   1.0000   0 of 70
+  #
+  # WHAT IT COSTS depends entirely on how big the exit model is, and finding
+  # that out took two wrong turns worth recording.
+  #
+  # With a three-column exit model it looked expensive. Twenty pairs at
+  # SIX_HOUR, three seeds, costs charged:
+  #
+  #                 yield    trades   gross    fees    max_dd
+  #   linear       +16.1%      8.0    1672      92      0.348
+  #   dual 3-col    +3.2%     29.6     617     341      0.481
+  #
+  # Mean difference -12.9pp, better on 8 of 20 pairs, paired t(19) = -1.335 —
+  # not significant, but consistently negative, and THIRTY_MINUTE agreed in
+  # direction (+27.9% against +12.6%, worse on both pairs).
+  #
+  # Dual traded roughly four times as often, which looked like a calibration
+  # artefact: a separately normalized exit score spans the full [0, 1] where
+  # linear's is squeezed by whatever the entry columns take, so the exit
+  # thresholds would be crossed far more readily. THAT EXPLANATION IS WRONG,
+  # and widening the hold band is what disproved it. 20 pairs, 3 seeds:
+  #
+  #   exit model   hold band    trades   gross     yield    vs linear
+  #   3 columns    0.40/0.45      29.6    +617     +3.2%   -12.9pp  (t -1.34)
+  #   3 columns    0.25/0.60      17.4     -52     -3.3%   -19.4pp  (t -2.66)
+  #   3 columns    0.15/0.75       3.0   -1251    -13.8%   -29.9pp  (t -3.09)
+  #
+  # Widening did cut trading, from 29.6 round trips to 3.0 — below linear's 8.0.
+  # Yield fell monotonically with it, and the two widened arms are the only ones
+  # that clear the significance bar, in the wrong direction. Holding longer is
+  # simply worse here. Do not widen the band to "fix" dual.
+  #
+  # WHAT DOES CLOSE THE GAP IS A SMALLER EXIT MODEL. With exit_keys empty the
+  # exit model is a single weight on position_pnl — a learned trailing stop —
+  # and the genome carries 8 weights, EXACTLY linear's count:
+  #
+  #   exit model   hold band    trades   gross     yield    vs linear
+  #   pnl only     0.40/0.45      38.3   +1274     +8.5%    -7.5pp  (t -0.66)
+  #   linear                       8.0   +1672    +16.1%         —
+  #
+  # Indistinguishable from linear, 10 of 20 pairs better — a coin flip. Since
+  # both genomes carry the same 8 weights over the same columns, the remaining
+  # gap cannot be dimensionality: it is the grouping alone, and it is not
+  # measurable at this sample size.
+  #
+  # Note the ordering that rules out "dual trades too much" altogether: the
+  # pnl-only arm trades MORE than the 3-column one (38.3 against 29.6) and earns
+  # twice the gross. Frequency was never the problem. The exit model's three
+  # extra columns were making exits worse.
+  #
+  # ADOPTED, with exit_keys EMPTY. The guarantee is worth a cost that cannot be
+  # distinguished from zero, and the alternative was a guard that DETECTS a
+  # broken genome after training rather than a model that cannot produce one.
+  #
+  # Every genome records its own design and exit_keys, so nothing already
+  # trained changes meaning: a linear genome stays linear and is still scored
+  # through LinearSignal. Only new training is affected, and it must be
+  # RETRAINED to be papered — a linear genome's weights say nothing about what
+  # an entry model alone should hold.
+  design: "dual"
+  # Empty on purpose: the exit model is then a single weight on position_pnl, a
+  # learned trailing stop, and the genome carries the same 8 weights linear did.
+  # Adding columns here measured WORSE — three of them took the gap against
+  # linear from -7.5pp (indistinguishable) to -12.9pp while HALVING gross
+  # profit, and they made exits worse rather than more frequent.
+  exit_keys: []
   fitness_confidence: 1.0
   # A post-only limit resting on the opposite side from entry, placed the
   # moment a position opens: a fraction ABOVE entry for a long, below it for a
@@ -241,6 +319,28 @@ genetic_algorithm:
   # shifts its floor back to zero, so a signed genome is not penalised by
   # thresholds calibrated for a [0, 1] score. Both are exact no-ops for a
   # genome whose weights are all non-negative.
+  #
+  # LEAVE IT OFF, and do not be persuaded otherwise by the older runs in
+  # experiments/index.csv. Measured twice, on the same twenty pairs and window:
+  #
+  #                                       off        on     paired
+  #   old five keys (three of them levels)   -10.4%   +28.9%   16/20 pairs
+  #   the stationary seven, at SIX_HOUR      +16.1%   +13.0%    9/20 pairs
+  #
+  # The +39pp the flag appears to be worth in the index is not the flag. It is
+  # the flag compensating for the three price-level columns that used to be
+  # scored. A model that can only read a LEVEL and can only add to its score is
+  # genuinely crippled, and signed weights rescued it; with the levels gone the
+  # constraint costs nothing. Note which arm moved: dropping the levels took
+  # the OFF arm from -10.4% to +16.1%, while the ON arm barely changed.
+  #
+  # At THIRTY_MINUTE it is not neutral but harmful: -26.6pp, worse in all ten
+  # matched (pair, seed) cells, Welch t = -4.61 over twenty runs, and median
+  # max_drawdown rising from 0.19 to 0.44. Costs charged in every arm.
+  #
+  # Re-measure with sweep_signed_weights_{6h,30m}_{off,on}.yaml before changing
+  # this line — and re-measure it again if weight_keys changes, because that is
+  # exactly the dependency that made the first reading wrong.
   # allow_negative_weights: true
   population_size: 100
   generations: 50

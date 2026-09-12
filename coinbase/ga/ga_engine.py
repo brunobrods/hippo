@@ -129,6 +129,46 @@ class L1Scaling:
         return NormalizedWeights(raw).values()
 
 
+# L1 applied to each named group of a genome separately, so every group spans
+# the same [0, 1] as a single-model genome does.
+#
+# This is what a two-model design needs and what flat L1 cannot give it. Under
+# flat L1 one budget of 1.0 is shared across both models, so weight spent on the
+# exit model lowers the highest score the ENTRY model can reach — and the entry
+# thresholds are calibrated against 1.0. That is how a live genome ended up
+# unable to open a long: 0.4804 on position_pnl left its entry score topping out
+# at 0.5196 against a buy_threshold of 0.60.
+#
+# Keys are grouped on the text before the first separator, so "entry:rsi" and
+# "exit:rsi" are two weights on the same column in two different models. A key
+# with no separator forms its own group, which makes this identical to L1Scaling
+# for a flat genome.
+class GroupedL1Scaling:
+    def __init__(self, separator: str = ":") -> None:
+        self._separator = separator
+
+    def scaled(self, raw: dict[str, float]) -> dict[str, float]:
+        scaled: dict[str, float] = {}
+        for members in self._groups(raw).values():
+            scaled.update(NormalizedWeights(members).values())
+        return scaled
+
+    def _groups(self, raw: dict[str, float]) -> dict[str, dict[str, float]]:
+        groups: dict[str, dict[str, float]] = {}
+        for key, value in raw.items():
+            groups.setdefault(self._group(key), {})[key] = value
+        return groups
+
+    # Every UNPREFIXED key shares one group, rather than each forming its own.
+    # Otherwise a flat genome would come back with every weight scaled to 1.0
+    # — each key alone in its group, each normalized to sum to one — which is
+    # silently catastrophic rather than merely wrong.
+    def _group(self, key: str) -> str:
+        if self._separator not in key:
+            return ""
+        return key.split(self._separator, 1)[0]
+
+
 class RandomWeights:
     def __init__(
         self,

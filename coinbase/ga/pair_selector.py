@@ -550,9 +550,12 @@ class TrainedPairs:
         index       = pd.read_csv(output.index_filepath)
         run_ids     = BestRunPerPair(index, self._pairs, self._metric, self._granularity).run_ids()
         market      = MarketDataConfig(self._raw_config)
+        # Passed WITHOUT position_pnl: each pair's genome carries its own
+        # design, and the design decides the shape — so TrainedPair builds it
+        # per genome rather than taking one shape for all of them.
         weight_keys = ValidatedWeightKeys(
             WeightKeysConfig(self._raw_config).keys(), market.normalized_columns(),
-        ).keys() + (POSITION_PNL_KEY,)
+        ).keys()
         return {
             pair: TrainedPair(
                 pair,
@@ -596,17 +599,24 @@ class TrainedPair:
         # and Genome.weight raises rather than guessing. Backfilling at zero
         # keeps every pre-existing genome runnable against a config that has
         # since grown a column, scored on exactly what it was trained on.
-        backfilled = BackfilledGenome(Genome(self._saved.weights()), self._weight_keys)
+        shape      = self._shape()
+        backfilled = BackfilledGenome(Genome(self._saved.weights()), shape)
         if backfilled.missing():
             logger.warning(
                 "%s: genome predates %s — running it with those weighted zero; "
                 "retrain to let the GA actually use them",
                 self._pair, ", ".join(backfilled.missing()),
             )
-        model = SignalDesign(self.config.design).model(
-            backfilled.filled(), self._weight_keys,
-        )
+        model = SignalDesign(self.config.design).model(backfilled.filled(), shape)
         return GaStrategy(model, self.config)
+
+    # This genome's own key list, from its own design and exit_keys. The
+    # selector holds one genome per pair and they need not share a design, so
+    # a single shape for all of them would score some through the wrong model.
+    def _shape(self) -> tuple[str, ...]:
+        return SignalDesign(self.config.design).keys(
+            self._weight_keys, self.config.exit_keys,
+        )
 
 
 # ── Report ─────────────────────────────────────────────────────────────

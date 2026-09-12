@@ -1,0 +1,61 @@
+# The dual design against the linear one, at THIRTY_MINUTE candles — TREATMENT ARM.
+#
+# See sweep_design_6h_linear.yaml for what is being tested. This clock is
+# measured as well as SIX_HOUR because it is where the failure the dual design
+# removes is most common: position_pnl averages 0.352 of a genome here against
+# 0.189 at SIX_HOUR, so the entry ceiling it depresses is lowest exactly where
+# the model leans on it hardest.
+#
+# Two pairs and five seeds rather than twenty pairs and three: at ~9 minutes a
+# point the twenty-pair shape would run six hours a side, and BTC/ETH is the
+# split the feature work used.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_design_30m_dual.yaml --workers 8
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  # THE LINES THAT DIFFER FROM THE `linear` ARM.
+  strategy.design: "dual"
+  # The exit model's columns, deliberately three rather than seven. A mirror of
+  # the entry model would take the genome from 8 weights to 15, and eleven
+  # columns already measured worse and noisier than two at this data size — so
+  # a symmetric split risks spending the structural win on search difficulty.
+  #
+  # These three because an exit rule wants short-horizon information: delta_1 is
+  # the strongest single input at THIRTY_MINUTE across 182 saved genomes,
+  # macd_histogram is the most stable of the seven across both clocks, and rsi
+  # is the strongest at SIX_HOUR. position_pnl is appended by the design itself
+  # and is never listed here.
+  strategy.exit_keys: ["rsi", "delta_1", "macd_histogram"]
+
+  data.exchange: "binance"
+  data.granularity: "THIRTY_MINUTE"
+  # The window every other cross-sectional comparison in this repo uses, and
+  # the one all twenty pairs are cached for.
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-08-25"
+
+  # Costs on. The dual design's exit model changes when positions are closed,
+  # so it changes how often the book trades — an effect that has to be paid for
+  # to count.
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+
+  # Off, as measured: on the stationary seven this is worth nothing at SIX_HOUR
+  # and costs 26.6pp at THIRTY_MINUTE.
+  genetic_algorithm.allow_negative_weights: false
+
+  # Pinned off so what varies is the model, not the exit rule. At a live
+  # take-profit the mechanic can dominate the genome entirely — three different
+  # genomes produced an identical book at 0.08 — which would measure nothing
+  # about either design.
+  strategy.take_profit_pct: 0.0
+
+seeds: [1, 2, 3, 4, 5]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "BTC-USDT"
+      - "ETH-USDT"

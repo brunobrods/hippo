@@ -114,6 +114,12 @@ class TrainedStrategy:
                 # anything saved before designs were named, where it reads as
                 # "linear" — which is what those runs were.
                 "design":                self._config.design,
+                # The exit model's columns decide a dual genome's SHAPE, so a
+                # genome rebuilt against a different exit_keys is a different
+                # model wearing the same weights. Saved for the reason
+                # take_profit_pct is, after PR #20 found a papered genome
+                # silently inheriting config.yaml's value instead of its own.
+                "exit_keys":             list(self._config.exit_keys),
             },
         }
 
