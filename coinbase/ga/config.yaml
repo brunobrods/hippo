@@ -129,6 +129,36 @@ strategy:
   # helped (12% added 22%). But the best level ranged from 0% to beyond 20%
   # depending on the pair, so a single figure is the wrong shape — scale it by
   # the pair's own volatility, or sweep it per pair.
+  #
+  # RE-MEASURED ON THE STATIONARY SEVEN, and 0.0 is the best level on both
+  # pairs tested. THIRTY_MINUTE, three seeds, costs charged:
+  #
+  #                    BTC-USDT              ETH-USDT
+  #   target      yield  trades   win     yield  trades   win    BTC drawdown
+  #   0.00       +20.3%     5.3   50%    +36.4%    13.3   68%          0.18
+  #   0.01       +23.1%    58.7   95%    +20.7%    53.3   94%          0.22
+  #   0.02        -0.8%    38.7   88%    +19.8%    23.7   92%          0.21
+  #   0.04        -3.4%    67.7   59%    +32.5%    16.7   94%          0.21
+  #
+  # The +24.4% that a 1% target scored under the old five weight_keys is still
+  # there (+23.1%), but the BASELINE moved underneath it: 0.0 went from +5.0%
+  # to +20.3% when the level columns left. The gap the target was credited
+  # with, +19.4pp, is now +2.8pp on BTC and NEGATIVE on ETH, where 0.0 beats
+  # every target and mean max_drawdown rises from 0.34 to 0.79 at 1%.
+  #
+  # DISTRUST ANY NON-ZERO ARM UNTIL THE SEED SPREAD IS CHECKED. At 0.08 on
+  # BTC all three seeds hold genuinely different weight vectors and produce an
+  # IDENTICAL book — 7 trades, gross 3208.64, yield sd 0.000. Same at 0.08 and
+  # 0.16 on ETH. There the exit rule is the whole strategy and the genome is
+  # inert, so the number says nothing about a trained model. The 95% win rates
+  # above are the related tell: `unwind_at_entry_price` books a still-open
+  # loser at its own entry price, so a target that exits winners early and
+  # leaves losers running carries its losses off the books entirely, and there
+  # is no stop loss on the other side.
+  #
+  # Re-measure with sweep_take_profit_{btc,eth}_30m.yaml, and re-measure again
+  # if weight_keys changes — this knob's apparent value was a property of the
+  # feature set both times it has been read.
   take_profit_pct: 0.0
   position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
   buy_threshold: 0.60       # signal_score above this opens a position
