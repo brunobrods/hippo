@@ -1,4 +1,5 @@
 import functools
+import math
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
@@ -68,10 +69,12 @@ class StrategyConfig:
     # rests from the moment the position opens. 0.0 leaves every fill at a
     # close, which is what every run so far was scored under.
     take_profit_pct:       float = 0.0
-    # Which columns the EXIT model of a dual genome scores. Empty means the
-    # exit model is a single weight on position_pnl — a learned trailing stop —
-    # which measured indistinguishable from linear while removing the one-sided
-    # failure, and is why it is the default. Ignored by the linear design.
+    # Which columns the EXIT model of a dual genome scores. Ignored by linear.
+    #
+    # MUST NAME AT LEAST ONE COLUMN. Left empty, the exit group holds only
+    # position_pnl, and GroupedL1Scaling pins a one-key group at exactly 1.0 —
+    # so the exit model has no free parameters and the GA cannot train it. That
+    # shipped briefly and every long was sold on the candle after it opened.
     #
     # Carried on the config rather than read from config.yaml at load time so
     # it is SAVED WITH THE GENOME: it decides the genome's shape, and a dual
@@ -279,6 +282,38 @@ class LinearSignal:
         )
 
 
+# An open position's unrealized return, squashed onto the [0, 1] scale every
+# other scored column lives on.
+#
+# Without this the dual exit model compares a raw fractional return against
+# thresholds meant for a min-max column, and the mismatch is not subtle: a
+# LONG closes when the score drops under sell_threshold 0.40, so it would need
+# to be +40% ahead merely to be held one more candle, while a SHORT needs +45%
+# to ever be covered. Measured: every long sold on the candle after it opened.
+#
+# tanh rather than a clamp because an exit rule cares most about small moves
+# and should saturate on large ones — the difference between +1% and +2% ahead
+# should move the score, the difference between +40% and +50% should not. HALF
+# is the return at which the score reaches roughly 0.88 or 0.12; 2% is about a
+# fifth of a typical eight-day move on BTC, so the usable band covers the range
+# an exit decision is actually taken over.
+#
+# Flat P&L maps to exactly 0.5, so a position that has gone nowhere reads
+# neutral rather than reading as a reason to leave.
+#
+# LinearSignal deliberately does NOT use this. Every genome ever trained under
+# that design was scored on the raw return, and rescaling it now would silently
+# change what all of them mean.
+class ScaledReturn:
+    HALF = 0.02
+
+    def __init__(self, unrealized_return: float) -> None:
+        self._value = unrealized_return
+
+    def value(self) -> float:
+        return 0.5 + 0.5 * math.tanh(self._value / self.HALF)
+
+
 # Two models in one genome: one scored while FLAT, deciding whether to enter,
 # and one scored while IN POSITION, deciding whether to leave.
 #
@@ -314,9 +349,32 @@ class DualSignal:
         if position is None:
             return self._sum(self._entry_keys, row, 0.0) + self._offset(self._entry_keys)
         return (
-            self._sum(self._exit_keys, row, position.unrealized_return(row["close"]))
+            self._sum(self._exit_keys, row, self._move(row, position))
             + self._offset(self._exit_keys)
         )
+
+    # The UNDIRECTED price move since entry, not Position.unrealized_return.
+    #
+    # That distinction decides whether position_pnl acts as a stop loss or as
+    # its opposite. unrealized_return is direction-agnostic — positive means
+    # "ahead" for a long and a short alike — but the policy's two exit bands
+    # are not symmetric: a long closes when the score falls BELOW
+    # sell_threshold, a short when it rises ABOVE short_exit_threshold. Feeding
+    # both the same "am I ahead" number therefore means opposite things:
+    #
+    #   long  ahead -> high score -> held      (a winner runs)
+    #   short ahead -> high score -> COVERED   (a winner cut)
+    #
+    # The exit score is a statement about the MARKET, not about the position's
+    # profit, so the term that belongs in it is where price has gone. Then a
+    # rising price holds a long and covers a short, which is a stop loss on both
+    # sides and lets both winners run.
+    #
+    # LinearSignal keeps unrealized_return. Every genome trained under it was
+    # scored that way, and changing it would silently redefine all of them.
+    def _move(self, row: dict[str, float], position: Position) -> float:
+        signed = position.unrealized_return(row["close"])
+        return signed if position.direction() is Direction.LONG else -signed
 
     # The entry model never sees position_pnl, so its whole weight mass is
     # reachable from flat: 1.0 after grouped scaling.
@@ -342,7 +400,7 @@ class DualSignal:
     def _reading(self, key: str, row: dict[str, float], pnl: float) -> float:
         column = key.split(GROUP_SEPARATOR, 1)[1]
         if column == POSITION_PNL_KEY:
-            return pnl
+            return ScaledReturn(pnl).value()
         return row[f"norm_{column}"]
 
     # Lifts a signed model's floor back to zero, per group, for the same reason
