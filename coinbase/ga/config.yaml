@@ -177,7 +177,39 @@ strategy:
   # through LinearSignal. Only new training is affected, and it must be
   # RETRAINED to be papered — a linear genome's weights say nothing about what
   # an entry model alone should hold.
-  design: "dual"
+  # REVERTED TO LINEAR. Adopting "dual" with an empty exit_keys was a mistake,
+  # and the retrain that followed it is what exposed the reason.
+  #
+  # A single-key group cannot be learned. GroupedL1Scaling normalizes each group
+  # to sum to 1, so with exit_keys empty the exit model's one weight —
+  # exit:position_pnl — is forced to EXACTLY 1.0 by the scaling itself. Verified
+  # across all 70 retrained genomes: every one carries 1.0, whatever the GA
+  # proposed. It is not a learned trailing stop, as the adopting commit called
+  # it. It has zero free parameters.
+  #
+  # Worse, what it then scores is the raw unrealized return, compared against
+  # thresholds calibrated for a [0, 1] signal score:
+  #
+  #   a LONG closes when score < sell_threshold 0.40       -> needs +40% to hold
+  #   a SHORT closes when score > short_exit_threshold 0.45 -> needs +45% to cover
+  #
+  # So every long is sold on the candle after it opens, and no short is ever
+  # covered by signal. That is what the retrain measured: all five BTC seeds
+  # returned bit-identical books (-2.9%, 19 trades, 10.5% win rate) because the
+  # genome was barely involved in the outcome.
+  #
+  # The earlier -7.5pp "indistinguishable from linear" result still stands as a
+  # measurement, but not as the thing it was read to mean: it compared linear
+  # against a dual entry model bolted to a FIXED exit rule, not against a
+  # learned one. That a fixed rule came that close is interesting, and is not a
+  # reason to ship it.
+  #
+  # dual remains available and TwoSidedModel still guards the one-sided failure
+  # on linear. Before dual is adopted again its exit group needs at least two
+  # keys, so the scaling leaves it a degree of freedom, and position_pnl needs
+  # either normalizing into [0, 1] or its own thresholds — a raw return and a
+  # min-max column do not belong on the same scale.
+  design: "linear"
   # Empty on purpose: the exit model is then a single weight on position_pnl, a
   # learned trailing stop, and the genome carries the same 8 weights linear did.
   # Adding columns here measured WORSE — three of them took the gap against
