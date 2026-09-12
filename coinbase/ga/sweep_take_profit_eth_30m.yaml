@@ -1,0 +1,42 @@
+# take_profit_pct re-measured on the stationary feature set — second pair.
+#
+# Identical to sweep_take_profit_btc_30m.yaml but for data.pair. See that file
+# for why the knob is being re-measured at all, and for the artifact check that
+# has to be read before the yield column.
+#
+# ETH rather than a third arm because CLAUDE.md already records that the best
+# take-profit level ranged from 0%% to beyond 20%% depending on the pair — which
+# is the claim a single-pair sweep cannot test, and the reason a per-pair figure
+# may be the wrong shape for this knob entirely.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_take_profit_eth_30m.yaml --workers 8
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  data.exchange: "binance"
+  data.pair: "ETH-USDT"
+  data.granularity: "THIRTY_MINUTE"
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-08-25"
+
+  # Costs on. A target that only pays before fees is not a target worth
+  # setting, and a tight one trades far more often than 0.0 does — at a 1%
+  # target the original sweep went from 5 trades to 61, so this axis and the
+  # fee interact more strongly than any other.
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+
+  # Off, as measured: on the stationary seven this costs 26.6pp at THIRTY_MINUTE
+  # and was worse in all ten matched (pair, seed) cells. Pinned rather than left
+  # to the default so this sweep states what it assumes.
+  genetic_algorithm.allow_negative_weights: false
+
+# Three, matching the original fifteen runs so the comparison is like for like.
+seeds: [1, 2, 3]
+
+axes:
+  # The original levels exactly. 0.0 is the control and must reproduce the
+  # current default's behaviour; if it does not, nothing else here can be read.
+  - path: "strategy.take_profit_pct"
+    values: [0.0, 0.01, 0.02, 0.04, 0.08, 0.16]
