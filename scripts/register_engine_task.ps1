@@ -20,6 +20,11 @@
     logged-on user. A startup trigger would require storing that account's
     password in the task.
 
+    A second trigger repeats every -HeartbeatMinutes (15 by default) for as
+    long as the machine is on. Waking from sleep is not a logon, so AtLogOn by
+    itself leaves a killed engine down until the next sign-in; the heartbeat
+    starts it instead, and is a free no-op whenever it is already running.
+
     Re-running this script replaces any existing task of the same name.
 
     Restarting goes through -Restart, not Stop-ScheduledTask followed by
@@ -47,6 +52,7 @@ param(
     [string] $Python   = "",
     [string] $LogFile  = "",
     [int]    $Port     = 8787,
+    [int]    $HeartbeatMinutes = 15,
     [switch] $Start,
     [switch] $Restart,
     [switch] $Remove
@@ -290,7 +296,42 @@ $action = New-ScheduledTaskAction `
     -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$inner`"" `
     -WorkingDirectory $RepoRoot
 
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+# ── Triggers ───────────────────────────────────────────────────────────
+# Two, and the second is what keeps the engine alive across a closed lid.
+#
+# AtLogOn alone leaves the engine down for as long as the machine stays logged
+# on without it running, which is exactly what happened on 2026-09-11: the
+# process was killed at 15:30, the machine slept, and waking it is not a logon,
+# so nothing re-fired. It was still down 19 hours later. Restart-on-failure
+# does not cover it either — the machine was not running to notice the failure.
+#
+# So a second trigger fires every $HeartbeatMinutes, forever. It costs nothing
+# while the engine is up: MultipleInstances IgnoreNew makes Task Scheduler
+# refuse the duplicate before it launches anything, so there is no second
+# process, no fight over port 8787, and not even a log line. When the engine is
+# down, the same firing starts it. One mechanism covering sleep, hibernate, a
+# crash and an outright kill alike, with no liveness check to get wrong.
+#
+# It does NOT cover a process that is alive but no longer ticking — IgnoreNew
+# cannot tell a working engine from a wedged one. That remains this shape's
+# known weakness, and needs a freshness check rather than a trigger.
+#
+# -RepetitionDuration is deliberately NOT passed. An omitted duration is how
+# Task Scheduler encodes "repeat indefinitely" — it registers as an empty
+# <Duration> and the repetition never lapses. The widely repeated idiom for
+# this, `-RepetitionDuration ([TimeSpan]::MaxValue)`, does not work: it
+# serializes to P99999999DT23H59M59S and registration fails outright with
+#
+#     The task XML contains a value which is incorrectly formatted or out of
+#     range. (12,42):Duration:P99999999DT23H59M59S
+#
+# which would have left the engine with no heartbeat at all. ([TimeSpan]::Zero
+# is rejected the same way; a finite P3650D registers but eventually lapses.)
+$logon     = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$heartbeat = New-ScheduledTaskTrigger `
+    -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes $HeartbeatMinutes)
+$trigger   = @($logon, $heartbeat)
 
 # ExecutionTimeLimit 0 means "no limit" — the default of 3 days would kill the
 # engine mid-run. IgnoreNew keeps a second instance from fighting the first
@@ -324,7 +365,7 @@ Register-ScheduledTask `
 Write-Host "Registered '$TaskName'"
 Write-Host "  python   : $Python"
 Write-Host "  repo     : $RepoRoot"
-Write-Host "  starts   : at logon, and restarts within 1 min if it exits"
+Write-Host "  starts   : at logon, every $HeartbeatMinutes min if not running, and within 1 min if it exits"
 Write-Host "  dashboard: http://127.0.0.1:$Port"
 Write-Host "  log      : $LogFile"
 
