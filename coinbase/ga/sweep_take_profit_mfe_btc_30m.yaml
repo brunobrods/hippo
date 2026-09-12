@@ -1,0 +1,67 @@
+# take_profit_pct, swept at levels the market actually reaches.
+#
+# ── Why the previous sweep chose the wrong levels ─────────────────────
+#
+# sweep_take_profit_{btc,eth}_30m.yaml tested 0.01 / 0.02 / 0.04 / 0.08 / 0.16
+# on both pairs. Measuring the maximum favourable excursion over a hold of the
+# length these genomes actually take — 380 candles, about 8 days — shows what
+# those levels mean:
+#
+#              MFE reached over an 8-day hold
+#   percentile   p10    p25    p50    p75    p90
+#   ETH-USDT    0.9%   2.4%   5.4%  10.4%  15.3%
+#   BTC-USDT    0.5%   1.5%   3.3%   6.0%   8.9%
+#
+# A 1% target sits below the 10th percentile on ETH: it is reached by almost
+# every hold, so it fires almost immediately and the genome stops mattering —
+# which is exactly what the earlier sweep saw (58 trades, a 95% win rate, and
+# bit-identical books from different genomes). A 16% target sits above the 90th
+# percentile on ETH and off the scale on BTC: it almost never fires, so the arm
+# is indistinguishable from 0.0.
+#
+# Between them the old grid had one informative point. This sweep places its
+# levels at each pair's own p25, p50 and p75, so every arm fires on a known and
+# different share of holds.
+#
+# ── Which is what CLAUDE.md already suspected ─────────────────────────
+#
+# "the best level ranged from 0% to beyond 20% depending on the pair, so a
+# single figure is the wrong shape — scale it by the pair's own volatility, or
+# sweep it per pair." The MFE percentiles are that scaling, measured rather
+# than assumed: BTC's p50 is 0.033, against the other pair's.
+#
+# ── What to read ──────────────────────────────────────────────────────
+#
+# Not yield first — the seed check. The earlier sweep's tight arms produced
+# identical books from different genomes, and an arm where the exit mechanic
+# decides everything measures the mechanic, not a strategy. Only then the
+# captured share of MFE, which is the quantity this knob is really for: these
+# genomes reach 1597 and 1707 bps and book 685 and 986.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_take_profit_mfe_btc_30m.yaml --workers 8
+#
+# 20 points at roughly 9 minutes: ~25 min across 8 workers. Window cached.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  data.exchange: "binance"
+  data.pair: "BTC-USDT"
+  data.granularity: "THIRTY_MINUTE"
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-08-25"
+
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.0244
+
+  # The shipped default, so this measures the knob against what actually runs.
+  strategy.design: "linear"
+  genetic_algorithm.allow_negative_weights: false
+
+seeds: [1, 2, 3, 4, 5]
+
+axes:
+  # 0.0 is the control. The rest are this pair's own p25 / p50 / p75 of
+  # 8-day MFE, so each arm fires on roughly 75% / 50% / 25% of holds.
+  - path: "strategy.take_profit_pct"
+    values: [0.0, 0.015, 0.033, 0.06]
