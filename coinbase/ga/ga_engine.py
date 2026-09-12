@@ -156,8 +156,17 @@ class GroupedL1Scaling:
     def _groups(self, raw: dict[str, float]) -> dict[str, dict[str, float]]:
         groups: dict[str, dict[str, float]] = {}
         for key, value in raw.items():
-            groups.setdefault(key.split(self._separator, 1)[0], {})[key] = value
+            groups.setdefault(self._group(key), {})[key] = value
         return groups
+
+    # Every UNPREFIXED key shares one group, rather than each forming its own.
+    # Otherwise a flat genome would come back with every weight scaled to 1.0
+    # — each key alone in its group, each normalized to sum to one — which is
+    # silently catastrophic rather than merely wrong.
+    def _group(self, key: str) -> str:
+        if self._separator not in key:
+            return ""
+        return key.split(self._separator, 1)[0]
 
 
 class RandomWeights:
