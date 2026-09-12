@@ -22,6 +22,7 @@ from coinbase.ga.market_data_processor import (
 )
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
+    ExitKeysConfig,
     SignalDesign,
     StrategyConfigFile,
     StrategyEvaluator,
@@ -132,7 +133,16 @@ class TrainingRun:
         weight_keys = ValidatedWeightKeys(
             WeightKeysConfig(self._raw_config).keys(), market_config.normalized_columns(),
         ).keys()
-        keys = weight_keys + (POSITION_PNL_KEY,)
+        # Both lists are checked against normalized_columns, because an exit
+        # column that is not normalized would raise on the first row scored
+        # rather than at startup.
+        exit_keys = ValidatedWeightKeys(
+            ExitKeysConfig(self._raw_config).keys(), market_config.normalized_columns(),
+        ).keys()
+        # The design owns the genome's shape: linear appends position_pnl to one
+        # flat list, dual builds two prefixed groups. Asking it here is what lets
+        # a second design exist without this function knowing anything about it.
+        keys = SignalDesign(strategy_config.design).keys(weight_keys, exit_keys)
 
         train_evaluator = StrategyEvaluator(split.train(), strategy_config, keys)
         test_evaluator  = StrategyEvaluator(split.test(), strategy_config, keys)

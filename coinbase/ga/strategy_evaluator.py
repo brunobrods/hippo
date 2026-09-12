@@ -4,7 +4,7 @@ from typing import Any, Optional, Protocol
 
 import pandas as pd
 
-from coinbase.ga.ga_engine import Genome, L1Scaling, WeightScaling
+from coinbase.ga.ga_engine import Genome, GroupedL1Scaling, L1Scaling, WeightScaling
 from coinbase.trading_strategy import (
     Action,
     Backtest,
@@ -22,6 +22,17 @@ from coinbase.trading_strategy import (
 # config that defaults to it, because a design name is part of a strategy's
 # identity — see SignalDesign below.
 LINEAR_DESIGN = "linear"
+
+# Two weight vectors in one genome: one scored while flat, one while holding.
+# See DualSignal for why the split exists.
+DUAL_DESIGN = "dual"
+
+# How a dual genome's keys name their model. "entry:rsi" and "exit:rsi" are two
+# independent weights on the same column, and everything that operates on a
+# genome as a flat dict stays unaware of the distinction.
+GROUP_SEPARATOR = ":"
+ENTRY_PREFIX    = "entry"
+EXIT_PREFIX     = "exit"
 
 
 # ── Config ─────────────────────────────────────────────────────────────
@@ -146,6 +157,21 @@ class WeightKeysConfig:
         return tuple(self._raw["strategy"]["weight_keys"])
 
 
+# Which columns the EXIT model of a dual genome reads. Empty for the linear
+# design, which has no second model and ignores it.
+#
+# Defaults to empty rather than to weight_keys: an exit model that mirrors the
+# entry model doubles the genome, and eleven columns already measured worse and
+# noisier than two at this data size. A dual config should name a short list
+# deliberately.
+class ExitKeysConfig:
+    def __init__(self, raw: dict[str, Any]) -> None:
+        self._raw = raw
+
+    def keys(self) -> tuple[str, ...]:
+        return tuple((self._raw.get("strategy") or {}).get("exit_keys") or ())
+
+
 class ValidatedWeightKeys:
     def __init__(self, weight_keys: tuple[str, ...], normalized_columns: tuple[str, ...]) -> None:
         self._weight_keys        = weight_keys
@@ -250,6 +276,81 @@ class LinearSignal:
         )
 
 
+# Two models in one genome: one scored while FLAT, deciding whether to enter,
+# and one scored while IN POSITION, deciding whether to leave.
+#
+# The linear design uses a single weight vector for both jobs, which is where
+# its worst structural failure comes from. position_pnl is useless for entry —
+# it contributes exactly zero while flat — but under flat L1 the weight it
+# carries still comes out of the same budget of 1.0, lowering the highest score
+# the entry side can reach. A genome holding 0.48 on position_pnl tops out at
+# 0.52 against a buy_threshold of 0.60 and can only ever short. That happened
+# live, and TwoSidedModel exists to catch it.
+#
+# Here each model owns its own budget, normalized separately by
+# GroupedL1Scaling, so BOTH scores span the full [0, 1] and the thresholds mean
+# what they were calibrated to mean on either side. flat_score_ceiling() is 1.0
+# by construction rather than by luck.
+#
+# Keys are prefixed: "entry:rsi" and "exit:rsi" are two independent weights on
+# the same column. Every genome operator — crossover, mutation, backfill —
+# works on a flat dict and is untouched by this; only the scaling and this
+# model know the groups exist.
+#
+# The exit model is deliberately allowed to be SMALLER than the entry model.
+# Eleven columns measured worse and noisier than two at this data size, so
+# doubling a seven-column genome would likely spend the gain on search
+# difficulty. An exit rule mostly needs to know its own P&L and whether the
+# short-horizon move turned.
+class DualSignal:
+    def __init__(self, genome: Genome, keys: tuple[str, ...]) -> None:
+        self._genome = genome
+        self._keys   = keys
+
+    def score(self, row: dict[str, float], position: Optional[Position]) -> float:
+        if position is None:
+            return self._sum(self._entry_keys, row, 0.0) + self._offset(self._entry_keys)
+        return (
+            self._sum(self._exit_keys, row, position.unrealized_return(row["close"]))
+            + self._offset(self._exit_keys)
+        )
+
+    # The entry model never sees position_pnl, so its whole weight mass is
+    # reachable from flat: 1.0 after grouped scaling.
+    def flat_score_ceiling(self) -> float:
+        return sum(abs(self._genome.weight(key)) for key in self._entry_keys)
+
+    @functools.cached_property
+    def _entry_keys(self) -> tuple[str, ...]:
+        return self._group(ENTRY_PREFIX)
+
+    @functools.cached_property
+    def _exit_keys(self) -> tuple[str, ...]:
+        return self._group(EXIT_PREFIX)
+
+    def _group(self, prefix: str) -> tuple[str, ...]:
+        return tuple(k for k in self._keys if k.startswith(f"{prefix}{GROUP_SEPARATOR}"))
+
+    def _sum(self, keys: tuple[str, ...], row: dict[str, float], pnl: float) -> float:
+        return sum(
+            self._genome.weight(key) * self._reading(key, row, pnl) for key in keys
+        )
+
+    def _reading(self, key: str, row: dict[str, float], pnl: float) -> float:
+        column = key.split(GROUP_SEPARATOR, 1)[1]
+        if column == POSITION_PNL_KEY:
+            return pnl
+        return row[f"norm_{column}"]
+
+    # Lifts a signed model's floor back to zero, per group, for the same reason
+    # LinearSignal does it: the thresholds are calibrated against a score that
+    # starts at 0, and without the shift a genome would be penalised merely for
+    # using a negative weight. Exactly 0.0 when every weight in the group is
+    # non-negative, which is what keeps a non-negative genome scoring identically.
+    def _offset(self, keys: tuple[str, ...]) -> float:
+        return sum(max(-self._genome.weight(key), 0.0) for key in keys)
+
+
 # The one place that maps a design NAME to its objects. Every caller that
 # rebuilds a strategy from a saved genome goes through here, so an unknown
 # design fails loudly at the single point that knows the list, rather than
@@ -261,18 +362,39 @@ class SignalDesign:
     def model(self, genome: Genome, keys: tuple[str, ...]) -> SignalModel:
         if self._name == LINEAR_DESIGN:
             return LinearSignal(genome, keys)
+        if self._name == DUAL_DESIGN:
+            return DualSignal(genome, keys)
         raise ValueError(self._unknown())
 
     def scaling(self) -> WeightScaling:
         if self._name == LINEAR_DESIGN:
             return L1Scaling()
+        if self._name == DUAL_DESIGN:
+            return GroupedL1Scaling(GROUP_SEPARATOR)
+        raise ValueError(self._unknown())
+
+    # What a genome of this design is made of. The design owns this because the
+    # SHAPE of a genome is part of the model, not of the caller: linear takes
+    # one weight per column plus position_pnl, while dual takes two prefixed
+    # groups. Every caller that builds a genome's key list goes through here,
+    # so adding a design does not mean finding five places that assumed linear.
+    def keys(self, weight_keys: tuple[str, ...], exit_keys: tuple[str, ...] = ()) -> tuple[str, ...]:
+        if self._name == LINEAR_DESIGN:
+            return weight_keys + (POSITION_PNL_KEY,)
+        if self._name == DUAL_DESIGN:
+            return (
+                tuple(f"{ENTRY_PREFIX}{GROUP_SEPARATOR}{k}" for k in weight_keys)
+                + tuple(f"{EXIT_PREFIX}{GROUP_SEPARATOR}{k}" for k in exit_keys)
+                + (f"{EXIT_PREFIX}{GROUP_SEPARATOR}{POSITION_PNL_KEY}",)
+            )
         raise ValueError(self._unknown())
 
     def _unknown(self) -> str:
         return (
             f"unknown strategy.design {self._name!r}; this build knows "
-            f"{LINEAR_DESIGN!r}. A genome trained under a design this code does "
-            f"not have would be scored by the wrong function."
+            f"{LINEAR_DESIGN!r} and {DUAL_DESIGN!r}. A genome trained under a "
+            f"design this code does not have would be scored by the wrong "
+            f"function."
         )
 
 
