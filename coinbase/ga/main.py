@@ -22,6 +22,7 @@ from coinbase.ga.market_data_processor import (
 )
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
+    SignalDesign,
     StrategyConfigFile,
     StrategyEvaluator,
     ValidatedStrategyConfig,
@@ -156,7 +157,16 @@ class TrainingRun:
             strategy_config = strategy_config,
             ga_config       = ga_config,
         ))
-        best_genome = GeneticAlgorithm(ga_config, keys).evolve(train_evaluator, on_generation=console_log.append)
+        # The design supplies the scaling, because how a genome's numbers are
+        # rescaled is a property of the model rather than of the search: L1
+        # means "one unit of conviction spread across the indicators", which is
+        # right for a weighted sum and wrong for anything whose parameters are
+        # not weights. GeneticAlgorithm defaults to L1, so omitting this trains
+        # every future design as if it were linear — silently, and only in the
+        # numbers.
+        best_genome = GeneticAlgorithm(
+            ga_config, keys, SignalDesign(strategy_config.design).scaling(),
+        ).evolve(train_evaluator, on_generation=console_log.append)
 
         metadata = StrategyMetadata(
             pair            = window.pair,
