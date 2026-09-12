@@ -478,7 +478,12 @@ async def _main() -> None:
     for key, (from_config, from_strategy) in trained.divergences().items():
         print(f"note: {key} config.yaml={from_config} -> using trained {from_strategy}")
 
-    keys       = weight_keys + (POSITION_PNL_KEY,)
+    # Built from the GENOME's design and exit_keys, not config.yaml's: the
+    # design decides the genome's shape, and a dual genome rebuilt in the
+    # linear shape would find none of its own weights.
+    keys       = SignalDesign(strategy_config.design).keys(
+        weight_keys, strategy_config.exit_keys,
+    )
     # A genome saved before a weight key existed carries no weight for it, and
     # Genome.weight raises rather than guessing. Backfilling at zero keeps a
     # book already running against an older genome from breaking the moment

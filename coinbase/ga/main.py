@@ -22,7 +22,6 @@ from coinbase.ga.market_data_processor import (
 )
 from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
-    ExitKeysConfig,
     SignalDesign,
     StrategyConfigFile,
     StrategyEvaluator,
@@ -138,7 +137,7 @@ class TrainingRun:
         # column that is not normalized would raise on the first row scored
         # rather than at startup.
         exit_keys = ValidatedWeightKeys(
-            ExitKeysConfig(self._raw_config).keys(), market_config.normalized_columns(),
+            strategy_config.exit_keys, market_config.normalized_columns(),
         ).keys()
         # The design owns the genome's shape: linear appends position_pnl to one
         # flat list, dual builds two prefixed groups. Asking it here is what lets

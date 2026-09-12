@@ -68,6 +68,17 @@ class StrategyConfig:
     # rests from the moment the position opens. 0.0 leaves every fill at a
     # close, which is what every run so far was scored under.
     take_profit_pct:       float = 0.0
+    # Which columns the EXIT model of a dual genome scores. Empty means the
+    # exit model is a single weight on position_pnl — a learned trailing stop —
+    # which measured indistinguishable from linear while removing the one-sided
+    # failure, and is why it is the default. Ignored by the linear design.
+    #
+    # Carried on the config rather than read from config.yaml at load time so
+    # it is SAVED WITH THE GENOME: it decides the genome's shape, and a dual
+    # genome rebuilt against a different exit_keys would be a different model
+    # wearing the same weights. That is the drift TrainedStrategyConfig exists
+    # to prevent, and the same gap take_profit_pct had before PR #20.
+    exit_keys:             tuple[str, ...] = ()
 
 
 class StrategyConfigFile:
@@ -90,6 +101,7 @@ class StrategyConfigFile:
             borrow_bps_per_hour   = float(section.get("borrow_bps_per_hour", 0.0)),
             design                = str(section.get("design", LINEAR_DESIGN)),
             take_profit_pct       = float(section.get("take_profit_pct", 0.0)),
+            exit_keys             = tuple(section.get("exit_keys") or ()),
         )
 
 
@@ -158,19 +170,9 @@ class WeightKeysConfig:
         return tuple(self._raw["strategy"]["weight_keys"])
 
 
-# Which columns the EXIT model of a dual genome reads. Empty for the linear
-# design, which has no second model and ignores it.
-#
-# Defaults to empty rather than to weight_keys: an exit model that mirrors the
-# entry model doubles the genome, and eleven columns already measured worse and
-# noisier than two at this data size. A dual config should name a short list
-# deliberately.
-class ExitKeysConfig:
-    def __init__(self, raw: dict[str, Any]) -> None:
-        self._raw = raw
-
-    def keys(self) -> tuple[str, ...]:
-        return tuple((self._raw.get("strategy") or {}).get("exit_keys") or ())
+# exit_keys lives on StrategyConfig rather than in a config object of its own,
+# unlike weight_keys, because it has to be SAVED WITH THE GENOME — see the note
+# on the field. Read it from the strategy config everywhere.
 
 
 class ValidatedWeightKeys:

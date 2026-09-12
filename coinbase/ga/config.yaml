@@ -120,18 +120,21 @@ strategy:
   #   linear      0.3875    0.7538   0.9571   6 of 70
   #   dual        1.0000    1.0000   1.0000   0 of 70
   #
-  # LINEAR IS STILL THE DEFAULT, because as currently calibrated dual costs
-  # yield. Twenty pairs at SIX_HOUR, three seeds, costs charged:
+  # WHAT IT COSTS depends entirely on how big the exit model is, and finding
+  # that out took two wrong turns worth recording.
+  #
+  # With a three-column exit model it looked expensive. Twenty pairs at
+  # SIX_HOUR, three seeds, costs charged:
   #
   #                 yield    trades   gross    fees    max_dd
   #   linear       +16.1%      8.0    1672      92      0.348
-  #   dual          +3.2%     29.6     617     341      0.481
+  #   dual 3-col    +3.2%     29.6     617     341      0.481
   #
   # Mean difference -12.9pp, better on 8 of 20 pairs, paired t(19) = -1.335 —
-  # not significant, but consistently negative, and THIRTY_MINUTE agrees in
+  # not significant, but consistently negative, and THIRTY_MINUTE agreed in
   # direction (+27.9% against +12.6%, worse on both pairs).
   #
-  # Dual trades roughly four times as often, which looked like a calibration
+  # Dual traded roughly four times as often, which looked like a calibration
   # artefact: a separately normalized exit score spans the full [0, 1] where
   # linear's is squeezed by whatever the entry columns take, so the exit
   # thresholds would be crossed far more readily. THAT EXPLANATION IS WRONG,
@@ -165,11 +168,22 @@ strategy:
   # twice the gross. Frequency was never the problem. The exit model's three
   # extra columns were making exits worse.
   #
-  # SO: if dual is adopted, adopt it with exit_keys EMPTY. It buys the
-  # structural guarantee — 0 one-sided genomes in 300 dual runs against 4 in 60
-  # linear ones — for a cost that cannot be distinguished from zero. Linear
-  # remains the default until that trade is deliberately made.
-  design: "linear"
+  # ADOPTED, with exit_keys EMPTY. The guarantee is worth a cost that cannot be
+  # distinguished from zero, and the alternative was a guard that DETECTS a
+  # broken genome after training rather than a model that cannot produce one.
+  #
+  # Every genome records its own design and exit_keys, so nothing already
+  # trained changes meaning: a linear genome stays linear and is still scored
+  # through LinearSignal. Only new training is affected, and it must be
+  # RETRAINED to be papered — a linear genome's weights say nothing about what
+  # an entry model alone should hold.
+  design: "dual"
+  # Empty on purpose: the exit model is then a single weight on position_pnl, a
+  # learned trailing stop, and the genome carries the same 8 weights linear did.
+  # Adding columns here measured WORSE — three of them took the gap against
+  # linear from -7.5pp (indistinguishable) to -12.9pp while HALVING gross
+  # profit, and they made exits worse rather than more frequent.
+  exit_keys: []
   fitness_confidence: 1.0
   # A post-only limit resting on the opposite side from entry, placed the
   # moment a position opens: a fraction ABOVE entry for a long, below it for a

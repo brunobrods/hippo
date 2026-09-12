@@ -745,9 +745,14 @@ class PaperEngine:
         # Backfilled for the same reason paper_trading does it: this engine
         # runs MANY older genomes at once, so it is the likeliest place for a
         # genome saved before a weight key existed to meet a config that has it.
-        genome = BackfilledGenome(
-            Genome(saved.weights()), keys + (POSITION_PNL_KEY,),
+        # Built from the GENOME's own design and exit_keys — both recorded in
+        # its strategy.json — rather than config.yaml's. This engine runs many
+        # genomes at once and they need not share a design, so rebuilding any
+        # of them in the configured shape would score it as a different model.
+        shape  = SignalDesign(trained.config().design).keys(
+            keys, trained.config().exit_keys,
         )
+        genome = BackfilledGenome(Genome(saved.weights()), shape)
         if genome.missing():
             logger.warning(
                 "%s: genome predates %s — running it with those weighted zero",
@@ -762,9 +767,7 @@ class PaperEngine:
                 # for it: it runs many older genomes at once, and a one-sided
                 # book looks identical to a book that simply has not bought yet.
                 TwoSidedModel(
-                    SignalDesign(trained.config().design).model(
-                        genome.filled(), keys + (POSITION_PNL_KEY,),
-                    ),
+                    SignalDesign(trained.config().design).model(genome.filled(), shape),
                     trained.config(),
                 ).model(),
                 trained.config(),
