@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -14,6 +15,7 @@ from coinbase.ga.paper_engine import (
     PaperAlgo,
     PriceLoop,
     PriceMarks,
+    StatusBoard,
 )
 from coinbase.ga.paper_metrics import EquityCurve
 from coinbase.ga.paper_trading import BasisPointFee, NoBorrowRate, NoFees, PaperState, PaperStateFile
@@ -322,6 +324,42 @@ async def test_the_cost_tally_survives_a_restart(tmp_path):
 
     assert paid > 0.0
     assert after.status().fee_paid == pytest.approx(paid)
+
+
+# ── Book age ─────────────────────────────────────────────────────────
+# An annualized figure divides by elapsed time. Measured from the process
+# start it annualizes the hours since the last logon, which never clears the
+# one-day floor AlgoPerformance applies — so the column could only ever show
+# the plain total return, however long the book had really been running.
+
+@pytest.mark.asyncio
+async def test_the_annualized_window_is_the_books_age_not_the_processs(tmp_path):
+    config = _algo_config(tmp_path, "btc")
+    file   = PaperStateFile(config.state_filepath)
+    # A book that opened 30 days ago and is up 10%, resumed seconds ago.
+    opened = time.time() - 30.0 * 86400.0
+    file.write(
+        PaperState(
+            balance=1100.0, position=None, last_candle_start=1800,
+            realized_trades=1, realized_wins=1, opened_at=opened,
+            equity_peak=1100.0,
+        ),
+        config.pair,
+    )
+    algo = IsolatedAlgo(_algo(tmp_path, FakeRows([_row(1800, 100.0)]), [Action.HOLD]))
+    board = StatusBoard(
+        algos=(algo,), curves={"btc": EquityCurve()},
+        boundary=CandleBoundary("THIRTY_MINUTE", 20),
+        prices=PriceLoop((), (), 45), started_at=time.time(),
+    )
+
+    payload = board.payload()
+
+    row = payload["algos"][0]
+    # Total return is 10%; over 30 days that annualizes far above it. Read off
+    # the process start it would still be reported as the plain 10%.
+    assert row["total_return"] == pytest.approx(0.1)
+    assert row["annualized_yield"] > 0.5
 
 
 # ── IsolatedAlgo ─────────────────────────────────────────────────────

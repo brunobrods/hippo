@@ -157,6 +157,19 @@ class PaperState:
     # had paid its way as one that had traded for free.
     fees_paid:          float = 0.0
     interest_paid:      float = 0.0
+    # The high-water mark and the worst fall from it, for the same reason
+    # again: an equity curve held in memory is rebuilt at every launch, so a
+    # book that fell 30% last week reported no drawdown at all this morning.
+    # Kept as the two running numbers a drawdown needs rather than the curve
+    # itself — a book is a book, not a time series, and the peak and the worst
+    # drop are all the curve was ever consulted for.
+    equity_peak:        float = 0.0
+    max_drawdown:       float = 0.0
+    # When this book started, so its age is its own rather than the running
+    # process's. An annualized figure divides by elapsed time; measured from
+    # the last logon it annualizes a few hours of a book that has traded for
+    # weeks, which is why it was floored to the plain return instead.
+    opened_at:          float = 0.0
 
 
 class PaperStateFile:
@@ -178,6 +191,9 @@ class PaperStateFile:
             realized_wins     = int(raw.get("realized_wins", 0)),
             fees_paid         = self._fees_paid(raw, position),
             interest_paid     = float(raw.get("interest_paid", 0.0)),
+            equity_peak       = float(raw.get("equity_peak", 0.0)),
+            max_drawdown      = float(raw.get("max_drawdown", 0.0)),
+            opened_at         = float(raw.get("opened_at", 0.0)),
         )
 
     # A book written before this field existed still knows one of its costs:
@@ -191,6 +207,15 @@ class PaperStateFile:
             return float(raw["fees_paid"])
         return position.entry_fee() if position else 0.0
 
+    # No recovery here, deliberately — unlike the fee above, which an open
+    # position genuinely still carries. Nothing in an older book dates it:
+    # every candidate (the open position's entry, the candle it resumes on) is
+    # LATER than the book's real open, and an annualized figure divides by
+    # elapsed time, so a date too late means a window too short and a return
+    # raised to too high a power. A book up 10% over two months, dated
+    # yesterday, annualizes to 1e14 rather than to 10%. 0.0 means undated, and
+    # a caller that needs an age is expected to have its own fallback.
+
     def write(self, state: PaperState, pair: str) -> None:
         ParentDirectory(self._filepath).ensure()
         payload = {
@@ -202,6 +227,9 @@ class PaperStateFile:
             "realized_wins":     state.realized_wins,
             "fees_paid":         state.fees_paid,
             "interest_paid":     state.interest_paid,
+            "equity_peak":       state.equity_peak,
+            "max_drawdown":      state.max_drawdown,
+            "opened_at":         state.opened_at,
             "updated_at":        UtcNow().iso(),
         }
         # Atomic: a crash mid-write must never leave a truncated book behind.
@@ -263,6 +291,9 @@ class InitialPaperState:
             realized_wins     = 0,
             fees_paid         = 0.0,
             interest_paid     = 0.0,
+            equity_peak       = self._starting_balance,
+            max_drawdown      = 0.0,
+            opened_at         = 0.0,
         )
 
 
@@ -345,6 +376,20 @@ class PaperTick:
         fee      = ledger.fees_charged()
         interest = ledger.interest_charged()
         balance  = ledger.balance()
+        equity   = ledger.equity(row["close"])
+        # The worst this candle was actually worth, not what it closed at. Both
+        # extremes are already fetched and already used for the liquidation
+        # check above, and a trough between two closes is a real drawdown that
+        # sampling the close alone never sees.
+        trough   = min(ledger.equity(row["low"]), ledger.equity(row["high"]))
+        # Falls back to the starting balance only for a book that has no peak
+        # recorded — every book opened at its starting balance, so its
+        # high-water mark is never below it, which makes an older book's first
+        # reading correct instead of starting from today. Not a floor applied
+        # on every tick: `starting_balance` is config, and were it ever raised,
+        # a permanent floor would lift an established peak and write a
+        # drawdown the book never suffered.
+        peak     = max(state.equity_peak or self._starting_balance, equity)
         self._state_file.write(
             PaperState(
                 balance           = balance,
@@ -356,12 +401,23 @@ class PaperTick:
                 ),
                 fees_paid         = state.fees_paid + fee,
                 interest_paid     = state.interest_paid + interest,
+                equity_peak       = peak,
+                max_drawdown      = max(
+                    state.max_drawdown, (peak - trough) / peak if peak > 0.0 else 0.0,
+                ),
+                # Stamped only by a book whose first candle this is, for which
+                # it is the exact open. A book that has ticked before and still
+                # carries no open time cannot be dated from anything it holds
+                # (see _opened_at), so it stays undated rather than wrong.
+                opened_at         = state.opened_at or (
+                    float(candle_start) if state.last_candle_start == 0 else 0.0
+                ),
             ),
             self._rows.pair(),
         )
         return TickOutcome(
             acted=True, candle_start=candle_start, decision=decision,
-            balance=balance, equity=ledger.equity(row["close"]),
+            balance=balance, equity=equity,
             closed_trades=len(ledger.trades()), row=row, fee=fee, interest=interest,
             position_before=before,
         )

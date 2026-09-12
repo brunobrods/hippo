@@ -349,6 +349,9 @@ class PaperAlgo:
             # a book that had paid fees as one that had paid nothing.
             fee_paid          = state.fees_paid,
             interest_paid     = state.interest_paid,
+            max_drawdown      = state.max_drawdown,
+            equity_peak       = state.equity_peak,
+            opened_at         = state.opened_at,
         )
 
     def _last_action(self) -> str:
@@ -635,11 +638,10 @@ class StatusBoard:
     def payload(self) -> dict[str, Any]:
         now      = time.time()
         statuses = tuple(algo.status() for algo in self._algos)
-        elapsed  = now - self._started_at
         return StatusPayload(
             statuses            = statuses,
             performances        = tuple(
-                AlgoPerformance(status, self._curves[status.name], elapsed)
+                AlgoPerformance(status, self._curves[status.name], self._elapsed(now, status))
                 for status in statuses
             ),
             portfolio           = PortfolioStatus(statuses),
@@ -650,6 +652,13 @@ class StatusBoard:
             next_tick_in        = self._boundary.seconds_until(now),
             seconds_since_price = now - self._prices.marked_at() if self._prices.marked_at() else -1.0,
         ).as_dict()
+
+    # How long the BOOK has been running, not this process. Per algo, because
+    # books are added at different times. Falling back to the process start is
+    # the old behaviour, and applies only to a book with no recorded open time
+    # and no open position to bound it — until its next tick stamps one.
+    def _elapsed(self, now: float, status: AlgoStatus) -> float:
+        return now - (status.opened_at or self._started_at)
 
 
 # ── Assembly ───────────────────────────────────────────────────────────
