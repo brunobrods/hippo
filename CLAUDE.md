@@ -112,7 +112,11 @@ schedulable. Two properties make the scheduled form safe:
   `paper_state.json` after every tick and reloaded on the next, so a reboot or
   a closed lid does not silently reset the book to flat. `dry_run.py` builds a
   fresh `Ledger` on every launch and does restart flat — that is fine for a
-  process you watch, wrong for a scheduled one.
+  process you watch, wrong for a scheduled one. Anything charged **into**
+  balance has to be tallied on the book for the same reason: `realized_wins`,
+  `fees_paid` and `interest_paid` are all unrecoverable after the fact, so a
+  count kept by the running process reports zero after every restart — nightly,
+  since the engine starts at logon.
 - **Idempotent per candle.** A tick records `last_candle_start` and refuses to
   act on that candle again, so the task can be scheduled far more often than
   the granularity. Every 30 minutes against `SIX_HOUR` candles means 11 of 12

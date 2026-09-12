@@ -388,3 +388,89 @@ def test_maker_taker_fee_defaults_to_the_taker_rate():
 def test_flat_schedules_ignore_the_maker_flag():
     assert BasisPointFee(20.0).charge(1000.0, maker=True) == pytest.approx(2.0)
     assert NoFees().charge(1000.0, maker=True) == 0.0
+
+
+# ── Costs across a restart ───────────────────────────────────────────
+# Fees and interest are charged into balance as they are taken, so a book that
+# does not carry a running total cannot recover one afterwards. The engine
+# restarts at every logon, which is what made a per-process tally report a
+# book that had paid its way as one that had traded for free.
+
+def test_costs_round_trip_through_the_state_file(tmp_path):
+    file = PaperStateFile(str(tmp_path / "state.json"))
+    file.write(
+        PaperState(
+            balance=1000.0, position=None, last_candle_start=1, realized_trades=2,
+            fees_paid=12.5, interest_paid=0.75,
+        ),
+        "BTC-USDT",
+    )
+
+    state = file.read()
+    assert state.fees_paid == pytest.approx(12.5)
+    assert state.interest_paid == pytest.approx(0.75)
+
+
+@pytest.mark.asyncio
+async def test_fees_accumulate_across_ticks_rather_than_being_replaced(tmp_path):
+    state_file = PaperStateFile(str(tmp_path / "state.json"))
+    rows       = FakeRows([_row(100, 50.0), _row(200, 55.0)])
+    fees       = BasisPointFee(100.0)
+
+    await PaperTick(rows, _ScriptedStrategy([Action.BUY]), state_file, 1000.0, fees).run()
+    after_entry = state_file.read().fees_paid
+    # A brand new PaperTick, as the engine builds after a restart.
+    await PaperTick(rows, _ScriptedStrategy([Action.SELL]), state_file, 1000.0, fees).run()
+
+    assert after_entry > 0.0
+    assert state_file.read().fees_paid > after_entry
+
+
+def test_an_older_book_recovers_the_fee_its_open_position_paid(tmp_path):
+    path = tmp_path / "state.json"
+    # Written before fees_paid existed — entry_fee is the one cost still on the
+    # book, every earlier round trip having been folded into balance.
+    path.write_text(json.dumps({
+        "pair": "BTC-USDT",
+        "balance": 9994.0,
+        "position": {
+            "entry_price": 79609.28, "size": 0.075, "direction": "SHORT",
+            "entry_timestamp": 1788607800, "entry_fee": 6.0,
+        },
+        "last_candle_start": 1788908400,
+        "realized_trades": 0,
+    }))
+
+    state = PaperStateFile(str(path)).read()
+    assert state.fees_paid == pytest.approx(6.0)
+    assert state.interest_paid == pytest.approx(0.0)
+
+
+def test_an_older_flat_book_starts_its_tally_at_zero(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "pair": "BTC-USDT", "balance": 9994.0, "position": None,
+        "last_candle_start": 1788908400, "realized_trades": 3,
+    }))
+
+    assert PaperStateFile(str(path)).read().fees_paid == pytest.approx(0.0)
+
+
+# An explicit zero must not be mistaken for a missing key and re-seeded from
+# the open position — that would revive the entry fee on a book that had
+# already recorded paying nothing.
+def test_a_recorded_zero_is_not_re_seeded_from_the_position(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "pair": "BTC-USDT",
+        "balance": 1000.0,
+        "position": {
+            "entry_price": 50.0, "size": 1.0, "direction": "LONG",
+            "entry_timestamp": 100, "entry_fee": 6.0,
+        },
+        "last_candle_start": 100,
+        "realized_trades": 0,
+        "fees_paid": 0.0,
+    }))
+
+    assert PaperStateFile(str(path)).read().fees_paid == pytest.approx(0.0)
