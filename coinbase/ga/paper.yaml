@@ -67,13 +67,31 @@ algos:
     exchange: "binance"
     pair: "BTC-USDT"
     strategy_filepath: "~/.coinbase/ga/experiments/20260905T093423388865Z-e741e033/strategy.json"
-  # Trained on Binance ETH-USDT, so it is papered against that same pair on the
-  # same venue — its thresholds were tuned against this book, not Coinbase's.
-  # There is no ETH-USDC genome; every ETH run in the index is ETH-USDT.
-  - name: "eth"
+  # Was "eth", on a genome that COULD NOT OPEN A LONG. Its weights put 0.4804
+  # on position_pnl, which scores zero while flat, leaving a top reachable
+  # score of 0.5196 against a buy_threshold of 0.60 — so in its entire live
+  # history it could only ever short. TwoSidedModel now refuses such a genome
+  # at load; this replaces it.
+  #
+  # Renamed rather than repointed, following btc-binance above: the state file
+  # is keyed on the algo name, and the old book's one realized trade belongs to
+  # the old strategy. Keeping the name would have credited this genome with
+  # another genome's history. eth.json stays on disk as that book's record.
+  #
+  # Trained on Binance ETH-USDT so it is papered against the same pair and
+  # venue — its thresholds were tuned against this book. Seed 5 of the
+  # signed-weights sweep's 30-minute control arm: the stationary seven,
+  # non-negative weights, costs charged, +47.8% test yield over 14 trades with
+  # a flat ceiling of 0.6717. Four of that arm's five seeds clear the
+  # threshold and one does not, so this is a real selection, not a formality.
+  #
+  # It is also the best of five on the half it was selected over, which makes
+  # it an upper bound rather than an expectation — the same in-sample selection
+  # BestRunPerPair carries, and worth remembering when this book is read.
+  - name: "eth-2sided"
     exchange: "binance"
     pair: "ETH-USDT"
-    strategy_filepath: "~/.coinbase/ga/experiments/20260827T093359504374Z-1efd6fed/strategy.json"
+    strategy_filepath: "~/.coinbase/ga/experiments/20260911T180738731565Z-b04580d2/strategy.json"
   # - name: "sol-binance"
   #   exchange: "binance"
   #   pair: "SOL-USDT"

@@ -8,8 +8,10 @@ from coinbase.ga.paper_engine import (
     BookSnapshot,
     CandleBoundary,
     DecisionLoop,
+    EngineConfig,
     IsolatedAlgo,
     PaperBook,
+    PaperEngine,
     PaperEngineConfigFile,
     PaperJournal,
     PaperAlgo,
@@ -601,3 +603,75 @@ async def test_prices_are_fetched_in_one_request_per_venue(tmp_path):
     assert set(prices) == {
         ("coinbase", "BTC-USDC"), ("coinbase", "ETH-USDC"), ("coinbase", "SOL-USDC"),
     }
+
+
+# ── One algo refusing must not stop the rest ─────────────────────────
+# Added after a live genome was found that could never open a long. The guard
+# that refuses it raises during CONSTRUCTION, and `algos` used to build every
+# book inside a single tuple(), so one bad genome would have stopped a healthy
+# one alongside it — the same failure IsolatedAlgo already prevents for tick,
+# mark and status.
+
+class _NamedAlgo:
+    def __init__(self, entry: AlgoConfig) -> None:
+        self._entry = entry
+
+    def config(self) -> AlgoConfig:
+        return self._entry
+
+
+class _PartlyBrokenEngine(PaperEngine):
+    def __init__(self, config: EngineConfig, refuse: str) -> None:
+        super().__init__(config, {}, None)
+        self._refuse = refuse
+
+    def _algo(self, entry: AlgoConfig) -> PaperAlgo:
+        if entry.name == self._refuse:
+            raise ValueError("genome can never open a long")
+        return _NamedAlgo(entry)
+
+
+def _entry(name: str) -> AlgoConfig:
+    return AlgoConfig(
+        name              = name,
+        exchange          = "binance",
+        pair              = "ETH-USDT",
+        granularity       = "THIRTY_MINUTE",
+        strategy_filepath = f"/nowhere/{name}.json",
+        starting_balance  = 10000.0,
+        state_filepath    = f"/nowhere/{name}-state.json",
+        log_filepath      = f"/nowhere/{name}.log",
+    )
+
+
+def _engine_config(*names: str) -> EngineConfig:
+    return EngineConfig(
+        algos                   = tuple(_entry(n) for n in names),
+        granularity             = "THIRTY_MINUTE",
+        boundary_offset_seconds = 20,
+        price_refresh_seconds   = 45,
+        max_concurrent_requests = 8,
+        fee_bps                 = 10.0,
+        borrow_bps_per_hour     = 0.0244,
+        journal_filepath        = "/nowhere/journal.jsonl",
+        host                    = "127.0.0.1",
+        port                    = 8787,
+    )
+
+
+def test_a_refused_algo_does_not_stop_the_others() -> None:
+    engine = _PartlyBrokenEngine(_engine_config("good", "bad", "also-good"), refuse="bad")
+    assert [algo.config().name for algo in engine.algos] == ["good", "also-good"]
+
+
+def test_a_refused_algo_is_logged_by_name(caplog) -> None:
+    engine = _PartlyBrokenEngine(_engine_config("good", "bad"), refuse="bad")
+    with caplog.at_level("ERROR"):
+        engine.algos
+    assert "bad" in caplog.text
+    assert "can never open a long" in caplog.text
+
+
+def test_every_algo_building_leaves_none_refused() -> None:
+    engine = _PartlyBrokenEngine(_engine_config("a", "b"), refuse="none-of-them")
+    assert [algo.config().name for algo in engine.algos] == ["a", "b"]
