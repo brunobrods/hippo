@@ -1,8 +1,10 @@
-"""A one-key group has no free parameters, and the exit model must not be one.
+"""The dual exit model: what a one-key group still cannot do, and what the
+scaled, undirected P&L term now does correctly.
 
-Found by retraining every pair on design "dual" with exit_keys empty: all five
-BTC seeds returned bit-identical books. The cause is in the scaling, not the
-search — see test_a_single_key_group_is_forced_to_one below.
+Both facts were found by retraining every pair on design "dual" with exit_keys
+empty. All five BTC seeds returned bit-identical books, because the exit model
+had no free parameters AND was comparing a raw fractional return against
+thresholds meant for a [0, 1] column.
 """
 import pytest
 
@@ -11,6 +13,7 @@ from coinbase.ga.strategy_evaluator import (
     DUAL_DESIGN,
     DualSignal,
     GaStrategy,
+    ScaledReturn,
     SignalDesign,
     StrategyConfig,
 )
@@ -32,9 +35,19 @@ def config() -> StrategyConfig:
     )
 
 
-class TestSingleKeyExitGroupIsDegenerate:
-    # Whatever the GA proposes, L1 over one key returns its sign. The exit
-    # model has nothing to learn.
+def model() -> DualSignal:
+    return DualSignal(
+        Genome({"entry:rsi": 0.5, "entry:macd": 0.5, "exit:position_pnl": 1.0}), KEYS,
+    )
+
+
+def row(close: float) -> dict[str, float]:
+    return {"norm_rsi": 0.5, "norm_macd": 0.5, "close": close}
+
+
+class TestSingleKeyGroupStillHasNoFreedom:
+    # Unchanged by the scaling fix, and the reason exit_keys must not be empty:
+    # L1 over one key returns its sign, so the GA cannot move this weight.
     @pytest.mark.parametrize("proposed", [0.01, 1.0, 99.0])
     def test_a_single_key_group_is_forced_to_one(self, proposed: float) -> None:
         scaled = GroupedL1Scaling().scaled(
@@ -42,42 +55,6 @@ class TestSingleKeyExitGroupIsDegenerate:
         )
         assert scaled["exit:position_pnl"] == pytest.approx(1.0)
 
-    def test_the_entry_group_still_has_freedom(self) -> None:
-        scaled = GroupedL1Scaling().scaled(
-            {"entry:rsi": 3.0, "entry:macd": 1.0, "exit:position_pnl": 1.0},
-        )
-        assert scaled["entry:rsi"] == pytest.approx(0.75)
-        assert scaled["entry:macd"] == pytest.approx(0.25)
-
-    # With the weight pinned at 1.0 the exit score IS the unrealized return,
-    # which is compared against thresholds meant for a [0, 1] score.
-    def test_the_exit_score_is_the_raw_unrealized_return(self) -> None:
-        model = DualSignal(Genome({"entry:rsi": 0.5, "entry:macd": 0.5,
-                                   "exit:position_pnl": 1.0}), KEYS)
-        held = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
-        assert model.score({"norm_rsi": 1.0, "norm_macd": 1.0, "close": 110.0}, held) \
-            == pytest.approx(0.10)
-
-    def test_a_long_is_sold_on_the_very_next_candle(self) -> None:
-        model = DualSignal(Genome({"entry:rsi": 0.5, "entry:macd": 0.5,
-                                   "exit:position_pnl": 1.0}), KEYS)
-        strategy = GaStrategy(model, config())
-        held = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
-        # Up 2% and still sold: 0.02 is below a sell_threshold of 0.40.
-        row = {"norm_rsi": 1.0, "norm_macd": 1.0, "close": 102.0}
-        assert strategy.decide(row, held, 10000.0).action is Action.SELL
-
-    def test_a_short_is_never_covered_by_signal(self) -> None:
-        model = DualSignal(Genome({"entry:rsi": 0.5, "entry:macd": 0.5,
-                                   "exit:position_pnl": 1.0}), KEYS)
-        strategy = GaStrategy(model, config())
-        held = Position(entry_price=100.0, size=1.0, direction=Direction.SHORT)
-        # Even 30% in profit is below a short_exit_threshold of 0.45.
-        row = {"norm_rsi": 0.0, "norm_macd": 0.0, "close": 70.0}
-        assert strategy.decide(row, held, 10000.0).action is Action.HOLD
-
-    # Two keys restore a degree of freedom, which is the minimum a dual exit
-    # model needs before it is worth adopting again.
     def test_two_keys_leave_the_exit_group_learnable(self) -> None:
         scaled = GroupedL1Scaling().scaled(
             {"entry:rsi": 1.0, "exit:position_pnl": 3.0, "exit:delta_1": 1.0},
@@ -89,8 +66,7 @@ class TestSingleKeyExitGroupIsDegenerate:
         import yaml
 
         with open("coinbase/ga/config.yaml", encoding="utf-8") as handle:
-            raw = yaml.safe_load(handle)
-        section = raw["strategy"]
+            section = yaml.safe_load(handle)["strategy"]
         if section.get("design") != DUAL_DESIGN:
             pytest.skip("default is not dual; nothing to guard")
         shape = SignalDesign(DUAL_DESIGN).keys(
@@ -102,3 +78,52 @@ class TestSingleKeyExitGroupIsDegenerate:
             f"GroupedL1Scaling pins at 1.0 — the exit model would have no free "
             f"parameters"
         )
+
+
+class TestScaledReturn:
+    def test_flat_pnl_reads_neutral(self) -> None:
+        assert ScaledReturn(0.0).value() == pytest.approx(0.5)
+
+    def test_it_stays_inside_the_unit_interval(self) -> None:
+        for r in (-10.0, -0.5, 0.0, 0.5, 10.0):
+            assert 0.0 <= ScaledReturn(r).value() <= 1.0
+
+    def test_small_moves_are_where_it_is_sensitive(self) -> None:
+        near = ScaledReturn(0.02).value() - ScaledReturn(0.0).value()
+        far = ScaledReturn(0.42).value() - ScaledReturn(0.40).value()
+        assert near > 100 * far  # saturates, so a big move stops mattering
+
+    def test_it_is_monotone_in_the_move(self) -> None:
+        values = [ScaledReturn(r).value() for r in (-0.1, -0.01, 0.0, 0.01, 0.1)]
+        assert values == sorted(values)
+
+
+class TestTheExitTermActsAsAStopLossOnBothSides:
+    # The old term was direction-agnostic, so "ahead" read high for a short —
+    # and the short band closes on a HIGH score, cutting winners and riding
+    # losers. The exit score now tracks price, so both sides behave alike.
+    def test_a_falling_price_stops_out_a_long_and_holds_a_short(self) -> None:
+        strategy = GaStrategy(model(), config())
+        long_pos = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
+        short_pos = Position(entry_price=100.0, size=1.0, direction=Direction.SHORT)
+        assert strategy.decide(row(98.0), long_pos, 10000.0).action is Action.SELL
+        assert strategy.decide(row(98.0), short_pos, 10000.0).action is Action.HOLD
+
+    def test_a_rising_price_holds_a_long_and_stops_out_a_short(self) -> None:
+        strategy = GaStrategy(model(), config())
+        long_pos = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
+        short_pos = Position(entry_price=100.0, size=1.0, direction=Direction.SHORT)
+        assert strategy.decide(row(102.0), long_pos, 10000.0).action is Action.HOLD
+        assert strategy.decide(row(102.0), short_pos, 10000.0).action is Action.COVER
+
+    # The bug this replaces: every long was sold on the candle after it opened,
+    # because 0.02 of raw return is far below a sell_threshold of 0.40.
+    def test_a_long_slightly_ahead_is_no_longer_sold_immediately(self) -> None:
+        strategy = GaStrategy(model(), config())
+        held = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
+        assert strategy.decide(row(102.0), held, 10000.0).action is Action.HOLD
+
+    def test_the_exit_score_is_scaled_not_raw(self) -> None:
+        held = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
+        assert model().score(row(102.0), held) == pytest.approx(ScaledReturn(0.02).value())
+        assert model().score(row(102.0), held) > 0.85  # raw would have been 0.02

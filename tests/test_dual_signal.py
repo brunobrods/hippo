@@ -6,6 +6,7 @@ from coinbase.ga.strategy_evaluator import (
     LINEAR_DESIGN,
     POSITION_PNL_KEY,
     DualSignal,
+    ScaledReturn,
     SignalDesign,
     StrategyConfig,
     TwoSidedModel,
@@ -62,13 +63,28 @@ class TestDualSignal:
     def test_while_holding_it_scores_only_the_exit_model(self) -> None:
         model = dual(**{"entry:rsi": 0.6, "entry:macd": 0.4, "exit:delta_1": 0.5, "exit:position_pnl": 0.5})
         held = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
-        # delta_1 reads 1.0 and the position is flat on price, so pnl contributes 0.
-        assert model.score(row(rsi=1.0, delta_1=1.0), held) == pytest.approx(0.5)
+        # delta_1 reads 1.0, and price is unchanged so the scaled move is 0.5
+        # (neutral) rather than 0. The entry columns contribute nothing.
+        assert model.score(row(rsi=1.0, delta_1=1.0), held) == pytest.approx(0.75)
 
-    def test_the_exit_model_reads_unrealized_return(self) -> None:
+    # The move is SCALED onto [0, 1] and is UNDIRECTED — see ScaledReturn and
+    # DualSignal._move. A raw return here is what made every long sell
+    # immediately, and a direction-agnostic one made shorts cut their winners.
+    def test_the_exit_model_reads_the_scaled_price_move(self) -> None:
         model = dual(**{"entry:rsi": 1.0, "entry:macd": 0.0, "exit:delta_1": 0.0, "exit:position_pnl": 1.0})
         held = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
-        assert model.score(row(close=110.0), held) == pytest.approx(0.1)
+        assert model.score(row(close=110.0), held) == pytest.approx(ScaledReturn(0.10).value())
+        assert model.score(row(close=110.0), held) > 0.99
+
+    def test_a_short_reads_the_same_price_move_with_the_same_sign(self) -> None:
+        model = dual(**{"entry:rsi": 1.0, "entry:macd": 0.0, "exit:delta_1": 0.0, "exit:position_pnl": 1.0})
+        long_pos = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
+        short_pos = Position(entry_price=100.0, size=1.0, direction=Direction.SHORT)
+        # Price rose 10%: bad for the short, good for the long — but the exit
+        # score describes the MARKET, so both read it the same way.
+        assert model.score(row(close=110.0), short_pos) == pytest.approx(
+            model.score(row(close=110.0), long_pos),
+        )
 
     # The failure the design exists to remove: under linear, weight on
     # position_pnl lowered this. Here the entry group is its own budget.
