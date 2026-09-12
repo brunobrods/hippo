@@ -165,6 +165,7 @@ def test_trained_strategy_as_dict():
         "fee_bps": 0.0,
         "borrow_bps_per_hour": 0.0,
         "design": "linear",
+        "take_profit_pct": 0.0,
         "exit_keys": [],
     }
 
@@ -266,6 +267,7 @@ def test_strategy_json_round_trips_through_disk(tmp_path):
         "fee_bps": 0.0,
         "borrow_bps_per_hour": 0.0,
         "design": "linear",
+        "take_profit_pct": 0.0,
         "exit_keys": [],
     }
 

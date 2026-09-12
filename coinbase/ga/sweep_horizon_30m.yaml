@@ -1,0 +1,72 @@
+# Holding horizon against cost, at THIRTY_MINUTE candles.
+#
+# The question it answers: how long must a position be held before the move
+# beats what the round trip costs, and where does borrow interest start taking
+# back what the extra holding earned?
+#
+# It exists because of a measurement, not a hunch. Over the cached BTC-USDT
+# window the MEDIAN 30-minute candle moves 15.1 bps while a Binance VIP0 round
+# trip costs 20 — only 39% of single candles clear their own trading cost. Held
+# longer the move grows and the cost does not: 20.7 bps over two candles, 41.7
+# over eight, 122.7 over forty-eight. So a 30-minute strategy is viable as a
+# multi-hour hold and never as a candle-to-candle signal.
+#
+# The other half is that holding is not free either. Measured at realistic
+# rates, borrow interest outweighed fees roughly ten to one on an open short.
+# Fees push the horizon out; interest pulls it back in. This sweep is looking
+# for where those two meet.
+#
+# Read `net_profit` and `total_trades` together in experiments/index.csv — a
+# point that improves yield by taking a third as many trades is answering the
+# question, and one that improves it by trading more is contradicting the
+# premise and worth a second look.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_horizon_30m.yaml --workers 8
+#
+# 36 points at roughly 9 minutes each: ~5.5 h sequential, ~45 min across 8
+# workers. Cost is dominated by Backtest's per-row loop, so it scales with the
+# ~42k candles in the window.
+
+base_config: "coinbase/ga/config.yaml"
+
+# Pinned rather than swept. data.exchange has to be here because the sweep
+# runner builds its adapter from the fixed base config — an axis would leave
+# the adapter on config.yaml's exchange while every point claimed another.
+#
+# The two cost rates are pinned ON, which is the whole point: a horizon
+# measured at the 0.0 defaults is measured in a world where holding is free and
+# trading costs nothing, and would find nothing. 10 bps is Binance VIP0 taker
+# per leg; 0.042 bps/hour is BTC margin borrow of roughly 0.01% a day.
+fixed:
+  data.exchange: "binance"
+  data.pair: "BTC-USDT"
+  data.granularity: "THIRTY_MINUTE"
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+
+# Three rather than five, for the same reason the cross-pair 30m arm uses
+# three: at ~9 minutes a point, five seeds would put this past nine hours.
+seeds: [1, 2, 3]
+
+axes:
+  # How far a position runs before a resting limit takes it off. This is the
+  # most direct handle on holding time: a tight target closes early and pays
+  # the round trip more often, a wide one holds through and accrues interest.
+  # Measured across 60 genomes previously, 1% actively hurt and 12% helped —
+  # so the range here is deliberately wide and skewed high.
+  - path: "strategy.take_profit_pct"
+    values: [0.0, 0.01, 0.02, 0.04, 0.08, 0.16]
+
+  # How readily the strategy exits on signal rather than on target. Lower means
+  # it holds through weaker signals, which lengthens the average hold without
+  # touching the target. Kept at or below buy_threshold (0.60) so a long is
+  # never closed on the candle it opened.
+  - path: "strategy.sell_threshold"
+    values: [0.30, 0.40, 0.50]
+
+  # Sensitivity to the interest rate itself, including the 0.0 that every run
+  # before costs existed was scored under. If the horizon that wins is the same
+  # at 0.0 and at 0.15, interest is not what is setting it and the ten-to-one
+  # ratio measured earlier was a property of that genome rather than the market.
+  - path: "strategy.borrow_bps_per_hour"
+    values: [0.0, 0.042, 0.15]
