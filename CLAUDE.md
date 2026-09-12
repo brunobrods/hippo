@@ -112,7 +112,31 @@ schedulable. Two properties make the scheduled form safe:
   `paper_state.json` after every tick and reloaded on the next, so a reboot or
   a closed lid does not silently reset the book to flat. `dry_run.py` builds a
   fresh `Ledger` on every launch and does restart flat — that is fine for a
-  process you watch, wrong for a scheduled one.
+  process you watch, wrong for a scheduled one. Anything charged **into**
+  balance has to be tallied on the book for the same reason: `realized_wins`,
+  `fees_paid` and `interest_paid` are all unrecoverable after the fact, so a
+  count kept by the running process reports zero after every restart — nightly,
+  since the engine starts at logon. `equity_peak`, `max_drawdown` and
+  `opened_at` are on the book for the same reason, one step removed: the
+  `EquityCurve` behind a drawdown and the clock behind an annualized figure are
+  both process-local, so a book that fell 30% last week read 0% this morning,
+  and one trading for a month was annualized over the hours since logon —
+  which never cleared `AlgoPerformance`'s one-day floor, so that column could
+  only ever show the plain total return. The book samples each candle's *worst*
+  equity (`low`/`high`, already fetched for the liquidation check), and the
+  live curve is anchored to `equity_peak` before being compared with it —
+  measured against its own session's peak instead, a curve understates every
+  fall in a session that opened below the book's high-water mark.
+
+  **`opened_at` is never guessed.** A book that predates the field stays at
+  `0.0` and the caller falls back to its own clock, because every date the
+  book could offer (an open position's entry, the candle it resumes on) is
+  *later* than the truth — and an annualized figure divides by elapsed time,
+  so a date too late means a window too short and a return raised to too high
+  a power. A book up 10% over two months, dated yesterday, annualizes to 1e14.
+  Only a book whose first candle this is stamps itself, where the date is
+  exact. An older book can be dated by hand from the first row it wrote to
+  `journal.tsv`.
 - **Idempotent per candle.** A tick records `last_candle_start` and refuses to
   act on that candle again, so the task can be scheduled far more often than
   the granularity. Every 30 minutes against `SIX_HOUR` candles means 11 of 12

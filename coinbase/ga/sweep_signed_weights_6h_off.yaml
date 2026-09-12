@@ -1,0 +1,121 @@
+# Signed weights against non-negative ones, on the stationary feature set.
+# THIS FILE IS THE CONTROL ARM — allow_negative_weights pinned OFF.
+# Its sibling sweep_signed_weights_6h_on.yaml is identical but for that one
+# line, and the two together are the comparison.
+#
+# Two files rather than two axes because SweepPlan is one-factor-at-a-time by
+# construction: each axis value is applied to the unmodified base config and
+# never combined with another axis's, so a 2-value flag axis beside a 20-value
+# pair axis would give 22 points that each vary one thing, not the 40-point
+# grid this needs. Pinning the flag in `fixed:` and sweeping the pair is how
+# the existing pair sweeps are shaped, and it produces a genuinely matched
+# pair of arms: same pairs, same window, same seeds, one line different.
+#
+# ── The question ──────────────────────────────────────────────────────
+#
+# experiments/index.csv already contains this comparison once. Sixty runs with
+# the flag off and sixty with it on, over the same twenty pairs, the same
+# window and the same three seeds: it improved 16 of 20 pairs and moved mean
+# annualized yield from -10.4% to +28.9%. That is the largest effect recorded
+# anywhere in the 186-run history, and nothing in the repo acts on it —
+# config.yaml still ships the flag commented out.
+#
+# The reason not to simply switch it on is that every one of those 120 runs
+# scored the OLD five weight_keys, three of which were price levels that have
+# since been removed. The flag was measured beside a feature set that no
+# longer exists. This re-runs the identical comparison on the seven stationary
+# columns that are now the default, so the effect is attributed to the flag
+# rather than to what it happened to be measured next to.
+#
+# ── Why it should matter at all ───────────────────────────────────────
+#
+# Measured on the cached candles, every column carrying out-of-sample signal
+# is mean-reverting: high RSI, price far above its own mean, a long run-up and
+# strong recent momentum each precede LOWER returns, with the same sign on
+# BTC-USDT and ETH-USDT across ~21,000 held-out candles apiece.
+#
+# A genome restricted to non-negative weights produces a score that rises with
+# every one of its inputs, and the policy opens a long when that score is
+# high. So it can only ever bet on continuation — the side this data says
+# loses. Signed weights are what let the search express the sign the history
+# actually has, which is why this is a change in what the model can SAY, not
+# merely where the search looks.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_signed_weights_6h_off.yaml --workers 8
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_signed_weights_6h_on.yaml  --workers 8
+#
+# 60 points each at roughly 70 s a point: ~70 min sequential per arm, ~9 min
+# across 8 workers. Every window below is already in the candle cache, so no
+# point fetches.
+#
+# ── Reading the result ────────────────────────────────────────────────
+#
+#   python -m coinbase.ga.results --group-by negative_weights --window 2026-02-28
+#
+# WILL POOL THESE RUNS WITH THE OLD ONES and report a meaningless average.
+# The 120 runs of the original comparison share this pair set, this window,
+# this granularity and this fee — the only thing separating them is
+# weight_keys, and --group-by takes one column. Separate the arms by commit:
+#
+#   git rev-parse HEAD          # then filter index.csv on git_commit
+#
+# or group by weight_keys, which splits old from new cleanly because the two
+# comparisons used different ones.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  # THE ONLY LINE THAT DIFFERS FROM THE `on` ARM.
+  genetic_algorithm.allow_negative_weights: false
+
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+
+  # The original comparison's window, to the day. This sweep changes the
+  # feature set relative to that comparison and nothing else, so the window
+  # has to be held where it was — and all twenty pairs are cached for it.
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-02-28"
+
+  # Costs on. Signed weights let a genome take the other side of a move, and a
+  # model that reverses more readily trades more often, so the flag's effect
+  # and its cost move together. An edge that only survives at zero fees is not
+  # one worth adopting.
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+
+  # Pinned off for the reason the feature sweep pinned it off: at a live
+  # take-profit the exit rule rather than the weights decides the outcome, and
+  # measuring the weights through it would measure the wrong thing.
+  strategy.take_profit_pct: 0.0
+
+# Three, matching the original comparison exactly rather than the usual five —
+# this arm's job is to reproduce that design on new features, and changing the
+# seed count would change two things at once.
+seeds: [1, 2, 3]
+
+axes:
+  # The same twenty pairs, in the same order. Every one is verified present in
+  # the candle cache for the window pinned above.
+  - path: "data.pair"
+    values:
+      - "AAVE-USDT"
+      - "ADA-USDT"
+      - "AVAX-USDT"
+      - "BICO-USDT"
+      - "DASH-USDT"
+      - "DEXE-USDT"
+      - "DOGE-USDT"
+      - "ETH-USDT"
+      - "FET-USDT"
+      - "LINK-USDT"
+      - "NEAR-USDT"
+      - "ONG-USDT"
+      - "PROM-USDT"
+      - "SOL-USDT"
+      - "SUI-USDT"
+      - "UNI-USDT"
+      - "WLD-USDT"
+      - "XLM-USDT"
+      - "XRP-USDT"
+      - "ZEC-USDT"

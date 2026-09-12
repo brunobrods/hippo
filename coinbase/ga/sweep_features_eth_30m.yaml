@@ -1,0 +1,52 @@
+# The feature-set sweep, repeated on a second pair.
+#
+# Identical to sweep_features_30m.yaml but for data.pair — see that file for
+# why these five arms and why these pins. Two arms make the result checkable;
+# one arm makes it an anecdote.
+#
+# On BTC-USDT, dropping the three level columns took annualized yield from
+# +8.1% to +16.9% and the full stationary set reached +20.3%, with every seed
+# positive. That is a large effect measured on one pair, one window and three
+# seeds, which is exactly the evidence standard the pair screener exists to
+# distrust. ETH-USDT is the check. The question is not whether the numbers
+# match — they will not — but whether the ORDER holds: levels last, stationary
+# first, everything worst.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_features_eth_30m.yaml --workers 8
+#
+# 15 points, ~20 min across 8 workers. The window is already cached for all
+# eight Binance USDT pairs, so repeating this on a third costs nothing but time.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  data.exchange: "binance"
+  data.pair: "ETH-USDT"
+  data.granularity: "THIRTY_MINUTE"
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+  strategy.take_profit_pct: 0.0
+  market_data.normalized_columns:
+    - "sma_short"
+    - "sma_long"
+    - "sma_extra"
+    - "rsi"
+    - "macd"
+    - "macd_signal"
+    - "macd_histogram"
+    - "delta_1"
+    - "delta_3"
+    - "delta_5"
+    - "delta_10"
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "strategy.weight_keys"
+    values:
+      - ["sma_short", "sma_long", "sma_extra", "rsi", "macd"]
+      - ["rsi", "macd"]
+      - ["rsi", "macd", "macd_histogram"]
+      - ["rsi", "macd", "macd_histogram", "delta_1", "delta_3", "delta_5", "delta_10"]
+      - ["sma_short", "sma_long", "sma_extra", "rsi", "macd", "macd_signal",
+         "macd_histogram", "delta_1", "delta_3", "delta_5", "delta_10"]

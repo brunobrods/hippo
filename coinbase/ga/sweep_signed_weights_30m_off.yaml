@@ -1,0 +1,70 @@
+# The signed-weights comparison at THIRTY_MINUTE candles — control arm,
+# allow_negative_weights pinned OFF. Its sibling
+# sweep_signed_weights_30m_on.yaml is identical but for that line.
+#
+# See sweep_signed_weights_6h_off.yaml for the question and the mechanism;
+# this file covers only what differs, which is the clock and why a second one
+# is needed.
+#
+# ── Why a second clock ────────────────────────────────────────────────
+#
+# The original 120-run comparison was SIX_HOUR, and PR #23's feature work —
+# which chose the seven columns both arms now score — was THIRTY_MINUTE. The
+# two known results about this model come from different clocks, and the
+# feature evidence does not survive crossing between them: of 37 candidate
+# columns measured on BTC-USDT, 22 flip the sign of their out-of-sample
+# information coefficient between 30-minute and 6-hour candles, on the same
+# pair and the same window.
+#
+# So a flag validated only at SIX_HOUR, on a feature set validated only at
+# THIRTY_MINUTE, is asserted on neither. This arm is the check.
+#
+# Two pairs and five seeds rather than twenty pairs and three: at ~9 minutes a
+# point the twenty-pair shape would run six hours a side, and BTC/ETH is the
+# split PR #23 used, so this stays comparable with the sweep that picked the
+# features.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_signed_weights_30m_off.yaml --workers 8
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_signed_weights_30m_on.yaml  --workers 8
+#
+# 10 points each at roughly 9 minutes a point: ~90 min sequential per arm,
+# ~15 min across 8 workers. Both windows are already cached.
+#
+# ── Reading the result ────────────────────────────────────────────────
+#
+# Unlike the SIX_HOUR arms, these do not collide with the original comparison
+# — nothing in the index has ever run THIRTY_MINUTE with the flag on. So:
+#
+#   python -m coinbase.ga.results --group-by negative_weights --pair BTC-USDT
+#
+# is safe here once filtered to this granularity's window, but read `std`
+# before `mean`: five seeds on two pairs is a check, not a replication.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  # THE ONLY LINE THAT DIFFERS FROM THE `on` ARM.
+  genetic_algorithm.allow_negative_weights: false
+
+  data.exchange: "binance"
+  data.granularity: "THIRTY_MINUTE"
+
+  # config.yaml's own window, which is what the feature sweep used and what
+  # both pairs are cached at for 30-minute klines.
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-08-25"
+
+  # Costs on, and take-profit off, for the reasons given in the 6h control.
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+  strategy.take_profit_pct: 0.0
+
+# Five here rather than the 6h arms' three: this is a two-pair check, so the
+# seed spread is the only variance control it has.
+seeds: [1, 2, 3, 4, 5]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "BTC-USDT"
+      - "ETH-USDT"

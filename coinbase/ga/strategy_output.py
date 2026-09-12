@@ -119,6 +119,11 @@ class TrainedStrategy:
                 # nobody scored. Measured: at 1% it takes 61 trades where the
                 # same genome at 0.0 takes 5.
                 "take_profit_pct":       self._config.take_profit_pct,
+                # The exit model's columns decide a dual genome's SHAPE, so a
+                # genome rebuilt against a different exit_keys is a different
+                # model wearing the same weights. Saved for exactly the reason
+                # take_profit_pct above is — the same drift, found twice.
+                "exit_keys":             list(self._config.exit_keys),
             },
         }
 

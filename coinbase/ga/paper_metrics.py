@@ -72,6 +72,11 @@ class AlgoStatus:
     signal_score:      float
     fee_paid:          float
     interest_paid:     float = 0.0
+    # Carried from the book, which remembers them across restarts, unlike the
+    # process-local EquityCurve and the process's own start time.
+    max_drawdown:      float = 0.0
+    equity_peak:       float = 0.0
+    opened_at:         float = 0.0
 
 
 # ── Equity curve ───────────────────────────────────────────────────────
@@ -133,8 +138,20 @@ class AlgoPerformance:
         except OverflowError:
             return math.inf
 
+    # The worse of what the book remembers and what this process has watched.
+    #
+    # The curve is anchored to the book's high-water mark by prepending it,
+    # because MaxDrawdown takes its peak from the values it is given: left to
+    # itself the curve measures against THIS session's peak, so a book that
+    # peaked at 1000 last week, sat at 900 this morning and dipped to 810
+    # reported (900-810)/900 rather than (1000-810)/1000. Two independently
+    # anchored fractions cannot be compared, and the max of them is not a
+    # drawdown at all.
     def max_drawdown(self) -> float:
-        return MaxDrawdown(self._curve.values()).fraction()
+        return max(
+            self._status.max_drawdown,
+            MaxDrawdown([self._status.equity_peak] + self._curve.values()).fraction(),
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {

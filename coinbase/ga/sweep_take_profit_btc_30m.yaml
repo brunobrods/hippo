@@ -1,0 +1,82 @@
+# take_profit_pct, re-measured on the stationary feature set.
+#
+# ── Why this is being run again ───────────────────────────────────────
+#
+# The existing evidence for this knob is fifteen runs at THIRTY_MINUTE on
+# BTC-USDT, three seeds per level, and it looks decisive: +24.4% at a 1%
+# target against +8.1% at 0.0.
+#
+# All fifteen scored the OLD five weight_keys, three of them price levels
+# that PR #23 removed. That matters because the signed-weights comparison has
+# just shown what a result measured beside those columns is worth: the flag
+# that gained +39pp with the levels present gained nothing without them, and
+# lost 26.6pp at this granularity. The level columns were not a neutral
+# backdrop — they changed what every other parameter was worth. Every knob
+# swept before PR #23 inherits that doubt, and this is the most consequential
+# of them, because a non-zero target changes how the book trades rather than
+# merely how well.
+#
+# ── Read the artifact check BEFORE the yield column ───────────────────
+#
+# PR #20, which produced the original numbers, reported the reason not to
+# believe them, and this sweep exists partly to see whether it recurs:
+#
+#   At a 1% target, seeds 1 and 3 held DIFFERENT weights (macd +0.4052 vs
+#   +0.4139) and produced BIT-IDENTICAL gross profit and trade counts. Not
+#   one trade differed. The take-profit mechanic was doing the work and the
+#   genome was decorative — so the arm measures the exit rule, not a strategy.
+#
+# Two more things flatter a tight target, both still true here:
+#
+#   `unwind_at_entry_price: true` books a still-open position at its own entry
+#   price, so a loser that never hit its target is recorded as exactly zero
+#   rather than as a loss. A configuration that exits every winner early and
+#   holds every loser open therefore reports a win rate near 95% and carries
+#   its losses off the books entirely.
+#
+#   There is no stop loss. The target is one-sided by construction.
+#
+# So the first question this sweep answers is not "which level wins" but
+# "does the genome still matter at that level". If two seeds with different
+# weights produce identical trade counts, the arm is not evidence about
+# take_profit_pct at all.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_take_profit_btc_30m.yaml --workers 8
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_take_profit_eth_30m.yaml --workers 8
+#
+# 18 points each at roughly 9 minutes a point: ~2h40m sequential per arm,
+# ~25 min across 8 workers. Both windows are already in the candle cache.
+#
+# One file per pair because SweepPlan is one-factor-at-a-time: a 6-value
+# target axis beside a 2-value pair axis would give 8 points that each vary
+# one thing, not the grid this needs.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  data.exchange: "binance"
+  data.pair: "BTC-USDT"
+  data.granularity: "THIRTY_MINUTE"
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-08-25"
+
+  # Costs on. A target that only pays before fees is not a target worth
+  # setting, and a tight one trades far more often than 0.0 does — at a 1%
+  # target the original sweep went from 5 trades to 61, so this axis and the
+  # fee interact more strongly than any other.
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+
+  # Off, as measured: on the stationary seven this costs 26.6pp at THIRTY_MINUTE
+  # and was worse in all ten matched (pair, seed) cells. Pinned rather than left
+  # to the default so this sweep states what it assumes.
+  genetic_algorithm.allow_negative_weights: false
+
+# Three, matching the original fifteen runs so the comparison is like for like.
+seeds: [1, 2, 3]
+
+axes:
+  # The original levels exactly. 0.0 is the control and must reproduce the
+  # current default's behaviour; if it does not, nothing else here can be read.
+  - path: "strategy.take_profit_pct"
+    values: [0.0, 0.01, 0.02, 0.04, 0.08, 0.16]

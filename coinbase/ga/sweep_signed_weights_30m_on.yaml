@@ -1,0 +1,36 @@
+# The signed-weights comparison at THIRTY_MINUTE candles — treatment arm,
+# allow_negative_weights pinned ON. Identical to
+# sweep_signed_weights_30m_off.yaml but for that one line; see that file for
+# why a second clock is measured at all, and see
+# sweep_signed_weights_6h_off.yaml for the question behind both.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_signed_weights_30m_on.yaml --workers 8
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  # THE ONLY LINE THAT DIFFERS FROM THE `off` ARM.
+  genetic_algorithm.allow_negative_weights: true
+
+  data.exchange: "binance"
+  data.granularity: "THIRTY_MINUTE"
+
+  # config.yaml's own window, which is what the feature sweep used and what
+  # both pairs are cached at for 30-minute klines.
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-08-25"
+
+  # Costs on, and take-profit off, for the reasons given in the 6h control.
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+  strategy.take_profit_pct: 0.0
+
+# Five here rather than the 6h arms' three: this is a two-pair check, so the
+# seed spread is the only variance control it has.
+seeds: [1, 2, 3, 4, 5]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "BTC-USDT"
+      - "ETH-USDT"

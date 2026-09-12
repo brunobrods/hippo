@@ -56,6 +56,7 @@ from coinbase.ga.strategy_evaluator import (
     GaStrategy,
     StrategyConfig,
     StrategyConfigFile,
+    TwoSidedModel,
     ValidatedStrategyConfig,
     ValidatedWeightKeys,
     WeightKeysConfig,
@@ -149,6 +150,27 @@ class PaperState:
     # themselves are not recoverable from a resumed book — a running win count
     # is the only way a win rate survives a restart.
     realized_wins:      int = 0
+    # What this book has spent since it opened, for the same reason: fees and
+    # interest are charged into balance as they are taken, leaving nothing to
+    # add up afterwards. Held here rather than counted in the process that
+    # happens to be running, which reset them to zero on every restart —
+    # nightly, since the engine starts at logon — and so reported a book that
+    # had paid its way as one that had traded for free.
+    fees_paid:          float = 0.0
+    interest_paid:      float = 0.0
+    # The high-water mark and the worst fall from it, for the same reason
+    # again: an equity curve held in memory is rebuilt at every launch, so a
+    # book that fell 30% last week reported no drawdown at all this morning.
+    # Kept as the two running numbers a drawdown needs rather than the curve
+    # itself — a book is a book, not a time series, and the peak and the worst
+    # drop are all the curve was ever consulted for.
+    equity_peak:        float = 0.0
+    max_drawdown:       float = 0.0
+    # When this book started, so its age is its own rather than the running
+    # process's. An annualized figure divides by elapsed time; measured from
+    # the last logon it annualizes a few hours of a book that has traded for
+    # weeks, which is why it was floored to the plain return instead.
+    opened_at:          float = 0.0
 
 
 class PaperStateFile:
@@ -161,13 +183,39 @@ class PaperStateFile:
     def read(self) -> PaperState:
         with open(self._filepath, encoding="utf-8") as handle:
             raw = json.load(handle)
+        position = self._position(raw.get("position"))
         return PaperState(
             balance           = float(raw["balance"]),
-            position          = self._position(raw.get("position")),
+            position          = position,
             last_candle_start = int(raw.get("last_candle_start", 0)),
             realized_trades   = int(raw.get("realized_trades", 0)),
             realized_wins     = int(raw.get("realized_wins", 0)),
+            fees_paid         = self._fees_paid(raw, position),
+            interest_paid     = float(raw.get("interest_paid", 0.0)),
+            equity_peak       = float(raw.get("equity_peak", 0.0)),
+            max_drawdown      = float(raw.get("max_drawdown", 0.0)),
+            opened_at         = float(raw.get("opened_at", 0.0)),
         )
+
+    # A book written before this field existed still knows one of its costs:
+    # an open position carries the fee it was opened with. Seeding from it
+    # recovers exactly what is recoverable — every earlier round trip is gone,
+    # folded into balance. Self-retiring: the next write puts the key in the
+    # file and this branch never fires for that book again.
+    @staticmethod
+    def _fees_paid(raw: dict[str, Any], position: Optional[Position]) -> float:
+        if "fees_paid" in raw:
+            return float(raw["fees_paid"])
+        return position.entry_fee() if position else 0.0
+
+    # No recovery here, deliberately — unlike the fee above, which an open
+    # position genuinely still carries. Nothing in an older book dates it:
+    # every candidate (the open position's entry, the candle it resumes on) is
+    # LATER than the book's real open, and an annualized figure divides by
+    # elapsed time, so a date too late means a window too short and a return
+    # raised to too high a power. A book up 10% over two months, dated
+    # yesterday, annualizes to 1e14 rather than to 10%. 0.0 means undated, and
+    # a caller that needs an age is expected to have its own fallback.
 
     def write(self, state: PaperState, pair: str) -> None:
         ParentDirectory(self._filepath).ensure()
@@ -178,6 +226,11 @@ class PaperStateFile:
             "last_candle_start": state.last_candle_start,
             "realized_trades":   state.realized_trades,
             "realized_wins":     state.realized_wins,
+            "fees_paid":         state.fees_paid,
+            "interest_paid":     state.interest_paid,
+            "equity_peak":       state.equity_peak,
+            "max_drawdown":      state.max_drawdown,
+            "opened_at":         state.opened_at,
             "updated_at":        UtcNow().iso(),
         }
         # Atomic: a crash mid-write must never leave a truncated book behind.
@@ -237,6 +290,11 @@ class InitialPaperState:
             last_candle_start = 0,
             realized_trades   = 0,
             realized_wins     = 0,
+            fees_paid         = 0.0,
+            interest_paid     = 0.0,
+            equity_peak       = self._starting_balance,
+            max_drawdown      = 0.0,
+            opened_at         = 0.0,
         )
 
 
@@ -263,7 +321,10 @@ class TickOutcome:
     # the indicator values behind a decision without fetching them again.
     row:          dict[str, float] = field(default_factory=dict)
     # Kept apart, not summed into one "cost": which of the two is eating a book
-    # is the question a paper run exists to answer.
+    # is the question a paper run exists to answer. What THIS tick was charged,
+    # which is no longer what any caller reports — the running totals moved
+    # onto PaperState, where they survive a restart. They stay because they are
+    # the only per-tick figure there is, and a journal row is a per-tick record.
     fee:          float = 0.0
     interest:     float = 0.0
     # The position the decision was taken AGAINST, not the one it produced —
@@ -316,6 +377,20 @@ class PaperTick:
         fee      = ledger.fees_charged()
         interest = ledger.interest_charged()
         balance  = ledger.balance()
+        equity   = ledger.equity(row["close"])
+        # The worst this candle was actually worth, not what it closed at. Both
+        # extremes are already fetched and already used for the liquidation
+        # check above, and a trough between two closes is a real drawdown that
+        # sampling the close alone never sees.
+        trough   = min(ledger.equity(row["low"]), ledger.equity(row["high"]))
+        # Falls back to the starting balance only for a book that has no peak
+        # recorded — every book opened at its starting balance, so its
+        # high-water mark is never below it, which makes an older book's first
+        # reading correct instead of starting from today. Not a floor applied
+        # on every tick: `starting_balance` is config, and were it ever raised,
+        # a permanent floor would lift an established peak and write a
+        # drawdown the book never suffered.
+        peak     = max(state.equity_peak or self._starting_balance, equity)
         self._state_file.write(
             PaperState(
                 balance           = balance,
@@ -325,12 +400,25 @@ class PaperTick:
                 realized_wins     = state.realized_wins + sum(
                     1 for trade in ledger.trades() if trade.net_profit() > 0.0
                 ),
+                fees_paid         = state.fees_paid + fee,
+                interest_paid     = state.interest_paid + interest,
+                equity_peak       = peak,
+                max_drawdown      = max(
+                    state.max_drawdown, (peak - trough) / peak if peak > 0.0 else 0.0,
+                ),
+                # Stamped only by a book whose first candle this is, for which
+                # it is the exact open. A book that has ticked before and still
+                # carries no open time cannot be dated from anything it holds
+                # (see _opened_at), so it stays undated rather than wrong.
+                opened_at         = state.opened_at or (
+                    float(candle_start) if state.last_candle_start == 0 else 0.0
+                ),
             ),
             self._rows.pair(),
         )
         return TickOutcome(
             acted=True, candle_start=candle_start, decision=decision,
-            balance=balance, equity=ledger.equity(row["close"]),
+            balance=balance, equity=equity,
             closed_trades=len(ledger.trades()), row=row, fee=fee, interest=interest,
             position_before=before,
         )
@@ -390,7 +478,12 @@ async def _main() -> None:
     for key, (from_config, from_strategy) in trained.divergences().items():
         print(f"note: {key} config.yaml={from_config} -> using trained {from_strategy}")
 
-    keys       = weight_keys + (POSITION_PNL_KEY,)
+    # Built from the GENOME's design and exit_keys, not config.yaml's: the
+    # design decides the genome's shape, and a dual genome rebuilt in the
+    # linear shape would find none of its own weights.
+    keys       = SignalDesign(strategy_config.design).keys(
+        weight_keys, strategy_config.exit_keys,
+    )
     # A genome saved before a weight key existed carries no weight for it, and
     # Genome.weight raises rather than guessing. Backfilling at zero keeps a
     # book already running against an older genome from breaking the moment
@@ -399,7 +492,12 @@ async def _main() -> None:
     for key in backfilled.missing():
         print(f"note: genome predates {key} — running it weighted zero; retrain to use it")
 
-    model    = SignalDesign(strategy_config.design).model(backfilled.filled(), keys)
+    # Refuses a genome that can never cross its own buy_threshold while flat,
+    # and so could only ever short — see TwoSidedModel.
+    model    = TwoSidedModel(
+        SignalDesign(strategy_config.design).model(backfilled.filled(), keys),
+        strategy_config,
+    ).model()
     strategy = GaStrategy(model, strategy_config)
 
     # The paper run follows its own market, which need not be the one the
