@@ -67,6 +67,7 @@ from coinbase.ga.strategy_evaluator import (
     POSITION_PNL_KEY,
     SignalDesign,
     GaStrategy,
+    TwoSidedModel,
     ValidatedWeightKeys,
     WeightKeysConfig,
 )
@@ -670,9 +671,24 @@ class PaperEngine:
         self._pool   = pool
         self._baskets: dict[tuple[str, str], LiveBasket] = {}
 
+    # Construction is isolated for the same reason tick, mark and status are:
+    # this engine runs several books at once, and one that cannot be built —
+    # an unreadable strategy file, a genome TwoSidedModel refuses — must not
+    # stop the others. Without this the whole tuple raises and every book stops,
+    # which is how a single bad genome would take a healthy one down with it.
+    #
+    # Logged at error rather than swallowed: a book that is missing from the
+    # dashboard has to say why in the log, or it looks like it was never
+    # configured.
     @functools.cached_property
     def algos(self) -> tuple[IsolatedAlgo, ...]:
-        return tuple(IsolatedAlgo(self._algo(entry)) for entry in self._config.algos)
+        built: list[IsolatedAlgo] = []
+        for entry in self._config.algos:
+            try:
+                built.append(IsolatedAlgo(self._algo(entry)))
+            except Exception as exc:
+                logger.error("algo %s refused, and will not run: %s", entry.name, exc)
+        return tuple(built)
 
     # Books and curves are shared between the algos, the snapshotter and the
     # status board, so every caller must see the same instance per name.
@@ -741,9 +757,16 @@ class PaperEngine:
             config   = entry,
             rows     = rows,
             strategy = GaStrategy(
-                SignalDesign(trained.config().design).model(
-                    genome.filled(), keys + (POSITION_PNL_KEY,),
-                ),
+                # Refuses a genome whose score cannot reach its own
+                # buy_threshold while flat. This engine is the likeliest place
+                # for it: it runs many older genomes at once, and a one-sided
+                # book looks identical to a book that simply has not bought yet.
+                TwoSidedModel(
+                    SignalDesign(trained.config().design).model(
+                        genome.filled(), keys + (POSITION_PNL_KEY,),
+                    ),
+                    trained.config(),
+                ).model(),
                 trained.config(),
             ),
             book     = self.books[entry.name],

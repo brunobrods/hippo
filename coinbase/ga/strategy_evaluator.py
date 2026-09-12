@@ -276,6 +276,51 @@ class SignalDesign:
         )
 
 
+# A genome that cannot reach its own buy_threshold while flat, and so can only
+# ever short.
+#
+# Every norm_* column is in [0, 1] and L1 scaling makes the weights sum to 1
+# INCLUDING position_pnl — which contributes exactly 0 while no position is
+# open. So the highest score reachable from flat is the weight mass on the
+# indicator keys alone, and a genome carrying 0.48 on position_pnl tops out at
+# 0.52 against a buy_threshold of 0.60. It is structurally short-only, and
+# nothing about the score says so: it simply never crosses.
+#
+# This was found live. The papered ETH book had a ceiling of 0.5196 and had
+# never been able to open a long in its entire history — not a bad genome, a
+# single L1 budget of 1.0 being shared between an entry model and an exit model
+# when only the exit half can use position_pnl.
+#
+# Raised rather than warned, following SignalDesign: a genome that cannot take
+# one of the two sides it was scored on is not the strategy anybody chose, and
+# a book running it reports on a strategy that was never tested. Training warns
+# instead — there a one-sided genome is a measurement, not something about to
+# trade.
+class TwoSidedModel:
+    def __init__(self, model: SignalModel, config: StrategyConfig) -> None:
+        self._model  = model
+        self._config = config
+
+    def model(self) -> SignalModel:
+        ceiling = self._model.flat_score_ceiling()
+        if ceiling <= self._config.buy_threshold:
+            raise ValueError(self._complaint(ceiling))
+        return self._model
+
+    def is_one_sided(self) -> bool:
+        return self._model.flat_score_ceiling() <= self._config.buy_threshold
+
+    def _complaint(self, ceiling: float) -> str:
+        return (
+            f"genome can never open a long: its highest score while flat is "
+            f"{ceiling:.4f}, at or below buy_threshold "
+            f"{self._config.buy_threshold}. Weight on position_pnl scores only "
+            f"once a position is open, so it lowers this ceiling without ever "
+            f"raising the score that has to cross it. Retrain, or lower "
+            f"buy_threshold below {ceiling:.4f}."
+        )
+
+
 # ── GA-driven strategy ───────────────────────────────────────────────────
 
 class GaStrategy:

@@ -25,6 +25,7 @@ from coinbase.ga.strategy_evaluator import (
     SignalDesign,
     StrategyConfigFile,
     StrategyEvaluator,
+    TwoSidedModel,
     ValidatedStrategyConfig,
     ValidatedWeightKeys,
     WeightKeysConfig,
@@ -175,6 +176,21 @@ class TrainingRun:
             ga_config       = ga_config,
             created_at      = UtcNow().iso(),
         )
+        # Warned, not raised: here a one-sided genome is a measurement the run
+        # honestly produced, and aborting would throw away the evidence. The
+        # paper paths raise on the same condition, because there it is about to
+        # trade. See TwoSidedModel.
+        if TwoSidedModel(
+            SignalDesign(strategy_config.design).model(best_genome, keys),
+            strategy_config,
+        ).is_one_sided():
+            print(
+                f"warning: best genome can never open a long — weight on "
+                f"position_pnl leaves its flat ceiling at or below "
+                f"buy_threshold {strategy_config.buy_threshold}, so it is "
+                f"short-only. It will be refused if papered."
+            )
+
         strategy      = TrainedStrategy(best_genome, strategy_config)
         test_result   = test_evaluator.result(best_genome)
         test_yield    = test_evaluator.annualized_yield(test_result)

@@ -56,6 +56,7 @@ from coinbase.ga.strategy_evaluator import (
     GaStrategy,
     StrategyConfig,
     StrategyConfigFile,
+    TwoSidedModel,
     ValidatedStrategyConfig,
     ValidatedWeightKeys,
     WeightKeysConfig,
@@ -486,7 +487,12 @@ async def _main() -> None:
     for key in backfilled.missing():
         print(f"note: genome predates {key} — running it weighted zero; retrain to use it")
 
-    model    = SignalDesign(strategy_config.design).model(backfilled.filled(), keys)
+    # Refuses a genome that can never cross its own buy_threshold while flat,
+    # and so could only ever short — see TwoSidedModel.
+    model    = TwoSidedModel(
+        SignalDesign(strategy_config.design).model(backfilled.filled(), keys),
+        strategy_config,
+    ).model()
     strategy = GaStrategy(model, strategy_config)
 
     # The paper run follows its own market, which need not be the one the
