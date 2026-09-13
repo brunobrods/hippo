@@ -127,6 +127,11 @@ class TrainedStrategy:
                 # Changes what the exit model computes, so it is part of
                 # the genome's identity just as exit_keys is.
                 "exit_pnl_scale":        self._config.exit_pnl_scale,
+                # Recorded for provenance: the thresholds above were
+                # derived from this tail of the exit model's own
+                # distribution, and without it nobody can tell a
+                # calibrated band from a hand-set one.
+                "exit_quantile":         self._config.exit_quantile,
             },
         }
 

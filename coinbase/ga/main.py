@@ -193,7 +193,7 @@ class TrainingRun:
             SignalDesign(strategy_config.design).model(
                 best_genome, keys, strategy_config.exit_pnl_scale,
             ),
-            strategy_config,
+            train_evaluator.calibrated(best_genome),
         ).is_one_sided():
             print(
                 f"warning: best genome can never open a long — weight on "
@@ -202,7 +202,13 @@ class TrainingRun:
                 f"short-only. It will be refused if papered."
             )
 
-        strategy      = TrainedStrategy(best_genome, strategy_config)
+        # The thresholds the winning genome was actually SCORED under. For
+        # dual these are quantiles of its own exit-score distribution, so
+        # saving config.yaml's instead would paper a strategy nobody measured —
+        # the same drift take_profit_pct had before PR #20. Identical to
+        # strategy_config for the linear design.
+        scored_config = train_evaluator.calibrated(best_genome)
+        strategy      = TrainedStrategy(best_genome, scored_config)
         test_result   = test_evaluator.result(best_genome)
         test_yield    = test_evaluator.annualized_yield(test_result)
         performance   = PerformanceReport(test_result, test_yield)

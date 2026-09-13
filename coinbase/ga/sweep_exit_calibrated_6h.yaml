@@ -1,0 +1,81 @@
+# Does calibrating the exit bands to the model's own distribution fix dual?
+#
+# The dual exit has now lost three times — the original comparison, the
+# corrected exit in #34, and the exit_pnl_scale sweep — the last two at
+# t = -4.6 to -5.0 on captured share. The scale sweep is what found the real
+# cause: the median hold stayed at TWO candles whether the scale was 0.02, 0.05
+# or 0.10, so the exit was never firing because of its sensitivity.
+#
+# What it fires on is where it STARTS. Under linear one score decides entry and
+# exit, so a position opens above buy_threshold and closes only when that same
+# score falls to sell_threshold — born far from its own exit by construction.
+# Measured over 467 linear entries, 0.0% were already past their exit threshold
+# on the candle they opened. For dual it was 21% to 31%: those positions were
+# doomed before their first candle, and no scaling of position_pnl can move a
+# score that is already on the wrong side.
+#
+# CalibratedExit replaces the hand-set 0.40 and 0.45 with quantiles of that
+# genome's own exit-score distribution, measured with the position flat. "Exit"
+# then means "unusually bearish for this model", which is what it already means
+# under linear.
+#
+# ── What would still leave it broken ──────────────────────────────────
+#
+# The exit score may simply be too fast to hold anything. If it is close to
+# white noise it will touch its own bottom decile roughly every ten candles
+# whatever the band is set to, giving holds of ten rather than linear's
+# forty-eight. READ THE MEDIAN HOLD FIRST. If it has not moved toward linear's,
+# the split is not fixable by thresholds and dual should be dropped rather than
+# tuned a fourth time.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_exit_calibrated_6h.yaml --workers 6
+#
+# 60 points, roughly twice the usual cost because each genome is now calibrated
+# over the window as well as backtested on it: ~25 min across 6 workers.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  strategy.design: "dual"
+  strategy.exit_keys: ["delta_1", "macd_histogram"]
+  # THE LINE UNDER TEST.
+  strategy.exit_pnl_scale: 0.02
+  # The fix under test: exit bands taken from the exit model's own
+  # score distribution rather than from numbers set for a different model.
+  strategy.exit_quantile: 0.10
+
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-02-28"
+
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+  genetic_algorithm.allow_negative_weights: false
+  strategy.take_profit_pct: 0.0
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "AAVE-USDT"
+      - "ADA-USDT"
+      - "AVAX-USDT"
+      - "BICO-USDT"
+      - "DASH-USDT"
+      - "DEXE-USDT"
+      - "DOGE-USDT"
+      - "ETH-USDT"
+      - "FET-USDT"
+      - "LINK-USDT"
+      - "NEAR-USDT"
+      - "ONG-USDT"
+      - "PROM-USDT"
+      - "SOL-USDT"
+      - "SUI-USDT"
+      - "UNI-USDT"
+      - "WLD-USDT"
+      - "XLM-USDT"
+      - "XRP-USDT"
+      - "ZEC-USDT"
