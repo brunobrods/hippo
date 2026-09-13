@@ -1,0 +1,86 @@
+# Does the corrected exit model keep more of the move? CONTROL ARM.
+#
+# ── What is being measured, and why yield is the wrong column ─────────
+#
+# Re-running the two papered genomes over their own held-out halves showed
+# where this strategy's money goes: trades REACH 1597 and 1707 basis points of
+# favourable excursion and BOOK 685 and 986. They give back 42% and 57% of the
+# move. That gap is an order of magnitude larger than any parameter effect
+# measured in this repo, and it belongs to the exit model.
+#
+# PR #34 fixed two defects in the term the exit leans on hardest, and neither
+# has been measured:
+#
+#   Wrong scale. The exit compared a raw fractional return against thresholds
+#   meant for a [0, 1] column, so a long needed to be +40% ahead merely to be
+#   held one more candle. Every long was sold the candle after it opened.
+#
+#   Wrong sign for shorts. unrealized_return is direction-agnostic, but the
+#   policy's bands are not — a long exits LOW and a short exits HIGH — so one
+#   "am I ahead" number cut winning shorts while letting winning longs run.
+#   The exit score now reads the undirected price move, which is a stop loss on
+#   both sides.
+#
+# READ CAPTURED SHARE OF MFE, NOT YIELD. Yield on the 6 to 16 trades a run
+# produces cannot separate these arms — three knobs measured this week all
+# died inside their seed spread. Captured share is computed per trade against
+# the best price that position actually reached, so it has as many observations
+# as there are trades rather than one per run.
+#
+# ── Why two exit keys ─────────────────────────────────────────────────
+#
+# GroupedL1Scaling normalizes each group to sum to 1, so a ONE-key exit group
+# is pinned at exactly 1.0 and cannot be trained. That shipped once and had to
+# be reverted. delta_1 is the strongest single input at THIRTY_MINUTE across
+# 182 saved genomes and macd_histogram is the most stable of the seven across
+# both clocks, so the pair gives the group a real degree of freedom without
+# the capacity cost that three columns measured.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_exit_6h_linear.yaml --workers 6
+#
+# 60 points at roughly 70 s: ~12 min across 6 workers. All windows cached.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  # The shipped default: one weight vector for both jobs.
+  strategy.design: "linear"
+
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-02-28"
+
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+  genetic_algorithm.allow_negative_weights: false
+  # Pinned off so what varies is the exit MODEL, not a fixed exit rule sitting
+  # on top of it. The take-profit knob was separately measured at reachable
+  # levels and cleared nothing on either pair.
+  strategy.take_profit_pct: 0.0
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "AAVE-USDT"
+      - "ADA-USDT"
+      - "AVAX-USDT"
+      - "BICO-USDT"
+      - "DASH-USDT"
+      - "DEXE-USDT"
+      - "DOGE-USDT"
+      - "ETH-USDT"
+      - "FET-USDT"
+      - "LINK-USDT"
+      - "NEAR-USDT"
+      - "ONG-USDT"
+      - "PROM-USDT"
+      - "SOL-USDT"
+      - "SUI-USDT"
+      - "UNI-USDT"
+      - "WLD-USDT"
+      - "XLM-USDT"
+      - "XRP-USDT"
+      - "ZEC-USDT"
