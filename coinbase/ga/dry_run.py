@@ -86,7 +86,9 @@ async def _main() -> None:
     genome   = BackfilledGenome(Genome(reloaded.weights()), keys)
     for key in genome.missing():
         print(f"note: genome predates {key} — running it weighted zero; retrain to use it")
-    model    = SignalDesign(strategy_config.design).model(genome.filled(), keys)
+    model    = SignalDesign(strategy_config.design).model(
+        genome.filled(), keys, strategy_config.exit_pnl_scale,
+    )
     strategy = GaStrategy(model, strategy_config)
 
     async with ConfiguredExchange(raw_config).adapter() as adapter:

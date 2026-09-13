@@ -124,6 +124,9 @@ class TrainedStrategy:
                 # model wearing the same weights. Saved for exactly the reason
                 # take_profit_pct above is — the same drift, found twice.
                 "exit_keys":             list(self._config.exit_keys),
+                # Changes what the exit model computes, so it is part of
+                # the genome's identity just as exit_keys is.
+                "exit_pnl_scale":        self._config.exit_pnl_scale,
             },
         }
 

@@ -190,7 +190,9 @@ class TrainingRun:
         # paper paths raise on the same condition, because there it is about to
         # trade. See TwoSidedModel.
         if TwoSidedModel(
-            SignalDesign(strategy_config.design).model(best_genome, keys),
+            SignalDesign(strategy_config.design).model(
+                best_genome, keys, strategy_config.exit_pnl_scale,
+            ),
             strategy_config,
         ).is_one_sided():
             print(

@@ -1,0 +1,74 @@
+# Is the dual exit twitchy because of its scale? exit_pnl_scale = 0.10.
+#
+# ── The hypothesis ────────────────────────────────────────────────────
+#
+# The corrected dual exit measured decisively worse than linear: captured share
+# -17.2% against +18.6%, worse on 16 of 20 pairs, paired t(19) = -4.98 over
+# 1,270 trades. The diagnosis is in the median hold — dual holds TWO candles,
+# linear holds forty-eight.
+#
+# ScaledReturn maps the position's move onto [0, 1] with tanh, and its
+# half-point was set to 0.02 by guesswork. A SIX_HOUR candle moves about 1%, so
+# at that scale a single ordinary candle against the position drives the exit
+# score to 0.29 — under a sell_threshold of 0.40. The exit fires on noise.
+#
+# At 0.05 the same 1% move scores 0.40, and at 0.10 it scores 0.45, both inside
+# the hold band. If the scale is the problem, the median hold should lengthen
+# toward linear's and captured share should recover. If it does not, the split
+# itself is what costs and dual should be abandoned rather than tuned further.
+#
+# ── Read captured share, not yield ────────────────────────────────────
+#
+# Yield gives one observation per run and every knob measured on it this week
+# died inside its seed spread. Captured share is computed per trade against the
+# best price that position actually reached, so 60 runs carry several hundred
+# observations. It is what separated dual from linear at t = -4.98, and it is
+# what should judge this.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_exit_scale_010_6h.yaml --workers 6
+#
+# 60 points at roughly 70 s: ~12 min across 6 workers. All windows cached.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  strategy.design: "dual"
+  strategy.exit_keys: ["delta_1", "macd_histogram"]
+  # THE LINE UNDER TEST.
+  strategy.exit_pnl_scale: 0.10
+
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-02-28"
+
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+  genetic_algorithm.allow_negative_weights: false
+  strategy.take_profit_pct: 0.0
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "AAVE-USDT"
+      - "ADA-USDT"
+      - "AVAX-USDT"
+      - "BICO-USDT"
+      - "DASH-USDT"
+      - "DEXE-USDT"
+      - "DOGE-USDT"
+      - "ETH-USDT"
+      - "FET-USDT"
+      - "LINK-USDT"
+      - "NEAR-USDT"
+      - "ONG-USDT"
+      - "PROM-USDT"
+      - "SOL-USDT"
+      - "SUI-USDT"
+      - "UNI-USDT"
+      - "WLD-USDT"
+      - "XLM-USDT"
+      - "XRP-USDT"
+      - "ZEC-USDT"

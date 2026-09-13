@@ -37,7 +37,7 @@ def config() -> StrategyConfig:
 
 def model() -> DualSignal:
     return DualSignal(
-        Genome({"entry:rsi": 0.5, "entry:macd": 0.5, "exit:position_pnl": 1.0}), KEYS,
+        Genome({"entry:rsi": 0.5, "entry:macd": 0.5, "exit:position_pnl": 1.0}), KEYS, 0.02,
     )
 
 
@@ -82,19 +82,19 @@ class TestSingleKeyGroupStillHasNoFreedom:
 
 class TestScaledReturn:
     def test_flat_pnl_reads_neutral(self) -> None:
-        assert ScaledReturn(0.0).value() == pytest.approx(0.5)
+        assert ScaledReturn(0.0, 0.02).value() == pytest.approx(0.5)
 
     def test_it_stays_inside_the_unit_interval(self) -> None:
         for r in (-10.0, -0.5, 0.0, 0.5, 10.0):
-            assert 0.0 <= ScaledReturn(r).value() <= 1.0
+            assert 0.0 <= ScaledReturn(r, 0.02).value() <= 1.0
 
     def test_small_moves_are_where_it_is_sensitive(self) -> None:
-        near = ScaledReturn(0.02).value() - ScaledReturn(0.0).value()
-        far = ScaledReturn(0.42).value() - ScaledReturn(0.40).value()
+        near = ScaledReturn(0.02, 0.02).value() - ScaledReturn(0.0, 0.02).value()
+        far = ScaledReturn(0.42, 0.02).value() - ScaledReturn(0.40, 0.02).value()
         assert near > 100 * far  # saturates, so a big move stops mattering
 
     def test_it_is_monotone_in_the_move(self) -> None:
-        values = [ScaledReturn(r).value() for r in (-0.1, -0.01, 0.0, 0.01, 0.1)]
+        values = [ScaledReturn(r, 0.02).value() for r in (-0.1, -0.01, 0.0, 0.01, 0.1)]
         assert values == sorted(values)
 
 
@@ -125,5 +125,36 @@ class TestTheExitTermActsAsAStopLossOnBothSides:
 
     def test_the_exit_score_is_scaled_not_raw(self) -> None:
         held = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
-        assert model().score(row(102.0), held) == pytest.approx(ScaledReturn(0.02).value())
+        assert model().score(row(102.0), held) == pytest.approx(ScaledReturn(0.02, 0.02).value())
         assert model().score(row(102.0), held) > 0.85  # raw would have been 0.02
+
+
+class TestExitScaleIsConfigurable:
+    # 0.02 was a guess and it measured badly: the corrected dual exit held a
+    # median of TWO candles against linear's forty-eight, because a SIX_HOUR
+    # candle moves about 1% and a 2% half-point puts the score across
+    # sell_threshold on ordinary noise. The scale is now sweepable, which is
+    # only possible because it left the code.
+    def test_a_wider_scale_makes_the_exit_less_twitchy(self) -> None:
+        move = 0.01  # one ordinary SIX_HOUR candle, against it
+        twitchy = ScaledReturn(-move, 0.02).value()
+        patient = ScaledReturn(-move, 0.10).value()
+        assert twitchy < 0.4 <= patient, (
+            f"at a 2% scale a 1% adverse move scores {twitchy:.3f}, under a "
+            f"sell_threshold of 0.4; at 10% it scores {patient:.3f} and holds"
+        )
+
+    def test_the_scale_changes_sensitivity_not_direction(self) -> None:
+        for half in (0.02, 0.05, 0.10):
+            assert ScaledReturn(0.0, half).value() == pytest.approx(0.5)
+            assert ScaledReturn(0.05, half).value() > 0.5
+            assert ScaledReturn(-0.05, half).value() < 0.5
+
+    def test_a_non_positive_scale_is_refused(self) -> None:
+        import dataclasses
+
+        from coinbase.ga.strategy_evaluator import ValidatedStrategyConfig
+
+        bad = dataclasses.replace(config(), exit_pnl_scale=0.0)
+        with pytest.raises(ValueError, match="exit_pnl_scale must be positive"):
+            ValidatedStrategyConfig(bad).config()

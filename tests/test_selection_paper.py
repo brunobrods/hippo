@@ -32,7 +32,7 @@ class FakeTrained:
 
     def strategy(self) -> GaStrategy:
         return GaStrategy(
-            SignalDesign(self.config.design).model(Genome({"rsi": 1.0}), ("rsi",)),
+            SignalDesign(self.config.design).model(Genome({"rsi": 1.0}), ("rsi",), 0.02),
             self.config,
         )
 

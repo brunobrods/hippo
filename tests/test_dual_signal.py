@@ -23,7 +23,7 @@ def row(rsi: float = 0.0, macd: float = 0.0, delta_1: float = 0.0, close: float 
 
 
 def dual(**weights) -> DualSignal:
-    return DualSignal(Genome(dict(weights)), KEYS)
+    return DualSignal(Genome(dict(weights)), KEYS, 0.02)
 
 
 class TestGroupedL1Scaling:
@@ -73,7 +73,7 @@ class TestDualSignal:
     def test_the_exit_model_reads_the_scaled_price_move(self) -> None:
         model = dual(**{"entry:rsi": 1.0, "entry:macd": 0.0, "exit:delta_1": 0.0, "exit:position_pnl": 1.0})
         held = Position(entry_price=100.0, size=1.0, direction=Direction.LONG)
-        assert model.score(row(close=110.0), held) == pytest.approx(ScaledReturn(0.10).value())
+        assert model.score(row(close=110.0), held) == pytest.approx(ScaledReturn(0.10, 0.02).value())
         assert model.score(row(close=110.0), held) > 0.99
 
     def test_a_short_reads_the_same_price_move_with_the_same_sign(self) -> None:
@@ -92,7 +92,7 @@ class TestDualSignal:
         scaled = GroupedL1Scaling().scaled(
             {"entry:rsi": 1.0, "entry:macd": 1.0, "exit:delta_1": 1.0, "exit:position_pnl": 99.0},
         )
-        assert DualSignal(Genome(scaled), KEYS).flat_score_ceiling() == pytest.approx(1.0)
+        assert DualSignal(Genome(scaled), KEYS, 0.02).flat_score_ceiling() == pytest.approx(1.0)
 
     def test_a_dual_genome_is_never_refused_as_one_sided(self) -> None:
         scaled = GroupedL1Scaling().scaled(
@@ -105,7 +105,7 @@ class TestDualSignal:
             starting_balance  = 10000.0,
             design            = DUAL_DESIGN,
         )
-        assert TwoSidedModel(DualSignal(Genome(scaled), KEYS), config).is_one_sided() is False
+        assert TwoSidedModel(DualSignal(Genome(scaled), KEYS, 0.02), config).is_one_sided() is False
 
     def test_a_negative_weight_lifts_the_groups_floor_back_to_zero(self) -> None:
         model = dual(**{"entry:rsi": -0.5, "entry:macd": 0.5, "exit:delta_1": 1.0, "exit:position_pnl": 0.0})
@@ -142,5 +142,5 @@ class TestSignalDesignWiring:
         assert isinstance(SignalDesign(LINEAR_DESIGN).scaling(), L1Scaling)
 
     def test_dual_builds_a_dual_model(self) -> None:
-        model = SignalDesign(DUAL_DESIGN).model(Genome({"entry:rsi": 1.0}), ("entry:rsi",))
+        model = SignalDesign(DUAL_DESIGN).model(Genome({"entry:rsi": 1.0}), ("entry:rsi",), 0.02)
         assert isinstance(model, DualSignal)

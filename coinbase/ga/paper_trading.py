@@ -495,7 +495,9 @@ async def _main() -> None:
     # Refuses a genome that can never cross its own buy_threshold while flat,
     # and so could only ever short — see TwoSidedModel.
     model    = TwoSidedModel(
-        SignalDesign(strategy_config.design).model(backfilled.filled(), keys),
+        SignalDesign(strategy_config.design).model(
+            backfilled.filled(), keys, strategy_config.exit_pnl_scale,
+        ),
         strategy_config,
     ).model()
     strategy = GaStrategy(model, strategy_config)

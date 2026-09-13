@@ -767,7 +767,9 @@ class PaperEngine:
                 # for it: it runs many older genomes at once, and a one-sided
                 # book looks identical to a book that simply has not bought yet.
                 TwoSidedModel(
-                    SignalDesign(trained.config().design).model(genome.filled(), shape),
+                    SignalDesign(trained.config().design).model(
+                        genome.filled(), shape, trained.config().exit_pnl_scale,
+                    ),
                     trained.config(),
                 ).model(),
                 trained.config(),
