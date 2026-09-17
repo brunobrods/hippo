@@ -204,11 +204,33 @@ strategy:
   # learned one. That a fixed rule came that close is interesting, and is not a
   # reason to ship it.
   #
+  # BOTH OF THOSE WERE THEN FIXED, AND DUAL IS STILL WORSE. PR #34 gave the
+  # exit term its own [0, 1] scaling and switched it to the undirected price
+  # move, and the exit group was given two keys so the GA can actually train
+  # it. Measured across the twenty-pair cross-section, 120 runs and 1,270
+  # trades, on captured share of the reachable move:
+  #
+  #              trades   median hold   captured   gave back >half   yield
+  #   linear        437    48 candles     +18.6%             78.3%   +16.1%
+  #   dual          833     2 candles     -17.2%             97.0%   -14.1%
+  #
+  # Worse on 16 of 20 pairs, mean difference -52.7pp, paired t(19) = -4.98.
+  # That is the first cleanly powered comparison in this project, and the
+  # reason it is powered is the metric: yield gives ONE observation per run, so
+  # every knob measured on it died inside its seed spread, while captured share
+  # gives one per TRADE and had 1,270 of them.
+  #
+  # Read the median hold for the mechanism. Dual holds TWO candles. The scale
+  # fix moved the exit from impossible — it used to need +40% to hold a long —
+  # straight to hair-trigger, without finding the middle. Captured share is
+  # NEGATIVE, so its trades close below where they opened on average, and 97%
+  # of them give back most of what they reached. A likely culprit is
+  # ScaledReturn.HALF at 2%: a SIX_HOUR candle moves about 1%, so the exit
+  # score crosses sell_threshold on ordinary noise.
+  #
   # dual remains available and TwoSidedModel still guards the one-sided failure
-  # on linear. Before dual is adopted again its exit group needs at least two
-  # keys, so the scaling leaves it a degree of freedom, and position_pnl needs
-  # either normalizing into [0, 1] or its own thresholds — a raw return and a
-  # min-max column do not belong on the same scale.
+  # on linear. Do not adopt it again without measuring captured share, and do
+  # not build a trailing stop on top of it while its exit fires in two candles.
   design: "linear"
   # Empty on purpose: the exit model is then a single weight on position_pnl, a
   # learned trailing stop, and the genome carries the same 8 weights linear did.
