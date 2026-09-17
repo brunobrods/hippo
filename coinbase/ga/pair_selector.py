@@ -607,7 +607,9 @@ class TrainedPair:
                 "retrain to let the GA actually use them",
                 self._pair, ", ".join(backfilled.missing()),
             )
-        model = SignalDesign(self.config.design).model(backfilled.filled(), shape)
+        model = SignalDesign(self.config.design).model(
+            backfilled.filled(), shape, self.config.exit_pnl_scale,
+        )
         return GaStrategy(model, self.config)
 
     # This genome's own key list, from its own design and exit_keys. The

@@ -59,7 +59,7 @@ def _all_weight_on_sma_short() -> Genome:
 # a separate design from the policy. These tests are about the policy, so they
 # go through the configured design exactly as every production caller does.
 def _ga_strategy(genome: Genome, config: StrategyConfig, keys: tuple[str, ...]) -> GaStrategy:
-    return GaStrategy(SignalDesign(config.design).model(genome, keys), config)
+    return GaStrategy(SignalDesign(config.design).model(genome, keys, 0.02), config)
 
 
 # ── StrategyConfigFile ───────────────────────────────────────────────
@@ -509,7 +509,7 @@ def _signed_row(**cols) -> dict:
 # ── SignalDesign ─────────────────────────────────────────────────────
 
 def test_the_linear_design_builds_a_linear_signal():
-    model = SignalDesign("linear").model(_all_weight_on_sma_short(), _KEYS)
+    model = SignalDesign("linear").model(_all_weight_on_sma_short(), _KEYS, 0.02)
     assert isinstance(model, LinearSignal)
     assert isinstance(SignalDesign("linear").scaling(), L1Scaling)
 
@@ -518,7 +518,7 @@ def test_an_unknown_design_raises_rather_than_scoring_through_the_wrong_function
     # A genome trained under a design this build does not have is a bag of
     # numbers; scoring it linearly would produce a plausible, wrong answer.
     with pytest.raises(ValueError, match="unknown strategy.design"):
-        SignalDesign("mlp").model(_all_weight_on_sma_short(), _KEYS)
+        SignalDesign("mlp").model(_all_weight_on_sma_short(), _KEYS, 0.02)
     with pytest.raises(ValueError, match="unknown strategy.design"):
         SignalDesign("mlp").scaling()
 

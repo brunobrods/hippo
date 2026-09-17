@@ -167,6 +167,8 @@ def test_trained_strategy_as_dict():
         "design": "linear",
         "take_profit_pct": 0.0,
         "exit_keys": [],
+        "exit_pnl_scale": 0.02,
+        "exit_quantile": 0.1,
     }
 
 
@@ -269,6 +271,8 @@ def test_strategy_json_round_trips_through_disk(tmp_path):
         "design": "linear",
         "take_profit_pct": 0.0,
         "exit_keys": [],
+        "exit_pnl_scale": 0.02,
+        "exit_quantile": 0.1,
     }
 
 

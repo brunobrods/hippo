@@ -231,6 +231,34 @@ strategy:
   # dual remains available and TwoSidedModel still guards the one-sided failure
   # on linear. Do not adopt it again without measuring captured share, and do
   # not build a trailing stop on top of it while its exit fires in two candles.
+  #
+  # TWO MORE FIXES WERE THEN TRIED, AND DUAL STILL LOST. ScaledReturn's
+  # half-point became the configurable exit_pnl_scale and was swept at 0.05 and
+  # 0.10, and then the hold band itself was calibrated per genome from its own
+  # exit-score distribution rather than from linear's hand-set 0.40/0.45. Same
+  # twenty pairs, three seeds, SIX_HOUR, costs charged, same metric:
+  #
+  #   arm                 trades   median hold   captured   vs linear
+  #   linear                 437     48 candles     +18.6%          —
+  #   dual, scale 0.02       833      2            -17.2%   -52.7pp (t -4.98)
+  #   dual, scale 0.05       737      2             -7.9%   -50.8pp (t -4.64)
+  #   dual, scale 0.10       796      2            -18.1%   -51.9pp (t -4.92)
+  #   dual, calibrated      1015      2            -22.6%   -57.1pp (t -5.84)
+  #
+  # So the 2% half-point named above as the likely culprit was NOT the culprit.
+  # The calibration did take effect — all 60 genomes saved their own bands
+  # (sell 0.34-0.57, cover 0.40-0.63), none the old 0.40/0.45 — and it changed
+  # nothing that matters. THE MEDIAN HOLD NEVER MOVED OFF TWO CANDLES at any
+  # scale or any band, and calibrated against the hand-set dual is t = +0.09.
+  # That is the falsifier the sweep file pre-registered: an exit score close to
+  # white noise touches its own tail within a candle or two wherever the tail
+  # is drawn, so the band was never what held the position.
+  #
+  # DUAL IS DROPPED. Not deleted — the design, exit_pnl_scale and exit_quantile
+  # all still work, and a saved dual genome still loads and reproduces itself.
+  # But four fixes in a row failed to lengthen a hold, so the next attempt needs
+  # a different mechanism (a minimum hold, a smoothed or slower exit score, an
+  # exit trained on its own objective), NOT a fifth threshold.
   design: "linear"
   # Empty on purpose: the exit model is then a single weight on position_pnl, a
   # learned trailing stop, and the genome carries the same 8 weights linear did.

@@ -1,5 +1,6 @@
 import functools
 import math
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
@@ -82,6 +83,21 @@ class StrategyConfig:
     # wearing the same weights. That is the drift TrainedStrategyConfig exists
     # to prevent, and the same gap take_profit_pct had before PR #20.
     exit_keys:             tuple[str, ...] = ()
+    # The unrealized move at which the dual exit model's position_pnl term
+    # reads 0.88 (ahead) or 0.12 (behind) — see ScaledReturn. Saved with the
+    # genome for the same reason exit_keys is: it changes what the model
+    # computes, so a genome rebuilt at a different scale is a different model.
+    #
+    # 0.02 was a guess and it measured badly. At SIX_HOUR a candle moves about
+    # 1%, so a 2% half-point puts the exit score across sell_threshold on
+    # ordinary noise — the corrected dual exit held a median of TWO candles
+    # against linear's forty-eight. Sweep it rather than assuming it.
+    exit_pnl_scale:        float = 0.02
+    # Which tail of the exit model's own birth distribution counts as "leave".
+    # 0.10 means a long closes when the exit score is in the bottom tenth of
+    # what that model reads across the window, and a short when it is in the
+    # top tenth. Only the dual design uses it — see CalibratedExit.
+    exit_quantile:         float = 0.10
 
 
 class StrategyConfigFile:
@@ -105,6 +121,8 @@ class StrategyConfigFile:
             design                = str(section.get("design", LINEAR_DESIGN)),
             take_profit_pct       = float(section.get("take_profit_pct", 0.0)),
             exit_keys             = tuple(section.get("exit_keys") or ()),
+            exit_pnl_scale        = float(section.get("exit_pnl_scale", 0.02)),
+            exit_quantile         = float(section.get("exit_quantile", 0.10)),
         )
 
 
@@ -154,6 +172,18 @@ class ValidatedStrategyConfig:
         if c.borrow_bps_per_hour < 0.0:
             found.append(
                 f"strategy.borrow_bps_per_hour must not be negative, got {c.borrow_bps_per_hour}"
+            )
+        if not 0.0 < c.exit_quantile < 0.5:
+            found.append(
+                f"strategy.exit_quantile must be in (0, 0.5) — it names a tail "
+                f"of the exit model's own distribution, got {c.exit_quantile}"
+            )
+        # A zero or negative scale divides by zero or inverts the term, and the
+        # failure would surface as a strategy that never exits rather than as
+        # an error.
+        if c.exit_pnl_scale <= 0.0:
+            found.append(
+                f"strategy.exit_pnl_scale must be positive, got {c.exit_pnl_scale}"
             )
         # Checked here so a misspelled design fails before a multi-hour training
         # run, not after it — the same reason ExperimentIndex is checked up front.
@@ -305,13 +335,12 @@ class LinearSignal:
 # that design was scored on the raw return, and rescaling it now would silently
 # change what all of them mean.
 class ScaledReturn:
-    HALF = 0.02
-
-    def __init__(self, unrealized_return: float) -> None:
+    def __init__(self, unrealized_return: float, half: float) -> None:
         self._value = unrealized_return
+        self._half  = half
 
     def value(self) -> float:
-        return 0.5 + 0.5 * math.tanh(self._value / self.HALF)
+        return 0.5 + 0.5 * math.tanh(self._value / self._half)
 
 
 # Two models in one genome: one scored while FLAT, deciding whether to enter,
@@ -341,9 +370,10 @@ class ScaledReturn:
 # difficulty. An exit rule mostly needs to know its own P&L and whether the
 # short-horizon move turned.
 class DualSignal:
-    def __init__(self, genome: Genome, keys: tuple[str, ...]) -> None:
-        self._genome = genome
-        self._keys   = keys
+    def __init__(self, genome: Genome, keys: tuple[str, ...], exit_pnl_scale: float) -> None:
+        self._genome         = genome
+        self._keys           = keys
+        self._exit_pnl_scale = exit_pnl_scale
 
     def score(self, row: dict[str, float], position: Optional[Position]) -> float:
         if position is None:
@@ -400,7 +430,7 @@ class DualSignal:
     def _reading(self, key: str, row: dict[str, float], pnl: float) -> float:
         column = key.split(GROUP_SEPARATOR, 1)[1]
         if column == POSITION_PNL_KEY:
-            return ScaledReturn(pnl).value()
+            return ScaledReturn(pnl, self._exit_pnl_scale).value()
         return row[f"norm_{column}"]
 
     # Lifts a signed model's floor back to zero, per group, for the same reason
@@ -412,6 +442,77 @@ class DualSignal:
         return sum(max(-self._genome.weight(key), 0.0) for key in keys)
 
 
+# Exit thresholds set from the exit model's OWN score distribution, rather than
+# from numbers calibrated against a different model.
+#
+# This exists because splitting entry and exit broke a guarantee the linear
+# design gets for free. Under linear, one score decides both: a long opens only
+# above buy_threshold 0.60 and closes when THAT SAME score falls to 0.40, so a
+# position is born far from its own exit by construction. Measured over 467
+# linear entries, exactly 0% were already past their exit threshold on the
+# candle they opened.
+#
+# A dual genome's exit model is a different function, and its value at entry is
+# arbitrary — it clusters near 0.5, and 21% to 31% of positions were born
+# ALREADY past the threshold that closes them. They were doomed before their
+# first candle, which is why the median hold was two candles at every
+# exit_pnl_scale tried: the problem is where the exit score STARTS, not how
+# fast it moves.
+#
+# So the thresholds become quantiles of the model's own birth distribution.
+# "Exit" then means "unusually bearish for this model" rather than "below 0.40",
+# which is what it already means under linear. The distribution is measured with
+# the position flat — position_pnl reads exactly 0.5 at zero unrealized move —
+# because that is the score every position is born with.
+#
+# Calibrated per genome and per window, so it has to be recomputed wherever a
+# genome is scored. It is saved with the genome for the same reason exit_keys
+# and exit_pnl_scale are: a dual genome rehydrated against another genome's
+# thresholds is a different strategy wearing the same weights.
+class CalibratedExit:
+    def __init__(
+        self,
+        model: SignalModel,
+        frame: pd.DataFrame,
+        config: StrategyConfig,
+    ) -> None:
+        self._model  = model
+        self._frame  = frame
+        self._config = config
+
+    # Unchanged for linear, which needs no calibration and whose every recorded
+    # run must keep reproducing its own numbers.
+    def config(self) -> StrategyConfig:
+        if self._config.design != DUAL_DESIGN:
+            return self._config
+        low, high = self._quantiles()
+        return dataclasses.replace(
+            self._config, sell_threshold=low, short_exit_threshold=high,
+        )
+
+    @functools.cached_property
+    def _birth_scores(self) -> "pd.Series":
+        # A position opened at this row's own close has zero unrealized move,
+        # so this is the exit score each candle would hand a new position.
+        return pd.Series([
+            self._model.score(row, Position(row["close"], 1.0, Direction.LONG))
+            for row in self._frame.to_dict("records")
+        ])
+
+    def _quantiles(self) -> tuple[float, float]:
+        scores = self._birth_scores
+        low  = float(scores.quantile(self._config.exit_quantile))
+        high = float(scores.quantile(1.0 - self._config.exit_quantile))
+        # ValidatedStrategyConfig requires sell <= buy and cover >= short_entry,
+        # and a degenerate window could produce a flat distribution that breaks
+        # either. Clamping keeps a pathological genome scoreable rather than
+        # aborting a whole sweep on one point.
+        return (
+            min(low, self._config.buy_threshold),
+            max(high, self._config.short_entry_threshold),
+        )
+
+
 # The one place that maps a design NAME to its objects. Every caller that
 # rebuilds a strategy from a saved genome goes through here, so an unknown
 # design fails loudly at the single point that knows the list, rather than
@@ -420,11 +521,15 @@ class SignalDesign:
     def __init__(self, name: str) -> None:
         self._name = name
 
-    def model(self, genome: Genome, keys: tuple[str, ...]) -> SignalModel:
+    # exit_pnl_scale is REQUIRED rather than defaulted. It is ignored by the
+    # linear design, but a default here would be silently wrong for any caller
+    # that forgot to thread it through — which is exactly how a genome came to
+    # be rebuilt against the wrong exit_keys.
+    def model(self, genome: Genome, keys: tuple[str, ...], exit_pnl_scale: float) -> SignalModel:
         if self._name == LINEAR_DESIGN:
             return LinearSignal(genome, keys)
         if self._name == DUAL_DESIGN:
-            return DualSignal(genome, keys)
+            return DualSignal(genome, keys, exit_pnl_scale)
         raise ValueError(self._unknown())
 
     def scaling(self) -> WeightScaling:
@@ -711,9 +816,23 @@ class StrategyEvaluator:
             self._duration_seconds(),
         ).value()
 
+    # The thresholds this genome is scored under. For linear it is the config
+    # unchanged; for dual the exit bands are quantiles of that genome's own
+    # exit-score distribution — see CalibratedExit. Public because the training
+    # run has to SAVE these alongside the genome: scoring it here under one set
+    # of thresholds and papering it under another is the drift
+    # TrainedStrategyConfig exists to prevent.
+    def calibrated(self, genome: Genome) -> StrategyConfig:
+        return CalibratedExit(self._model(genome), self._frame, self._config).config()
+
+    def _model(self, genome: Genome) -> SignalModel:
+        return SignalDesign(self._config.design).model(
+            genome, self._keys, self._config.exit_pnl_scale,
+        )
+
     def result(self, genome: Genome) -> BacktestResult:
-        model    = SignalDesign(self._config.design).model(genome, self._keys)
-        strategy = GaStrategy(model, self._config)
+        model    = self._model(genome)
+        strategy = GaStrategy(model, self.calibrated(genome))
         return Backtest(
             self._rows, strategy, self._config.starting_balance, self._config.unwind_at_entry_price,
             ConfiguredFees(self._config.fee_bps).schedule(),

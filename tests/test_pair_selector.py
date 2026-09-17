@@ -36,7 +36,7 @@ def _config(buy: float = 0.6, sell: float = 0.4, short: bool = False,
 # test can dictate the score candle by candle.
 def _strategy(config: StrategyConfig) -> GaStrategy:
     return GaStrategy(
-        SignalDesign(config.design).model(Genome({"rsi": 1.0}), ("rsi",)), config,
+        SignalDesign(config.design).model(Genome({"rsi": 1.0}), ("rsi",), 0.02), config,
     )
 
 
