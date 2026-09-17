@@ -3,7 +3,11 @@ import pytest
 
 from coinbase.ga import strategy_evaluator
 from coinbase.ga.ga_engine import Genome
-from coinbase.ga.market_data_processor import IndicatorFrame, IndicatorPeriods
+from coinbase.ga.market_data_processor import (
+    IndicatorFrame,
+    IndicatorPeriods,
+    MarketDataConfig,
+)
 from coinbase.ga.strategy_evaluator import (
     StrategyConfig,
     StrategyConfigFile,
@@ -100,9 +104,38 @@ def test_a_zero_multiple_rests_no_order_at_all():
 
 # A frame without the column would otherwise price every target at zero, which
 # reads as "no take-profit" — a configured knob silently doing nothing.
+# The one case that would break if the target were ever hoisted out of the loop
+# or cached on the strategy: each position reads its OWN entry candle.
+def test_a_second_position_gets_its_own_target():
+    # Entry at 2% ATR -> target 106, filled on candle 1. The book re-enters on
+    # that same candle's close, where ATR is 5% -> target 115, which candle 3's
+    # high of 120 reaches. A stale 6% target would have booked 6.0 twice.
+    frame  = _frame([
+        (100.0, 100.0, 100.0, 0.02),
+        (100.0, 106.0, 100.0, 0.05),
+        (100.0, 100.0, 100.0, 0.05),
+        (100.0, 120.0, 100.0, 0.05),
+    ])
+    result = Backtest(
+        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrTakeProfit(3.0),
+    ).run()
+
+    # The third trade is the re-entry the window cut short, unwound at its own
+    # entry price; the two that the resting order closed are what this asserts.
+    profits = [trade.profit() for trade in result.trades()]
+    assert profits[:2] == [pytest.approx(6.0), pytest.approx(15.0)]
+
+
 def test_a_frame_without_atr_pct_raises_rather_than_resting_nothing():
     with pytest.raises(ValueError, match="atr_pct"):
         AtrTakeProfit(3.0).fraction({"close": 100.0})
+
+
+# NaN compares False against every threshold, so it would rest an order that
+# can never fill — the same silence a missing column is raised for.
+def test_a_nan_atr_raises_rather_than_resting_nothing():
+    with pytest.raises(ValueError, match="NaN"):
+        AtrTakeProfit(3.0).fraction({"atr_pct": float("nan")})
 
 
 def test_a_fixed_target_ignores_the_row_entirely():
@@ -137,6 +170,37 @@ def test_adding_atr_costs_no_rows():
     candles = _candles(120)
     default = IndicatorFrame(candles, IndicatorPeriods()).dataframe
     assert len(default) == len(candles) - (IndicatorPeriods().sma_extra_period - 1)
+
+
+# Directly: the frame with the column is exactly as long as one whose ATR
+# warm-up is a single candle, so the column itself drops nothing.
+def test_the_column_drops_no_rows_of_its_own():
+    candles = _candles(120)
+    assert (
+        len(IndicatorFrame(candles, IndicatorPeriods()).dataframe)
+        == len(IndicatorFrame(candles, IndicatorPeriods(atr_period=1)).dataframe)
+    )
+
+
+# Which only holds while the ATR warm-up hides behind a scored one. Longer, and
+# the window would silently shorten — so the config refuses it.
+def test_an_atr_period_longer_than_every_scored_indicator_is_rejected():
+    raw = {"strategy": {"indicators": {
+        "sma_short_period": 9, "sma_long_period": 20, "sma_extra_period": 50,
+        "rsi_period": 14, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+        "atr_period": 120,
+    }}}
+    with pytest.raises(ValueError, match="atr_period"):
+        MarketDataConfig(raw).periods()
+
+
+def test_an_atr_period_inside_the_existing_warm_up_is_accepted():
+    raw = {"strategy": {"indicators": {
+        "sma_short_period": 9, "sma_long_period": 20, "sma_extra_period": 50,
+        "rsi_period": 14, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+        "atr_period": 50,
+    }}}
+    assert MarketDataConfig(raw).periods().atr_period == 50
 
 
 # ── Config ───────────────────────────────────────────────────────────
@@ -205,7 +269,11 @@ def _target_seen_by_backtest(monkeypatch, **overrides) -> object:
 
     class RecordingBacktest(real):
         def __init__(self, *args: object, **kwargs: object) -> None:
-            seen.append(args[-1])
+            # By shape, not by position: an argument added to Backtest later
+            # would otherwise leave this test quietly asserting about the wrong
+            # thing rather than failing.
+            targets = [a for a in (*args, *kwargs.values()) if hasattr(a, "fraction")]
+            seen.append(targets[-1])
             super().__init__(*args, **kwargs)
 
     monkeypatch.setattr(strategy_evaluator, "Backtest", RecordingBacktest)
@@ -235,8 +303,19 @@ def test_a_config_setting_neither_rests_nothing(monkeypatch):
 
 
 def test_either_target_alone_is_accepted():
-    for section in (
-        _section(take_profit_pct=0.05),
-        _section(take_profit_atr_mult=3.0),
-    ):
-        assert ValidatedStrategyConfig(StrategyConfigFile(section).config()).config()
+    fixed = ValidatedStrategyConfig(
+        StrategyConfigFile(_section(take_profit_pct=0.05)).config(),
+    ).config()
+    scaled = ValidatedStrategyConfig(
+        StrategyConfigFile(_section(take_profit_atr_mult=3.0)).config(),
+    ).config()
+
+    assert (fixed.take_profit_pct, fixed.take_profit_atr_mult) == (0.05, 0.0)
+    assert (scaled.take_profit_pct, scaled.take_profit_atr_mult) == (0.0, 3.0)
+
+
+def test_a_negative_fixed_target_is_rejected_too():
+    with pytest.raises(ValueError, match="take_profit_pct"):
+        ValidatedStrategyConfig(
+            StrategyConfigFile(_section(take_profit_pct=-0.05)).config(),
+        ).config()

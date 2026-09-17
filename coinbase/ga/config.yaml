@@ -395,8 +395,14 @@ strategy:
     macd_signal: 9
     # Feeds the atr_pct column that take_profit_atr_mult above reads. It is NOT
     # a scored column and does not belong in normalized_columns or weight_keys.
-    # Its warm-up (14) is shorter than sma_extra_period's (50), so the column
-    # costs no rows — every recorded run's window is exactly what it was.
+    #
+    # 14 is shorter than sma_extra_period's 50, so the column costs no rows —
+    # every recorded run's window is exactly what it was. That is the whole
+    # condition for the column being free, and it is enforced: a period longer
+    # than every scored indicator is refused rather than silently shortening
+    # the window. Leave this key out entirely and the ATR takes 14, or the
+    # scored warm-up when that is shorter, which is how a config with small
+    # periods keeps its own window.
     atr_period: 14
   # Which normalized columns the GA assigns a weight to and scores on.
   #

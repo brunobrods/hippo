@@ -305,7 +305,27 @@ class IsolatedMargin:
 #   low reaches the liquidation gives no way to know which came first, and
 #   assuming the favourable one invents money. Backtest therefore runs
 #   liquidate() BEFORE this, so the adverse event always wins a tie.
-# How far from entry the resting exit sits, decided ONCE on the candle the
+class TakeProfit:
+    def __init__(self, position: Position, fraction: float) -> None:
+        self._position = position
+        self._fraction = fraction
+
+    def price(self) -> float:
+        entry = self._position.entry_price()
+        if self._position.direction() is Direction.LONG:
+            return entry * (1.0 + self._fraction)
+        return entry * (1.0 - self._fraction)
+
+    def reached_by(self, high: float, low: float) -> bool:
+        if self._fraction <= 0.0:
+            return False
+        if self._position.direction() is Direction.LONG:
+            return high >= self.price()
+        return low <= self.price()
+
+
+# ── How far away the resting exit sits ───────────────────────────────────
+# The distance above TakeProfit is given, decided ONCE on the candle the
 # position opens. A fixed fraction is one answer; a multiple of the pair's own
 # volatility is the other, and the second exists because the first is not
 # transferable: the best fixed level measured anywhere from 0% to beyond 20%
@@ -340,27 +360,17 @@ class AtrTakeProfit:
                 "atr_pct column — IndicatorFrame supplies it; a frame built "
                 "elsewhere must too"
             )
-        return self._multiple * float(row["atr_pct"])
-
-
-class TakeProfit:
-    def __init__(self, position: Position, fraction: float) -> None:
-        self._position = position
-        self._fraction = fraction
-
-    def price(self) -> float:
-        entry = self._position.entry_price()
-        if self._position.direction() is Direction.LONG:
-            return entry * (1.0 + self._fraction)
-        return entry * (1.0 - self._fraction)
-
-    def reached_by(self, high: float, low: float) -> bool:
-        if self._fraction <= 0.0:
-            return False
-        if self._position.direction() is Direction.LONG:
-            return high >= self.price()
-        return low <= self.price()
-
+        atr = float(row["atr_pct"])
+        # NaN compares False against every threshold, so a NaN here would rest
+        # an order that can never fill and read as "no take-profit" — the same
+        # silence the missing column is raised for. IndicatorFrame drops these
+        # rows, so reaching this means the frame came from somewhere else.
+        if atr != atr:
+            raise ValueError(
+                "atr_pct is NaN on the candle this position opened, so no "
+                "resting price exists — the frame has not dropped its warm-up rows"
+            )
+        return self._multiple * atr
 
 # ── Strategy contract ────────────────────────────────────────────────────
 

@@ -30,10 +30,64 @@ class IndicatorPeriods:
     macd_slow:         int = 26
     macd_signal:       int = 9
     # Feeds the atr_pct column, which is NOT scored — it is read by the resting
-    # take-profit target to size itself against the pair's own volatility. Its
-    # warm-up is shorter than sma_extra_period's, so adding the column costs no
-    # rows and every recorded run's window is unchanged.
-    atr_period:        int = 14
+    # take-profit target to size itself against the pair's own volatility.
+    #
+    # None means "14, or the longest scored period if that is shorter". The
+    # fallback is what keeps the column free: IndicatorFrame drops every row any
+    # column is NaN on, so an ATR warm-up reaching past the scored ones would
+    # shorten the window for every run, including the small-period configs that
+    # predate this column. Name a period explicitly and it is used as given —
+    # and refused if it would cost rows. See AtrPeriod and ValidatedPeriods.
+    atr_period:        Optional[int] = None
+
+
+# The warm-up the scored columns already impose. atr_pct is a free column only
+# while its own warm-up hides behind this: IndicatorFrame drops every row any
+# column is NaN on, so an ATR reaching further back would shorten the window
+# for every run — the frame would still build, the run would still finish, and
+# it would have been trained and tested on less data than its config says.
+class LongestScoredPeriod:
+    def __init__(self, periods: "IndicatorPeriods") -> None:
+        self._periods = periods
+
+    def length(self) -> int:
+        p = self._periods
+        return max(p.sma_extra_period, p.sma_long_period, p.sma_short_period,
+                   p.rsi_period, p.macd_slow)
+
+
+# Unset, the ATR takes the conventional 14 — or the scored warm-up, when that
+# is shorter. A config written before this column existed therefore keeps its
+# exact window rather than losing rows to an indicator it never asked for.
+class AtrPeriod:
+    DEFAULT = 14
+
+    def __init__(self, periods: "IndicatorPeriods") -> None:
+        self._periods = periods
+
+    def length(self) -> int:
+        named = self._periods.atr_period
+        if named is not None:
+            return named
+        return min(self.DEFAULT, LongestScoredPeriod(self._periods).length())
+
+
+# A period named explicitly is used as given — and refused when it would cost
+# rows, because silently trading window length for a smoother ATR is the kind
+# of change nobody would find afterwards.
+class ValidatedPeriods:
+    def __init__(self, periods: IndicatorPeriods) -> None:
+        self._periods = periods
+
+    def periods(self) -> IndicatorPeriods:
+        longest = LongestScoredPeriod(self._periods).length()
+        if self._periods.atr_period is not None and self._periods.atr_period > longest:
+            raise ValueError(
+                f"strategy.indicators.atr_period ({self._periods.atr_period}) is longer "
+                f"than every scored indicator ({longest}), so the atr_pct column would "
+                f"drop rows the rest of the frame keeps and silently shorten the window"
+            )
+        return self._periods
 
 
 @dataclass(frozen=True)
@@ -79,7 +133,9 @@ class MarketDataConfig:
         )
 
     def periods(self) -> IndicatorPeriods:
-        return IndicatorPeriods(**self._raw["strategy"]["indicators"])
+        return ValidatedPeriods(
+            IndicatorPeriods(**self._raw["strategy"]["indicators"]),
+        ).periods()
 
     def normalized_columns(self) -> tuple[str, ...]:
         return tuple(self._raw["market_data"]["normalized_columns"])
@@ -403,7 +459,8 @@ class IndicatorFrame:
             # use a scale: AtrTakeProfit reads it to place a target at a
             # distance this pair actually reaches.
             "atr_pct":        AverageTrueRange(
-                TrueRange(highs, lows, closes).series, closes, self._periods.atr_period,
+                TrueRange(highs, lows, closes).series, closes,
+                AtrPeriod(self._periods).length(),
             ).percent,
         })
         if self._index_returns is not None:

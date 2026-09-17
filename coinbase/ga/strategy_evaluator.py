@@ -87,6 +87,14 @@ class StrategyConfig:
     # Saved with the genome for the reason take_profit_pct is: the target
     # decides when a position closes, so a genome papered without it trades a
     # strategy nobody scored.
+    #
+    # WHICH IS EXACTLY WHAT PAPER TRADING STILL DOES. paper_engine ticks
+    # Ledger directly — liquidate, decide, apply — with no resting order of
+    # either kind, so a genome trained with a target is papered without one and
+    # exits on closes alone. The gap predates this knob (take_profit_pct has
+    # it too, and nothing has ever been papered with a non-zero target) but a
+    # winning arm here would make it live. Saving the value is what lets the
+    # paper side honour it later; honouring it is not built.
     take_profit_atr_mult:  float = 0.0
     # Which columns the EXIT model of a dual genome scores. Ignored by linear.
     #
@@ -191,6 +199,13 @@ class ValidatedStrategyConfig:
         if c.borrow_bps_per_hour < 0.0:
             found.append(
                 f"strategy.borrow_bps_per_hour must not be negative, got {c.borrow_bps_per_hour}"
+            )
+        # Both targets, for the same reason fee_bps is checked: a negative one
+        # is read as "no resting order" by TakeProfit's own 0.0 guard, so a
+        # sign typo scores a run with the knob silently doing nothing.
+        if c.take_profit_pct < 0.0:
+            found.append(
+                f"strategy.take_profit_pct must not be negative, got {c.take_profit_pct}"
             )
         if c.take_profit_atr_mult < 0.0:
             found.append(

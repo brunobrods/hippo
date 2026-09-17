@@ -1,0 +1,109 @@
+# Does a take-profit target priced in the pair's OWN volatility pay?
+#
+# THIS FILE IS THE k = 8 ARM — a target at the p75 of reachable move, which
+# 25% of holds reach.
+#
+# A fixed take_profit_pct has been measured twice and retired twice, and both
+# failures were a level in the wrong place for the pair it was applied to.
+# Below a pair's own reachable move the target fires on nearly every hold and
+# the genome goes inert — three different weight vectors returned a bit-
+# identical book at 0.08 on BTC. Above it, the target never fires. The MFE
+# sweep fixed that by computing each pair's percentiles BY HAND, which is not
+# something a config can carry to a pair nobody has measured.
+#
+# take_profit_atr_mult carries it: the order rests at k x the entry candle's
+# atr_pct, so one k lands at the same place in every pair's distribution.
+#
+# ── Where the arms come from ──────────────────────────────────────────
+#
+# Measured over the 437 trades the LINEAR control took across these same
+# twenty pairs (the run set behind PR #35's comparison), as the reachable move
+# divided by the entry candle's atr_pct:
+#
+#   percentile of reachable move     k       trades that reach that k
+#             p25                  1.87              73.7%
+#             p50                  4.16              51.0%
+#             p75                  8.00              25.2%
+#
+# So k of 2, 4 and 8 sit on that distribution's quartiles and each arm fires on
+# a known, different share of holds. Median entry atr_pct is 3.75%, so these
+# are roughly 7.5%, 15% and 30% targets — and the SAME arm is a 4.9% target on
+# the quietest pair and 9.3% on the wildest, which is the entire point.
+#
+# ── ONE ARM PER FILE, on purpose ──────────────────────────────────────
+#
+# SweepPlan is one-factor-at-a-time by construction: each axis value is applied
+# to the UNMODIFIED base config and never combined with another axis's value.
+# Putting the multiple and the pair list on two axes therefore does NOT produce
+# their cross product — it produces the multiples on config.yaml's own pair and
+# the pairs at config.yaml's own multiple. That mistake was made here and run;
+# it measured three arms on one out-of-universe pair. The arm belongs in
+# `fixed:` with data.pair as the only axis, which is what every other twenty-
+# pair sweep in this directory does.
+#
+# ── What would make this another dead knob ────────────────────────────
+#
+# READ THE SEED SPREAD AND THE TRADE COUNT FIRST. If an arm's seeds return
+# identical books the genome is inert and the exit rule is the whole strategy —
+# that says nothing about a trained model, and it is how the +24.4% that
+# started this line of work got believed.
+#
+# Then read CAPTURED SHARE before yield. Every take-profit arm ever measured
+# raised capture (23.6% to 52-70%) without moving yield, because keeping more
+# of fewer trades is a wash. Yield carries one observation per run and six
+# trades per run cannot separate anything. If capture rises and yield does not,
+# that is the same wash again: retire the knob rather than sweep a fourth k.
+#
+# Note what unwind_at_entry_price does to any target: a still-open loser is
+# booked at its own entry price, so a target that takes winners early while
+# losers keep running carries its losses off the books entirely. Win rate is no
+# defence here, and there is still no stop loss on the other side.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_tp_atr_8_6h.yaml --workers 6
+#
+# 60 points: ~12 min across 6 workers. All windows cached.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  strategy.design: "linear"
+  # THE LINE UNDER TEST.
+  strategy.take_profit_atr_mult: 8.0
+  # The fixed target stays off: a position rests ONE order, and setting both is
+  # a validation error.
+  strategy.take_profit_pct: 0.0
+
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-02-28"
+
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+  genetic_algorithm.allow_negative_weights: false
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "AAVE-USDT"
+      - "ADA-USDT"
+      - "AVAX-USDT"
+      - "BICO-USDT"
+      - "DASH-USDT"
+      - "DEXE-USDT"
+      - "DOGE-USDT"
+      - "ETH-USDT"
+      - "FET-USDT"
+      - "LINK-USDT"
+      - "NEAR-USDT"
+      - "ONG-USDT"
+      - "PROM-USDT"
+      - "SOL-USDT"
+      - "SUI-USDT"
+      - "UNI-USDT"
+      - "WLD-USDT"
+      - "XLM-USDT"
+      - "XRP-USDT"
+      - "ZEC-USDT"
