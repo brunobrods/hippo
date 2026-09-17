@@ -1,0 +1,126 @@
+# Does a take-profit target priced in the pair's OWN volatility pay?
+#
+# THE CONTROL ARM: 0.0 rests no order at all, every fill at a close. Run it
+# alongside the others so the comparison is same-code, same-window, same-seeds
+# rather than against a number carried over from an earlier commit.
+#
+# A fixed take_profit_pct has been measured twice and retired twice, and both
+# failures were a level in the wrong place for the pair it was applied to.
+# Below a pair's own reachable move the target fires on nearly every hold and
+# the genome goes inert — three different weight vectors returned a bit-
+# identical book at 0.08 on BTC. Above it, the target never fires. The MFE
+# sweep fixed that by computing each pair's percentiles BY HAND, which is not
+# something a config can carry to a pair nobody has measured.
+#
+# take_profit_atr_mult carries it: the order rests at k x the entry candle's
+# atr_pct, so one k lands at the same place in every pair's distribution.
+#
+# ── Where the arms come from ──────────────────────────────────────────
+#
+# Measured over the 437 trades the LINEAR control took across these same
+# twenty pairs (the run set behind PR #35's comparison), as the reachable move
+# divided by the entry candle's atr_pct:
+#
+#   percentile of reachable move     k       trades that reach that k
+#             p25                  1.87              73.7%
+#             p50                  4.16              51.0%
+#             p75                  8.00              25.2%
+#
+# So k of 2, 4 and 8 sit on that distribution's quartiles and each arm fires on
+# a known, different share of holds. Median entry atr_pct is 3.75%, so these
+# are roughly 7.5%, 15% and 30% targets — and the SAME arm is a 4.9% target on
+# the quietest pair and 9.3% on the wildest, which is the entire point.
+#
+# ── ONE ARM PER FILE, on purpose ──────────────────────────────────────
+#
+# SweepPlan is one-factor-at-a-time by construction: each axis value is applied
+# to the UNMODIFIED base config and never combined with another axis's value.
+# Putting the multiple and the pair list on two axes therefore does NOT produce
+# their cross product — it produces the multiples on config.yaml's own pair and
+# the pairs at config.yaml's own multiple. That mistake was made here and run;
+# it measured three arms on one out-of-universe pair. The arm belongs in
+# `fixed:` with data.pair as the only axis, which is what every other twenty-
+# pair sweep in this directory does.
+#
+# ── RESULT, 2026-09-17: NO ARM BEAT THE CONTROL ───────────────────────
+#
+#    k   trades/run   median hold   captured   gave back >half    yield
+#   0.0        7.9      48 candles     +16.8%             78.0%   +16.1%
+#   2.0       15.0      13             -7.5%              38.3%   -10.4%
+#   4.0       11.6      22             +3.2%              55.8%    +2.3%
+#   8.0        8.1      41             +7.8%              71.7%    +1.7%
+#
+# Paired per pair: captured -35.3pp (t -2.72), -29.5pp (t -2.56), -15.7pp
+# (t -1.65); yield -26.4pp (t -2.50), -13.8pp (t -1.13), -14.4pp (t -1.58).
+# The tighter the target the more it trades, the shorter it holds and the worse
+# it does; the widest arm is indistinguishable only because it barely fires.
+# "Gave back more than half" DID improve, 78% to 38% — the target does what it
+# promises and still loses, because it takes winners early while losers run.
+# See config.yaml's take_profit_atr_mult comment. Do not sweep a fourth level.
+#
+# ── What would make this another dead knob ────────────────────────────
+#
+# READ THE SEED SPREAD AND THE TRADE COUNT FIRST. If an arm's seeds return
+# identical books the genome is inert and the exit rule is the whole strategy —
+# that says nothing about a trained model, and it is how the +24.4% that
+# started this line of work got believed.
+#
+# Then read CAPTURED SHARE before yield. Every take-profit arm ever measured
+# raised capture (23.6% to 52-70%) without moving yield, because keeping more
+# of fewer trades is a wash. Yield carries one observation per run and six
+# trades per run cannot separate anything. If capture rises and yield does not,
+# that is the same wash again: retire the knob rather than sweep a fourth k.
+#
+# Note what unwind_at_entry_price does to any target: a still-open loser is
+# booked at its own entry price, so a target that takes winners early while
+# losers keep running carries its losses off the books entirely. Win rate is no
+# defence here, and there is still no stop loss on the other side.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_tp_atr_000_6h.yaml --workers 6
+#
+# 60 points: ~12 min across 6 workers. All windows cached.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  strategy.design: "linear"
+  # THE LINE UNDER TEST.
+  strategy.take_profit_atr_mult: 0.0
+  # The fixed target stays off: a position rests ONE order, and setting both is
+  # a validation error.
+  strategy.take_profit_pct: 0.0
+
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-02-28"
+
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+  genetic_algorithm.allow_negative_weights: false
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "AAVE-USDT"
+      - "ADA-USDT"
+      - "AVAX-USDT"
+      - "BICO-USDT"
+      - "DASH-USDT"
+      - "DEXE-USDT"
+      - "DOGE-USDT"
+      - "ETH-USDT"
+      - "FET-USDT"
+      - "LINK-USDT"
+      - "NEAR-USDT"
+      - "ONG-USDT"
+      - "PROM-USDT"
+      - "SOL-USDT"
+      - "SUI-USDT"
+      - "UNI-USDT"
+      - "WLD-USDT"
+      - "XLM-USDT"
+      - "XRP-USDT"
+      - "ZEC-USDT"

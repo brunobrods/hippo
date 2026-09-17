@@ -119,6 +119,11 @@ class TrainedStrategy:
                 # nobody scored. Measured: at 1% it takes 61 trades where the
                 # same genome at 0.0 takes 5.
                 "take_profit_pct":       self._config.take_profit_pct,
+                # The same target in units of the pair's own volatility. Saved
+                # for the same reason, and separately, because the two are not
+                # interchangeable: the multiple only means a price once it is
+                # read against the entry candle's atr_pct.
+                "take_profit_atr_mult":  self._config.take_profit_atr_mult,
                 # The exit model's columns decide a dual genome's SHAPE, so a
                 # genome rebuilt against a different exit_keys is a different
                 # model wearing the same weights. Saved for exactly the reason

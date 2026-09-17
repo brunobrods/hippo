@@ -14,7 +14,10 @@ from coinbase.ga.strategy_output import OutputConfigFile
 DEFAULT_METRIC = "annualized_yield"
 
 # Groupable, but not present in index.csv — read back per run from config.json.
-_CONFIG_COLUMNS = ("weight_keys", "index_pairs", "negative_weights", "fitness_confidence")
+_CONFIG_COLUMNS = (
+    "weight_keys", "index_pairs", "negative_weights", "fitness_confidence",
+    "take_profit_pct", "take_profit_atr_mult",
+)
 
 
 # ── Loading ──────────────────────────────────────────────────────────────
@@ -75,10 +78,17 @@ class ExperimentConfigs:
         # the round trip is paid. Not an index column, and a sweep over it is
         # unreadable without this.
         frame["take_profit_pct"]    = frame["run_id"].map(self._take_profit_pct)
+        # The same target measured in the pair's own volatility. Mapped beside
+        # the fixed one because a sweep varies THIS path now, and grouping by a
+        # column nobody wrote is a KeyError rather than a wrong number.
+        frame["take_profit_atr_mult"] = frame["run_id"].map(self._take_profit_atr_mult)
         return frame
 
     def _take_profit_pct(self, run_id: str) -> float:
         return float((self._raw(run_id).get("strategy") or {}).get("take_profit_pct", 0.0))
+
+    def _take_profit_atr_mult(self, run_id: str) -> float:
+        return float((self._raw(run_id).get("strategy") or {}).get("take_profit_atr_mult", 0.0))
 
     def _design(self, run_id: str) -> str:
         return str((self._raw(run_id).get("strategy") or {}).get("design", LINEAR_DESIGN))

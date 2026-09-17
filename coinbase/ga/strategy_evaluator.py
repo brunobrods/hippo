@@ -9,14 +9,17 @@ import pandas as pd
 from coinbase.ga.ga_engine import Genome, GroupedL1Scaling, L1Scaling, WeightScaling
 from coinbase.trading_strategy import (
     Action,
+    AtrTakeProfit,
     Backtest,
     BacktestResult,
     ConfiguredBorrowRate,
     ConfiguredFees,
     Decision,
     Direction,
+    FixedTakeProfit,
     MarketRows,
     Position,
+    TakeProfitTarget,
     Trade,
 )
 
@@ -70,6 +73,29 @@ class StrategyConfig:
     # rests from the moment the position opens. 0.0 leaves every fill at a
     # close, which is what every run so far was scored under.
     take_profit_pct:       float = 0.0
+    # The same resting target, expressed in units of the pair's own volatility:
+    # the order rests at this multiple of atr_pct away from entry, read on the
+    # candle the position opened. 0.0 leaves take_profit_pct in charge.
+    #
+    # It exists because a fixed percentage is not one parameter but twenty. The
+    # best level measured between 0% and beyond 20% depending on the pair, and
+    # a level below a pair's own 10th percentile of reachable move fires on
+    # nearly every hold — the weights stop mattering — while one above its 90th
+    # never fires at all. A multiple of atr_pct sits at the same place in every
+    # pair's distribution, so one value means the same thing on all of them.
+    #
+    # Saved with the genome for the reason take_profit_pct is: the target
+    # decides when a position closes, so a genome papered without it trades a
+    # strategy nobody scored.
+    #
+    # WHICH IS EXACTLY WHAT PAPER TRADING STILL DOES. paper_engine ticks
+    # Ledger directly — liquidate, decide, apply — with no resting order of
+    # either kind, so a genome trained with a target is papered without one and
+    # exits on closes alone. The gap predates this knob (take_profit_pct has
+    # it too, and nothing has ever been papered with a non-zero target) but a
+    # winning arm here would make it live. Saving the value is what lets the
+    # paper side honour it later; honouring it is not built.
+    take_profit_atr_mult:  float = 0.0
     # Which columns the EXIT model of a dual genome scores. Ignored by linear.
     #
     # MUST NAME AT LEAST ONE COLUMN. Left empty, the exit group holds only
@@ -120,6 +146,7 @@ class StrategyConfigFile:
             borrow_bps_per_hour   = float(section.get("borrow_bps_per_hour", 0.0)),
             design                = str(section.get("design", LINEAR_DESIGN)),
             take_profit_pct       = float(section.get("take_profit_pct", 0.0)),
+            take_profit_atr_mult  = float(section.get("take_profit_atr_mult", 0.0)),
             exit_keys             = tuple(section.get("exit_keys") or ()),
             exit_pnl_scale        = float(section.get("exit_pnl_scale", 0.02)),
             exit_quantile         = float(section.get("exit_quantile", 0.10)),
@@ -172,6 +199,28 @@ class ValidatedStrategyConfig:
         if c.borrow_bps_per_hour < 0.0:
             found.append(
                 f"strategy.borrow_bps_per_hour must not be negative, got {c.borrow_bps_per_hour}"
+            )
+        # Both targets, for the same reason fee_bps is checked: a negative one
+        # is read as "no resting order" by TakeProfit's own 0.0 guard, so a
+        # sign typo scores a run with the knob silently doing nothing.
+        if c.take_profit_pct < 0.0:
+            found.append(
+                f"strategy.take_profit_pct must not be negative, got {c.take_profit_pct}"
+            )
+        if c.take_profit_atr_mult < 0.0:
+            found.append(
+                f"strategy.take_profit_atr_mult must not be negative, got "
+                f"{c.take_profit_atr_mult}"
+            )
+        # One position, one resting order. Honouring both would mean two orders
+        # on the same side at different prices, and silently preferring one
+        # would score a strategy nobody configured.
+        if c.take_profit_pct > 0.0 and c.take_profit_atr_mult > 0.0:
+            found.append(
+                f"strategy.take_profit_pct ({c.take_profit_pct}) and "
+                f"strategy.take_profit_atr_mult ({c.take_profit_atr_mult}) are both "
+                f"set; a position rests ONE order, so set whichever target you mean "
+                f"and leave the other at 0.0"
             )
         if not 0.0 < c.exit_quantile < 0.5:
             found.append(
@@ -837,8 +886,17 @@ class StrategyEvaluator:
             self._rows, strategy, self._config.starting_balance, self._config.unwind_at_entry_price,
             ConfiguredFees(self._config.fee_bps).schedule(),
             ConfiguredBorrowRate(self._config.borrow_bps_per_hour).rate(),
-            self._config.take_profit_pct,
+            self._target(),
         ).run()
+
+    # Which resting order this run places. Validation has already ruled out
+    # both being set, so the volatility-scaled one wins when it is present and
+    # a config that sets neither gets FixedTakeProfit(0.0) — no resting order,
+    # every fill at a close, exactly as before either knob existed.
+    def _target(self) -> TakeProfitTarget:
+        if self._config.take_profit_atr_mult > 0.0:
+            return AtrTakeProfit(self._config.take_profit_atr_mult)
+        return FixedTakeProfit(self._config.take_profit_pct)
 
     # Net, so the GA pays for the trading it does: a genome that churns for a
     # thin edge now scores below one that waits for a wide one. With both rates
