@@ -7,6 +7,7 @@ import pytest
 
 from coinbase.trading_strategy import (
     Action,
+    AtrTakeProfit,
     Backtest,
     BasisPointFee,
     BorrowInterest,
@@ -14,6 +15,7 @@ from coinbase.trading_strategy import (
     ConfiguredFees,
     Decision,
     Direction,
+    FixedTakeProfit,
     HourlyBasisPointRate,
     IsolatedMargin,
     Ledger,
@@ -641,7 +643,8 @@ def test_a_spike_that_closes_flat_is_still_booked_at_the_target():
     })
     plain = Backtest(MarketRows(frame), _strategy([0.9, 0.5, 0.5]), 1000.0).run()
     resting = Backtest(
-        MarketRows(frame), _strategy([0.9, 0.5, 0.5]), 1000.0, take_profit_pct=0.03,
+        MarketRows(frame), _strategy([0.9, 0.5, 0.5]), 1000.0,
+        take_profit=FixedTakeProfit(0.03),
     ).run()
     # size = 1000 * 0.10 / 100 = 1.0, filled at 103.0 rather than the 100.0 close
     assert plain.gross_profit() == pytest.approx(0.0)      # closes flat, books nothing
@@ -662,6 +665,8 @@ def test_a_candle_reaching_both_the_target_and_the_liquidation_takes_the_loss():
         "low":            [100.0, 50.0],       # and also reaches the target
         "norm_sma_short": [0.0, 0.5],          # opens a short on candle 0
     })
-    result = Backtest(MarketRows(frame), _OpensOneShort(), 1000.0, take_profit_pct=0.03).run()
+    result = Backtest(
+        MarketRows(frame), _OpensOneShort(), 1000.0, take_profit=FixedTakeProfit(0.03),
+    ).run()
     assert len(result.trades()) == 1
     assert result.trades()[0].profit() < 0.0   # the liquidation won the tie, not the target

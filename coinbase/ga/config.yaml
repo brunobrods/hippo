@@ -320,6 +320,32 @@ strategy:
   # if weight_keys changes — this knob's apparent value was a property of the
   # feature set both times it has been read.
   take_profit_pct: 0.0
+  # The same resting target measured in the pair's own volatility: the order
+  # rests at this multiple of the ENTRY candle's atr_pct away from entry. 0.0
+  # leaves take_profit_pct in charge, and setting both is an error — a position
+  # rests one order.
+  #
+  # This is the knob the take_profit_pct table above argues for without saying
+  # so. Every failure recorded there is a level in the wrong place for THAT
+  # pair: a target below a pair's 10th percentile of reachable move fires on
+  # nearly every hold, so the genome goes inert and three seeds return an
+  # identical book; one above its 90th never fires. The MFE sweep then placed
+  # each arm at each pair's own percentiles and the inertia disappeared —
+  # capture rose from 23.6% to 52-70% — but the levels it used were computed
+  # per pair by hand, which is not something a config can carry. atr_pct is the
+  # same idea the frame can supply for any pair: one multiple lands at the same
+  # place in every pair's distribution.
+  #
+  # It is also the one honest home for volatility in this model. As a SCORED
+  # column it could only push the signal up or down, since LinearSignal has one
+  # output read through fixed thresholds — "trade smaller when it is wild" is
+  # not expressible there. As the scale of a target it changes a price, which
+  # is what a volatility measure is for.
+  #
+  # UNMEASURED as of this commit. Sweep it with sweep_tp_atr_6h.yaml and read
+  # captured share before yield: a target changes how much of a move is kept,
+  # and yield on six trades per run cannot separate anything.
+  take_profit_atr_mult: 0.0
   position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
   buy_threshold: 0.60       # signal_score above this opens a position
   sell_threshold: 0.40      # signal_score below this closes an open position
@@ -367,6 +393,11 @@ strategy:
     macd_fast: 12
     macd_slow: 26
     macd_signal: 9
+    # Feeds the atr_pct column that take_profit_atr_mult above reads. It is NOT
+    # a scored column and does not belong in normalized_columns or weight_keys.
+    # Its warm-up (14) is shorter than sma_extra_period's (50), so the column
+    # costs no rows — every recorded run's window is exactly what it was.
+    atr_period: 14
   # Which normalized columns the GA assigns a weight to and scores on.
   #
   # STATIONARY COLUMNS ONLY, as of the two-pair sweep in

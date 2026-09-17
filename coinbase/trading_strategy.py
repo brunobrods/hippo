@@ -305,6 +305,44 @@ class IsolatedMargin:
 #   low reaches the liquidation gives no way to know which came first, and
 #   assuming the favourable one invents money. Backtest therefore runs
 #   liquidate() BEFORE this, so the adverse event always wins a tie.
+# How far from entry the resting exit sits, decided ONCE on the candle the
+# position opens. A fixed fraction is one answer; a multiple of the pair's own
+# volatility is the other, and the second exists because the first is not
+# transferable: the best fixed level measured anywhere from 0% to beyond 20%
+# depending on the pair, which is a volatility difference wearing a parameter's
+# clothes. A target set at k times atr_pct asks the same question of every
+# pair — "how many candles' worth of movement away?" — and one k can answer it.
+class TakeProfitTarget(Protocol):
+    def fraction(self, row: dict[str, float]) -> float: ...
+
+
+class FixedTakeProfit:
+    def __init__(self, fraction: float) -> None:
+        self._fraction = fraction
+
+    def fraction(self, row: dict[str, float]) -> float:
+        return self._fraction
+
+
+# Reads the entry candle's volatility and never looks again: the order rests
+# where it was placed. Tracking current volatility would move the target while
+# the position is open, which is a cancel-and-replace — a thing this backtest
+# has no model of, and one that would let a target retreat from a price the
+# market had already reached.
+class AtrTakeProfit:
+    def __init__(self, multiple: float) -> None:
+        self._multiple = multiple
+
+    def fraction(self, row: dict[str, float]) -> float:
+        if "atr_pct" not in row:
+            raise ValueError(
+                "strategy.take_profit_atr_mult is set but the frame carries no "
+                "atr_pct column — IndicatorFrame supplies it; a frame built "
+                "elsewhere must too"
+            )
+        return self._multiple * float(row["atr_pct"])
+
+
 class TakeProfit:
     def __init__(self, position: Position, fraction: float) -> None:
         self._position = position
@@ -485,7 +523,7 @@ class Backtest:
         unwind_at_entry_price: bool = True,
         fees: FeeSchedule = NoFees(),
         borrow: BorrowRate = NoBorrowRate(),
-        take_profit_pct: float = 0.0,
+        take_profit: TakeProfitTarget = FixedTakeProfit(0.0),
     ) -> None:
         self._rows                  = rows
         self._strategy              = strategy
@@ -493,14 +531,20 @@ class Backtest:
         self._unwind_at_entry_price = unwind_at_entry_price
         self._fees                  = fees
         self._borrow                = borrow
-        # 0.0 disables it, which is the behaviour every run so far was scored
-        # under — no resting exit, every fill at a close.
-        self._take_profit_pct       = take_profit_pct
+        # A fraction of 0.0 disables it, which is the behaviour every run so far
+        # was scored under — no resting exit, every fill at a close.
+        self._take_profit           = take_profit
 
     def run(self) -> BacktestResult:
         ledger = Ledger(self._starting_balance, None, self._fees, self._borrow)
         equity_curve: list[float] = []
         records = self._rows.records
+        # The distance the resting order sits from entry, read on the candle
+        # the position opened and held until it closes. Kept here rather than
+        # recomputed per candle because the order does not move once placed —
+        # and kept off Position, which is the object a live or paper book
+        # rebuilds from a state file and could not restore this from.
+        target = 0.0
 
         for row in records:
             price     = row["close"]
@@ -515,9 +559,14 @@ class Backtest:
             # no way to know which came first, so the adverse one is assumed to
             # have. Reversing these two lines would invent money.
             ledger.liquidate(high, low, timestamp)
-            self._take_profit(ledger, high, low, timestamp)
+            self._rest(ledger, target, high, low, timestamp)
             decision = self._strategy.decide(row, ledger.position(), ledger.balance())
+            opened_from_flat = ledger.position() is None
             ledger.apply(decision, price, timestamp)
+            # Read on the entry candle, so the target reflects the volatility
+            # the position was opened into and nothing later.
+            if opened_from_flat and ledger.position() is not None:
+                target = self._take_profit.fraction(row)
             equity_curve.append(ledger.equity(price))
 
         if records:
@@ -538,11 +587,11 @@ class Backtest:
     # order is a maker fill and should pay the maker rate, so this overcharges
     # — the safe direction, and numerically identical on the measured Binance
     # tier where the two rates are equal. It is not identical on Coinbase.
-    def _take_profit(self, ledger: Ledger, high: float, low: float, timestamp: float) -> None:
+    def _rest(self, ledger: Ledger, target: float, high: float, low: float, timestamp: float) -> None:
         position = ledger.position()
-        if position is None or self._take_profit_pct <= 0.0:
+        if position is None or target <= 0.0:
             return
-        exit_order = TakeProfit(position, self._take_profit_pct)
+        exit_order = TakeProfit(position, target)
         if exit_order.reached_by(high, low):
             ledger.force_close(exit_order.price(), timestamp)
 

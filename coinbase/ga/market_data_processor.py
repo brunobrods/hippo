@@ -29,6 +29,11 @@ class IndicatorPeriods:
     macd_fast:         int = 12
     macd_slow:         int = 26
     macd_signal:       int = 9
+    # Feeds the atr_pct column, which is NOT scored — it is read by the resting
+    # take-profit target to size itself against the pair's own volatility. Its
+    # warm-up is shorter than sma_extra_period's, so adding the column costs no
+    # rows and every recorded run's window is unchanged.
+    atr_period:        int = 14
 
 
 @dataclass(frozen=True)
@@ -389,6 +394,17 @@ class IndicatorFrame:
             "delta_3":        Delta(closes, 3).series,
             "delta_5":        Delta(closes, 5).series,
             "delta_10":       Delta(closes, 10).series,
+            # How far this pair travels in a candle, as a share of its price.
+            # Deliberately absent from normalized_columns and weight_keys: it
+            # has no directional content, and LinearSignal has one output read
+            # through fixed thresholds, so the only thing a weight on it could
+            # do is push the score up or down — "trade smaller when it is wild"
+            # is not expressible there. It is here for the mechanics that CAN
+            # use a scale: AtrTakeProfit reads it to place a target at a
+            # distance this pair actually reaches.
+            "atr_pct":        AverageTrueRange(
+                TrueRange(highs, lows, closes).series, closes, self._periods.atr_period,
+            ).percent,
         })
         if self._index_returns is not None:
             frame["index_z"] = RelativeStrength(
