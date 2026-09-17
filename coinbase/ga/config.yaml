@@ -209,6 +209,36 @@ strategy:
   # keys, so the scaling leaves it a degree of freedom, and position_pnl needs
   # either normalizing into [0, 1] or its own thresholds — a raw return and a
   # min-max column do not belong on the same scale.
+  #
+  # BOTH PRECONDITIONS WERE THEN MET, AND DUAL STILL LOST. The exit group was
+  # given two keys and position_pnl was put on a [0, 1] scale (PR #34), the
+  # scale was made configurable and swept (0.02/0.05/0.10), and finally the
+  # hold band itself was calibrated per genome from its own exit-score
+  # distribution rather than from linear's hand-set 0.40/0.45. Twenty pairs,
+  # three seeds, SIX_HOUR, costs charged, measured on captured share of the
+  # reachable move — one observation per TRADE, which is why it separates arms
+  # that yield cannot:
+  #
+  #   arm                 trades   median hold   captured   vs linear
+  #   linear                 437     48 candles     +18.6%          —
+  #   dual, scale 0.02       833      2            -17.2%   -52.7pp (t -4.98)
+  #   dual, scale 0.05       737      2             -7.9%   -50.8pp (t -4.64)
+  #   dual, scale 0.10       796      2            -18.1%   -51.9pp (t -4.92)
+  #   dual, calibrated      1015      2            -22.6%   -57.1pp (t -5.84)
+  #
+  # The calibration did take effect — all 60 genomes saved their own bands
+  # (sell 0.34-0.57, cover 0.40-0.63), none the old 0.40/0.45 — and it changed
+  # nothing that matters. THE MEDIAN HOLD NEVER MOVED OFF TWO CANDLES at any
+  # scale or any band, and calibrated against the hand-set dual is t = +0.09.
+  # That is the falsifier the sweep file pre-registered: an exit score close to
+  # white noise touches its own tail within a candle or two wherever the tail
+  # is drawn, so the band was never what held the position.
+  #
+  # DUAL IS DROPPED. Not deleted — the design, exit_pnl_scale and exit_quantile
+  # all still work, and a saved dual genome still loads and reproduces itself.
+  # But four fixes in a row failed to lengthen a hold, so the next attempt needs
+  # a different mechanism (a minimum hold, a smoothed or slower exit score, an
+  # exit trained on its own objective), NOT a fifth threshold.
   design: "linear"
   # Empty on purpose: the exit model is then a single weight on position_pnl, a
   # learned trailing stop, and the genome carries the same 8 weights linear did.
