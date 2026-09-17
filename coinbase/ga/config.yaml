@@ -342,9 +342,39 @@ strategy:
   # not expressible there. As the scale of a target it changes a price, which
   # is what a volatility measure is for.
   #
-  # UNMEASURED as of this commit. Sweep it with sweep_tp_atr_6h.yaml and read
-  # captured share before yield: a target changes how much of a move is kept,
-  # and yield on six trades per run cannot separate anything.
+  # MEASURED, AND IT DOES NOT PAY. Twenty pairs, three seeds, SIX_HOUR, costs
+  # charged, 240 runs — one file per arm, k placed on the quartiles of the
+  # control's own reachable-move-over-entry-ATR distribution:
+  #
+  #    k   trades/run   median hold   captured   gave back >half    yield
+  #   0.0        7.9      48 candles     +16.8%             78.0%   +16.1%
+  #   2.0       15.0      13             -7.5%              38.3%   -10.4%
+  #   4.0       11.6      22             +3.2%              55.8%    +2.3%
+  #   8.0        8.1      41             +7.8%              71.7%    +1.7%
+  #
+  # Paired per pair against the control: captured -35.3pp (t -2.72), -29.5pp
+  # (t -2.56) and -15.7pp (t -1.65); yield -26.4pp (t -2.50), -13.8pp (t -1.13)
+  # and -14.4pp (t -1.58). NO ARM BEATS THE CONTROL ON EITHER MEASURE. The two
+  # tight arms are significantly worse and the widest is merely indistinguishable
+  # — and it is indistinguishable because k=8 fires on only a quarter of holds,
+  # so it is converging on the control by doing nothing.
+  #
+  # The ordering is the mechanism and it is monotone: the tighter the target,
+  # the more it trades (15.0 round trips against 7.9), the shorter it holds (13
+  # candles against 48) and the worse it does. This is the same shape the dual
+  # exit died of — an exit that fires early gives up the move it was holding for.
+  #
+  # Note the one column that IMPROVED: "gave back more than half" falls from 78%
+  # to 38%. The target genuinely does what it promises — it stops positions
+  # handing back their excursion — and captured share still falls, because it
+  # takes winners early while losers keep running. Keeping more of less is not
+  # keeping more.
+  #
+  # So volatility-scaling was not the flaw in take_profit_pct. A fixed target
+  # and a scaled one are now both measured, on twenty pairs, and neither pays.
+  # DO NOT SWEEP A FOURTH LEVEL. The give-back is real; a resting target on the
+  # profit side is not the instrument that fixes it, and a stop on the other
+  # side remains untried.
   take_profit_atr_mult: 0.0
   position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
   buy_threshold: 0.60       # signal_score above this opens a position
