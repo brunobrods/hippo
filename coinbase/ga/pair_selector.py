@@ -336,6 +336,18 @@ class SelectionRun:
                 # The held pair lives through its candle's range before any new
                 # decision is taken on its close — the ordering Backtest.run
                 # uses, so a genome sees here exactly what it saw in training.
+                #
+                # KNOWN GAP: only the ordering matches, not the exits. Backtest
+                # and PaperTick both rest the two orders a genome carries — a
+                # take-profit and a stop — and this loop rests neither, so a
+                # genome trained with either is scored here as a strategy with
+                # no bound in that direction. BestRunPerPair selects straight
+                # out of experiments/index.csv, which now contains runs trained
+                # with both, so this is reachable rather than hypothetical.
+                # selection_paper.py has the same hole, and papering it would
+                # also need the fractions persisted per position, as PaperState
+                # does. Until then, read a selector result for a stop-trained
+                # genome as a lower bound on its downside control.
                 ledger.liquidate(row.get("high", price), row.get("low", price))
                 if len(ledger.trades()) > settled:
                     # A liquidation pays no exit fee, matching PaperTick: the

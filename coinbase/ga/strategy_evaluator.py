@@ -229,16 +229,6 @@ class ValidatedStrategyConfig:
                 f"strategy.stop_loss_atr_mult must not be negative, got "
                 f"{c.stop_loss_atr_mult}"
             )
-        # A stop at or inside the target would close every position on whichever
-        # side moved first, making the genome a coin flip between two fixed
-        # levels. Both are measured from the same entry in the same units, so
-        # this is a straight comparison.
-        if 0.0 < c.take_profit_atr_mult <= c.stop_loss_atr_mult:
-            found.append(
-                f"strategy.stop_loss_atr_mult ({c.stop_loss_atr_mult}) is at or beyond "
-                f"take_profit_atr_mult ({c.take_profit_atr_mult}); the two would race "
-                f"on every candle and the genome would decide nothing"
-            )
         # One position, one resting order. Honouring both would mean two orders
         # on the same side at different prices, and silently preferring one
         # would score a strategy nobody configured.

@@ -64,6 +64,7 @@ from coinbase.ga.strategy_evaluator import (
 from coinbase.ga.strategy_output import DryRunLog, OutputConfigFile, ParentDirectory, StrategyJsonFile, UtcNow
 from coinbase.strategy import ClosedMarketRow, LiveMarketRow
 from coinbase.trading_strategy import (
+    AdverseExits,
     AtrDistance,
     BasisPointFee,
     BorrowRate,
@@ -79,7 +80,7 @@ from coinbase.trading_strategy import (
     NoFees,
     Position,
     RestingDistance,
-    StopLoss,
+    RestingFill,
     Strategy,
     TakeProfit,
 )
@@ -352,6 +353,12 @@ class TickOutcome:
     # The position the decision was taken AGAINST, not the one it produced —
     # what a strategy scored, and so what explains the action it chose.
     position_before: Optional[Position] = None
+    # What closed the position, when it was not the strategy: "stop", "target"
+    # or "liquidation". A resting order fires BEFORE the strategy is consulted,
+    # so `decision` on such a tick reads HOLD — which is true of the strategy
+    # and useless as a record of the exit. A journal that logged only the
+    # decision showed a HOLD beside a jumped balance and no exit at all.
+    closed_by:       str = ""
 
 
 # The two resting orders a trained genome carries, built from the config it was
@@ -413,17 +420,24 @@ class PaperTick:
             )
 
         ledger = Ledger(state.balance, state.position, self._fees, self._borrow)
-        # Same order as Backtest.run(), and for the same reason: a candle that
-        # reaches two of these gives no way to know which came first, so the
-        # worst one is assumed to have. Liquidation, then the stop, then the
-        # target, and only then a decision on the close.
-        ledger.liquidate(row["high"], row["low"], candle_start)
-        self._resting(
-            ledger, StopLoss, state.stop_loss_fraction, row, candle_start,
+        # The same two objects Backtest uses, in the same order and on the same
+        # candle range: the adverse exits resolved between themselves by
+        # distance from entry, then the target, then a decision on the close.
+        # Sharing them is the point — a paper book filling its orders even
+        # slightly differently is the drift this whole change exists to remove.
+        AdverseExits(ledger, state.stop_loss_fraction).resolve(
+            row["high"], row["low"], candle_start,
         )
-        self._resting(
-            ledger, TakeProfit, state.take_profit_fraction, row, candle_start,
+        # Which of the two adverse exits took it, for the journal: the stop when
+        # one was resting, the liquidation otherwise. They cannot both fire.
+        closed_by = "" if ledger.position() is not None or state.position is None else (
+            "stop" if state.stop_loss_fraction > 0.0 else "liquidation"
         )
+        RestingFill(ledger, TakeProfit, state.take_profit_fraction).fill(
+            row["high"], row["low"], candle_start,
+        )
+        if not closed_by and state.position is not None and ledger.position() is None:
+            closed_by = "target"
         before   = ledger.position()
         decision = self._strategy.decide(row, ledger.position(), ledger.balance())
         flat     = ledger.position() is None
@@ -488,25 +502,8 @@ class PaperTick:
             acted=True, candle_start=candle_start, decision=decision,
             balance=balance, equity=equity,
             closed_trades=len(ledger.trades()), row=row, fee=fee, interest=interest,
-            position_before=before,
+            position_before=before, closed_by=closed_by,
         )
-
-    # One method for both orders: they differ only in which side of entry they
-    # rest on, which is the order object's own business.
-    @staticmethod
-    def _resting(
-        ledger: Ledger,
-        order_type: Any,
-        fraction: float,
-        row: dict[str, float],
-        candle_start: int,
-    ) -> None:
-        position = ledger.position()
-        if position is None or fraction <= 0.0:
-            return
-        order = order_type(position, fraction)
-        if order.reached_by(row["high"], row["low"]):
-            ledger.force_close(order.price(), candle_start)
 
     @staticmethod
     def _equity(state: PaperState, price: float) -> float:

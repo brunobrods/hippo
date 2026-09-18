@@ -35,9 +35,12 @@ class _BuysOnceThenHolds:
 
 
 class _ShortsOnceThenHolds:
+    def __init__(self, size: float = 1.0) -> None:
+        self._size = size
+
     def decide(self, row: dict[str, float], position, balance: float) -> Decision:
         if position is None:
-            return Decision(Action.SHORT, 1.0)
+            return Decision(Action.SHORT, self._size)
         return Decision(Action.HOLD)
 
 
@@ -127,6 +130,54 @@ def test_a_stop_and_a_target_can_bracket_the_same_position():
     assert result.trades()[0].profit() == pytest.approx(6.0)
 
 
+# A stop 100% below entry rests at zero, which no market reaches — so the
+# position would run unbounded while the config said it was stopped.
+def test_a_long_stopped_a_full_hundred_percent_below_entry_raises():
+    with pytest.raises(ValueError, match="zero or negative"):
+        StopLoss(Position(100.0, 1.0, Direction.LONG), 1.0).price()
+
+
+def test_a_short_can_be_stopped_a_hundred_percent_above_entry():
+    assert StopLoss(Position(100.0, 1.0, Direction.SHORT), 1.0).price() == pytest.approx(200.0)
+
+
+# ── Which adverse exit the market reached first ──────────────────────
+# Both sit on the same side of entry for a short, and price is continuous: to
+# reach the far one the market must pass the near one. Resolving liquidation
+# first regardless books a liquidation the stop would have prevented.
+
+def test_a_short_spiking_through_both_is_stopped_not_liquidated():
+    # 6 units short at 100 against 1000 of collateral liquidates at 254.76. The
+    # 6% stop sits at 106, which the market passed on its way there.
+    frame  = _frame([
+        (100.0, 100.0, 100.0, 0.02),
+        (100.0, 260.0, 100.0, 0.02),
+    ])
+    stopped = Backtest(
+        MarketRows(frame), _ShortsOnceThenHolds(6.0), 1000.0, stop_loss=AtrDistance(3.0),
+    ).run()
+    unbounded = Backtest(MarketRows(frame), _ShortsOnceThenHolds(6.0), 1000.0).run()
+
+    assert stopped.trades()[0].profit()   == pytest.approx(-36.0)
+    assert unbounded.trades()[0].profit() < -900.0     # liquidated at 254.76 instead
+
+
+# The other order, and it is not symmetric: a stop wide enough to sit BEYOND the
+# liquidation is never reached, because the position is gone before the market
+# gets there.
+def test_a_stop_beyond_the_liquidation_leaves_the_liquidation_in_charge():
+    frame  = _frame([
+        (100.0, 100.0, 100.0, 0.02),
+        (100.0, 260.0, 100.0, 0.02),
+    ])
+    # A 200% stop rests at 300, beyond the 254.76 liquidation.
+    result = Backtest(
+        MarketRows(frame), _ShortsOnceThenHolds(6.0), 1000.0, stop_loss=AtrDistance(100.0),
+    ).run()
+
+    assert result.trades()[0].profit() < -900.0
+
+
 # ── Config ───────────────────────────────────────────────────────────
 
 def _section(**overrides: object) -> dict[str, object]:
@@ -152,25 +203,18 @@ def test_a_negative_stop_is_rejected():
         ).config()
 
 
-# A stop at or beyond the target closes on whichever side moved first, which
-# makes the genome a coin flip between two fixed levels.
-def test_a_stop_at_or_beyond_the_target_is_rejected():
-    with pytest.raises(ValueError, match="race"):
-        ValidatedStrategyConfig(
-            StrategyConfigFile(
-                _section(take_profit_atr_mult=2.0, stop_loss_atr_mult=2.0),
-            ).config(),
-        ).config()
-
-
-def test_a_stop_inside_the_target_is_accepted():
+# The two sit on opposite sides of entry, so whichever the market reaches first
+# closes the position — that is what a bracket is, at any ratio. A wide stop
+# behind a near target is an ordinary configuration, not a contradiction.
+@pytest.mark.parametrize("target,stop", [(4.0, 2.0), (2.0, 4.0), (2.0, 2.0)])
+def test_any_bracket_of_target_and_stop_is_accepted(target, stop):
     config = ValidatedStrategyConfig(
         StrategyConfigFile(
-            _section(take_profit_atr_mult=4.0, stop_loss_atr_mult=2.0),
+            _section(take_profit_atr_mult=target, stop_loss_atr_mult=stop),
         ).config(),
     ).config()
 
-    assert (config.take_profit_atr_mult, config.stop_loss_atr_mult) == (4.0, 2.0)
+    assert (config.take_profit_atr_mult, config.stop_loss_atr_mult) == (target, stop)
 
 
 # ── What a trained genome hands the paper book ───────────────────────
@@ -292,3 +336,57 @@ def test_the_fractions_survive_a_write_and_read(tmp_path):
 
     restored = state_file.read()
     assert (restored.take_profit_fraction, restored.stop_loss_fraction) == (0.08, 0.04)
+
+
+# ── What the journal records ─────────────────────────────────────────
+# A resting order fires before the strategy is consulted, so the decision on
+# that tick is HOLD. Reporting only the decision put a HOLD beside a jumped
+# balance and no record of the exit.
+
+@pytest.mark.asyncio
+async def test_a_stopped_tick_reports_the_stop_not_the_hold(tmp_path):
+    state_file = PaperStateFile(str(tmp_path / "book.json"))
+    orders     = TrainedRestingOrders(_config(stop_loss_atr_mult=2.0))
+
+    await PaperTick(
+        _Rows([_row(1800, 100.0, 100.0, 100.0)]), _BuysOnceThenHolds(), state_file, 1000.0,
+        take_profit=orders.take_profit(), stop_loss=orders.stop_loss(),
+    ).run()
+    outcome = await PaperTick(
+        _Rows([_row(3600, 99.0, 100.0, 95.0)]), _BuysOnceThenHolds(), state_file, 1000.0,
+        take_profit=orders.take_profit(), stop_loss=orders.stop_loss(),
+    ).run()
+
+    # The stop fired before the strategy was consulted, and this strategy then
+    # re-entered on the same candle's close — so the tick carries BOTH legs, and
+    # the decision alone would report only the entry.
+    assert outcome.closed_by == "stop"
+    assert outcome.decision.action is Action.BUY
+    assert outcome.closed_trades == 1
+
+
+@pytest.mark.asyncio
+async def test_a_target_tick_reports_the_target(tmp_path):
+    state_file = PaperStateFile(str(tmp_path / "book.json"))
+    orders     = TrainedRestingOrders(_config(take_profit_atr_mult=2.0))
+
+    await PaperTick(
+        _Rows([_row(1800, 100.0, 100.0, 100.0)]), _BuysOnceThenHolds(), state_file, 1000.0,
+        take_profit=orders.take_profit(), stop_loss=orders.stop_loss(),
+    ).run()
+    outcome = await PaperTick(
+        _Rows([_row(3600, 101.0, 105.0, 100.0)]), _BuysOnceThenHolds(), state_file, 1000.0,
+        take_profit=orders.take_profit(), stop_loss=orders.stop_loss(),
+    ).run()
+
+    assert outcome.closed_by == "target"
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_tick_reports_nothing_closed(tmp_path):
+    state_file = PaperStateFile(str(tmp_path / "book.json"))
+    outcome    = await PaperTick(
+        _Rows([_row(1800, 100.0, 100.0, 100.0)]), _BuysOnceThenHolds(), state_file, 1000.0,
+    ).run()
+
+    assert outcome.closed_by == ""

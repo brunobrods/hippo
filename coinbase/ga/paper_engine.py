@@ -359,8 +359,17 @@ class PaperAlgo:
             opened_at         = state.opened_at,
         )
 
+    # A resting order closes the position before the strategy is consulted, so
+    # the decision on such a tick is HOLD. Reporting that alone put a HOLD in
+    # journal.tsv beside a jumped balance and no record of the exit at all —
+    # which matters now that a stop is a routine exit rather than, like a long's
+    # liquidation, one that never fires.
     def _last_action(self) -> str:
-        if self._outcome is None or self._outcome.decision is None:
+        if self._outcome is None:
+            return "-"
+        if self._outcome.closed_by:
+            return self._outcome.closed_by.upper()
+        if self._outcome.decision is None:
             return "-"
         return self._outcome.decision.action.value
 
