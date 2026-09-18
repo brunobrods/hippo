@@ -128,6 +128,19 @@ schedulable. Two properties make the scheduled form safe:
   measured against its own session's peak instead, a curve understates every
   fall in a session that opened below the book's high-water mark.
 
+  **The resting orders are on the book too.** `take_profit_fraction` and
+  `stop_loss_fraction` are the distances the open position's orders rest at,
+  priced on the candle it opened and carried until it closes. They persist for
+  the sharpest version of the same reason: the tick that opens a position and
+  the tick that closes it are *different processes*, and the entry candle whose
+  `atr_pct` priced them is long gone — a process that recomputed them from the
+  current candle would quietly move a resting order every tick. A book written
+  before these fields reads as having no orders, which is honest rather than
+  convenient: its position was opened by a genome running without them. Note the
+  worktree hazard this creates, the same one that bit `fees_paid`: a tick under
+  a checkout that predates these fields rewrites the book without them and
+  strips a live position's stop mid-hold.
+
   **`opened_at` is never guessed.** A book that predates the field stays at
   `0.0` and the caller falls back to its own clock, because every date the
   book could offer (an open position's entry, the candle it resumes on) is

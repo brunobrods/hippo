@@ -694,3 +694,88 @@ def test_a_refused_algo_is_logged_by_name(caplog) -> None:
 def test_every_algo_building_leaves_none_refused() -> None:
     engine = _PartlyBrokenEngine(_engine_config("a", "b"), refuse="none-of-them")
     assert [algo.config().name for algo in engine.algos] == ["a", "b"]
+
+
+# ── Resting orders reach the engine's own books ──────────────────────
+# PaperAlgo hands PaperTick two distances. Passing them in the wrong order, or
+# not at all, is invisible to every other test here — these are the ones that
+# would catch it.
+
+def _ranged_row(timestamp: int, close: float, high: float, low: float) -> dict[str, float]:
+    return {
+        "timestamp": float(timestamp), "close": close, "high": high, "low": low,
+        "atr_pct": 0.02, "rsi": 55.0, "macd": 0.25,
+    }
+
+
+def _algo_with(tmp_path, rows: FakeRows, orders: TrainedRestingOrders) -> PaperAlgo:
+    config = _algo_config(tmp_path, "btc")
+    return PaperAlgo(
+        config=config, rows=rows, strategy=_ScriptedStrategy([Action.BUY, Action.HOLD]),
+        book=PaperBook(PaperStateFile(config.state_filepath), config.starting_balance,
+                       config.pair),
+        fees=NoFees(), borrow=NoBorrowRate(), orders=orders, curve=EquityCurve(),
+        log=DryRunLog(config.log_filepath),
+    )
+
+
+def _orders_with(**overrides) -> TrainedRestingOrders:
+    return TrainedRestingOrders(StrategyConfig(
+        position_size_pct=0.5, buy_threshold=0.6, sell_threshold=0.4,
+        starting_balance=1000.0, **overrides,
+    ))
+
+
+@pytest.mark.asyncio
+async def test_a_target_closes_an_engine_book_and_is_reported_as_one(tmp_path):
+    # Only a target is configured, so a tick that swapped the two arguments
+    # would rest this distance as a STOP and never fill on a rising candle.
+    algo = _algo_with(
+        tmp_path,
+        FakeRows([_ranged_row(1800, 100.0, 100.0, 100.0),
+                  _ranged_row(3600, 101.0, 105.0, 100.0)]),
+        _orders_with(take_profit_atr_mult=2.0),      # target 4% -> 104
+    )
+
+    await algo.tick()
+    await algo.tick()
+
+    status = algo.status()
+    assert status.last_action == "TARGET"
+    assert status.position is None
+    assert status.balance > 1000.0
+
+
+@pytest.mark.asyncio
+async def test_a_stop_closes_an_engine_book_and_is_reported_as_one(tmp_path):
+    algo = _algo_with(
+        tmp_path,
+        FakeRows([_ranged_row(1800, 100.0, 100.0, 100.0),
+                  _ranged_row(3600, 99.0, 100.0, 95.0)]),
+        _orders_with(stop_loss_atr_mult=2.0),        # stop 4% -> 96
+    )
+
+    await algo.tick()
+    await algo.tick()
+
+    status = algo.status()
+    assert status.last_action == "STOP"
+    assert status.balance < 1000.0
+
+
+# A candle reaching both must book the stop: the two sit on opposite sides of
+# entry, so which came first is unknowable and the adverse one wins.
+@pytest.mark.asyncio
+async def test_a_candle_reaching_both_books_the_stop(tmp_path):
+    algo = _algo_with(
+        tmp_path,
+        FakeRows([_ranged_row(1800, 100.0, 100.0, 100.0),
+                  _ranged_row(3600, 100.0, 110.0, 90.0)]),
+        _orders_with(take_profit_atr_mult=2.0, stop_loss_atr_mult=2.0),
+    )
+
+    await algo.tick()
+    await algo.tick()
+
+    assert algo.status().last_action == "STOP"
+    assert algo.status().balance < 1000.0

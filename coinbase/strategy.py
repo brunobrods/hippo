@@ -180,6 +180,14 @@ class LiveTradingRun:
         # tick is liquidation-checked against this candle's range before a new
         # decision is taken, so a live short obeys the same 1x isolated margin
         # model it was trained and scored under.
+        #
+        # KNOWN GAP, and the most consequential copy of it: this loop rests
+        # NEITHER of the two orders a genome can carry — a take-profit or a
+        # stop. Backtest and PaperTick both do. A genome trained with a stop
+        # would therefore trade live with no downside bound at all, which is the
+        # opposite of what configuring one means. Fix this before this path
+        # places a real order for any genome whose strategy.json carries a
+        # non-zero take_profit_* or stop_loss_atr_mult.
         timestamp = row.get("timestamp", 0.0)
         self._ledger.liquidate(row["high"], row["low"], timestamp)
         decision = self._strategy.decide(row, self._ledger.position(), balance)

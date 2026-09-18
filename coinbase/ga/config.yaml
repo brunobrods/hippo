@@ -402,6 +402,20 @@ strategy:
   # Winners dip a median of 1.29 ATR before they pay, so anything near k=1 sits
   # inside the pair's own candle noise. UNMEASURED end to end as of this commit:
   # sweep it with sweep_stop_{000,2,4,8}_6h.yaml.
+  #
+  # SETTING IT HERE REACHES THE LIVE BOOKS, quietly. TrainedStrategyConfig
+  # merges {**this section, **the genome's own hyperparameters}, so a key the
+  # genome does not carry is taken from here — and no genome trained before this
+  # knob existed carries it. divergences() will not warn, because it only
+  # reports keys present in BOTH. Every papered book would therefore open its
+  # next position with a stop nothing scored it with. Set it in a sweep file, or
+  # retrain, rather than here.
+  #
+  # A wide multiple can also ask for a stop no market can reach: 8 x atr_pct
+  # passes 100% on 90 of this universe's 57,624 six-hour candles, and a long
+  # cannot be stopped below zero. Those positions rest no stop and say so in the
+  # log — see PlacedStop, which deliberately does not raise, because aborting a
+  # 60-run sweep on one candle's volatility helps nobody.
   stop_loss_atr_mult: 0.0
   position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
   buy_threshold: 0.60       # signal_score above this opens a position

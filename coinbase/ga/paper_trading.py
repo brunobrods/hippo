@@ -43,6 +43,7 @@ Run (as a module, from the repo root):
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
@@ -79,12 +80,15 @@ from coinbase.trading_strategy import (
     NoBorrowRate,
     NoFees,
     Position,
+    PlacedStop,
     RestingDistance,
     RestingFill,
     Strategy,
     TakeProfit,
 )
 from exchange.selection import ConfiguredExchange
+
+logger = logging.getLogger(__name__)
 
 
 # ── Config ─────────────────────────────────────────────────────────────
@@ -448,7 +452,7 @@ class PaperTick:
         target_fraction = self._take_profit.fraction(row) if opened else (
             state.take_profit_fraction if ledger.position() is not None else 0.0
         )
-        stop_fraction   = self._stop_loss.fraction(row) if opened else (
+        stop_fraction   = self._placed_stop(ledger, row) if opened else (
             state.stop_loss_fraction if ledger.position() is not None else 0.0
         )
 
@@ -504,6 +508,18 @@ class PaperTick:
             closed_trades=len(ledger.trades()), row=row, fee=fee, interest=interest,
             position_before=before, closed_by=closed_by,
         )
+
+    # Never persists a distance the market cannot reach: a book carrying one
+    # would rest an order that can never fill while reporting itself stopped.
+    def _placed_stop(self, ledger: Ledger, row: dict[str, float]) -> float:
+        placed = PlacedStop(ledger.position(), self._stop_loss.fraction(row))
+        if placed.unreachable():
+            logger.warning(
+                "%s: stop of %.1f%% below entry is unreachable for a long — "
+                "this position rests none",
+                self._rows.pair(), self._stop_loss.fraction(row) * 100.0,
+            )
+        return placed.fraction()
 
     @staticmethod
     def _equity(state: PaperState, price: float) -> float:

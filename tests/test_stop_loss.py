@@ -22,6 +22,7 @@ from coinbase.trading_strategy import (
     Direction,
     FixedDistance,
     MarketRows,
+    PlacedStop,
     Position,
     StopLoss,
 )
@@ -83,6 +84,27 @@ def test_the_stop_rests_at_a_multiple_of_the_entry_candles_atr():
     assert result.trades()[0].profit() == pytest.approx(-6.0)
 
 
+# A falling candle is a short's PROFIT, and must not stop it. Without this, a
+# stop reading `low <= price` for both directions passes the whole suite.
+def test_a_falling_candle_never_stops_a_short():
+    frame  = _frame([(100.0, 100.0, 100.0, 0.02), (100.0, 100.5, 80.0, 0.02)])
+    result = Backtest(
+        MarketRows(frame), _ShortsOnceThenHolds(), 1000.0, stop_loss=AtrDistance(3.0),
+    ).run()
+
+    # Unwound by the window's end at its own entry price, not stopped at 106.
+    assert result.trades()[0].profit() == pytest.approx(0.0)
+
+
+def test_a_rising_candle_never_stops_a_long():
+    frame  = _frame([(100.0, 100.0, 100.0, 0.02), (100.0, 130.0, 99.0, 0.02)])
+    result = Backtest(
+        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, stop_loss=AtrDistance(3.0),
+    ).run()
+
+    assert result.trades()[0].profit() == pytest.approx(0.0)
+
+
 def test_a_short_is_stopped_by_a_rising_candle():
     frame  = _frame([(100.0, 100.0, 100.0, 0.02), (100.0, 106.0, 100.0, 0.02)])
     result = Backtest(
@@ -130,15 +152,42 @@ def test_a_stop_and_a_target_can_bracket_the_same_position():
     assert result.trades()[0].profit() == pytest.approx(6.0)
 
 
-# A stop 100% below entry rests at zero, which no market reaches — so the
-# position would run unbounded while the config said it was stopped.
-def test_a_long_stopped_a_full_hundred_percent_below_entry_raises():
-    with pytest.raises(ValueError, match="zero or negative"):
-        StopLoss(Position(100.0, 1.0, Direction.LONG), 1.0).price()
+# A long stopped a full 100% below entry rests at zero or below, which no market
+# reaches. It is reported as no stop rather than as an order that can never
+# fill — and NOT raised, because it is a property of one candle's volatility:
+# 90 of this universe's 57,624 six-hour candles put 8 x atr_pct past 1.0, and a
+# raise would abort a 60-run sweep on the one candle where it crosses.
+def test_an_unreachable_long_stop_is_reported_as_no_stop():
+    placed = PlacedStop(Position(100.0, 1.0, Direction.LONG), 1.2)
+
+    assert placed.unreachable() is True
+    assert placed.fraction() == 0.0
 
 
-def test_a_short_can_be_stopped_a_hundred_percent_above_entry():
+def test_a_short_can_always_be_stopped_however_wide():
+    placed = PlacedStop(Position(100.0, 1.0, Direction.SHORT), 1.2)
+
+    assert placed.unreachable() is False
+    assert placed.fraction() == pytest.approx(1.2)
     assert StopLoss(Position(100.0, 1.0, Direction.SHORT), 1.0).price() == pytest.approx(200.0)
+
+
+def test_an_ordinary_stop_is_left_alone():
+    assert PlacedStop(Position(100.0, 1.0, Direction.LONG), 0.3).fraction() == pytest.approx(0.3)
+
+
+# The whole point of not raising: a wide arm meets such a candle mid-sweep, and
+# the run has to finish rather than die.
+def test_a_backtest_survives_a_candle_whose_stop_cannot_exist():
+    frame  = _frame([
+        (100.0, 100.0, 100.0, 0.20),   # 8 x 20% = 160% below entry
+        (100.0, 100.0, 50.0, 0.20),
+    ])
+    result = Backtest(
+        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, stop_loss=AtrDistance(8.0),
+    ).run()
+
+    assert result.trades()[0].profit() == pytest.approx(0.0)   # never stopped, never crashed
 
 
 # ── Which adverse exit the market reached first ──────────────────────

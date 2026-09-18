@@ -1,10 +1,13 @@
 import functools
+import logging
 import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional, Protocol
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 # ── Decisions ────────────────────────────────────────────────────────────
@@ -348,17 +351,6 @@ class StopLoss:
         entry = self._position.entry_price()
         if self._position.direction() is not Direction.LONG:
             return entry * (1.0 + self._fraction)
-        # A long stopped a full 100% below entry rests at zero or below, which
-        # no market reaches — so the position would run unbounded while the
-        # config said it was stopped. That is the silence AtrDistance raises on
-        # for a NaN, reached here by arithmetic instead: k=8 needs only an entry
-        # candle whose atr_pct is 12.5% to produce it.
-        if self._fraction >= 1.0:
-            raise ValueError(
-                f"a long cannot be stopped {self._fraction:.2%} below its entry — "
-                f"the price would be zero or negative and the order could never "
-                f"fill; lower the stop multiple"
-            )
         return entry * (1.0 - self._fraction)
 
     def reached_by(self, high: float, low: float) -> bool:
@@ -416,6 +408,30 @@ class AtrDistance:
                 "resting price exists — the frame has not dropped its warm-up rows"
             )
         return self._multiple * atr
+
+# What a position's stop distance actually comes to, which is not always what
+# was asked for: a long stopped a full 100% or more below entry rests at zero or
+# below, and no market reaches that. Reported as NO stop rather than as an
+# unfillable order, because the alternative — a price the config believes in and
+# the market can never touch — is the silence AtrDistance raises for on a NaN.
+#
+# Not raised, either, and that is the deliberate part. The condition is a
+# property of ONE candle's volatility rather than of the config: over this
+# universe's 57,624 six-hour candles, 90 of them put 8 x atr_pct past 1.0. A
+# raise would abort a 60-run sweep on the one candle where it crosses, and would
+# wedge a paper book that had already persisted such a fraction — every later
+# tick raising, with nothing able to clear it. The caller logs instead.
+class PlacedStop:
+    def __init__(self, position: Position, fraction: float) -> None:
+        self._position = position
+        self._fraction = fraction
+
+    def unreachable(self) -> bool:
+        return self._position.direction() is Direction.LONG and self._fraction >= 1.0
+
+    def fraction(self) -> float:
+        return 0.0 if self.unreachable() else self._fraction
+
 
 # ── Filling a resting order ──────────────────────────────────────────────
 
@@ -703,7 +719,13 @@ class Backtest:
             # the position was opened into and nothing later.
             if opened_from_flat and ledger.position() is not None:
                 target = self._take_profit.fraction(row)
-                stop   = self._stop_loss.fraction(row)
+                placed = PlacedStop(ledger.position(), self._stop_loss.fraction(row))
+                if placed.unreachable():
+                    logger.warning(
+                        "stop of %.1f%% below entry is unreachable for a long — "
+                        "this position rests none", self._stop_loss.fraction(row) * 100.0,
+                    )
+                stop = placed.fraction()
             equity_curve.append(ledger.equity(price))
 
         if records:
