@@ -20,7 +20,15 @@ from coinbase.ga.paper_engine import (
     StatusBoard,
 )
 from coinbase.ga.paper_metrics import EquityCurve
-from coinbase.ga.paper_trading import BasisPointFee, NoBorrowRate, NoFees, PaperState, PaperStateFile
+from coinbase.ga.paper_trading import (
+    BasisPointFee,
+    NoBorrowRate,
+    NoFees,
+    PaperState,
+    PaperStateFile,
+    TrainedRestingOrders,
+)
+from coinbase.ga.strategy_evaluator import StrategyConfig
 from coinbase.ga.strategy_output import DryRunLog
 from coinbase.trading_strategy import Action, Decision, Direction, Position
 from exchange.adapter import ExchangeError
@@ -112,6 +120,15 @@ def _algo_config(tmp_path, name: str = "btc", balance: float = 1000.0) -> AlgoCo
     )
 
 
+# A genome that asked for no resting orders — what every book papered so far
+# carries, and what these tests are about.
+def _orders() -> TrainedRestingOrders:
+    return TrainedRestingOrders(StrategyConfig(
+        position_size_pct=0.5, buy_threshold=0.6, sell_threshold=0.4,
+        starting_balance=1000.0,
+    ))
+
+
 def _algo(
     tmp_path, rows: FakeRows, actions: list[Action], fees=NoFees(),
     name="btc", borrow=NoBorrowRate(),
@@ -121,7 +138,8 @@ def _algo(
         config=config, rows=rows, strategy=_ScriptedStrategy(actions),
         book=PaperBook(PaperStateFile(config.state_filepath), config.starting_balance,
                        config.pair),
-        fees=fees, borrow=borrow, curve=EquityCurve(), log=DryRunLog(config.log_filepath),
+        fees=fees, borrow=borrow, orders=_orders(), curve=EquityCurve(),
+        log=DryRunLog(config.log_filepath),
     )
 
 
@@ -312,7 +330,8 @@ async def test_the_cost_tally_survives_a_restart(tmp_path):
     before = PaperAlgo(
         config=config, rows=FakeRows([_row(1800, 100.0)]),
         strategy=_ScriptedStrategy([Action.BUY]), book=book, fees=fees,
-        borrow=NoBorrowRate(), curve=EquityCurve(), log=DryRunLog(config.log_filepath),
+        borrow=NoBorrowRate(), orders=_orders(), curve=EquityCurve(),
+        log=DryRunLog(config.log_filepath),
     )
 
     await before.tick()
@@ -575,8 +594,8 @@ async def test_the_same_pair_on_two_venues_does_not_cross_contaminate(tmp_path):
             config=config, rows=FakeRows([_row(1800, 100.0)]),
             strategy=_ScriptedStrategy([Action.BUY]),
             book=PaperBook(PaperStateFile(config.state_filepath), 1000.0, config.pair),
-            fees=NoFees(), borrow=NoBorrowRate(), curve=EquityCurve(),
-            log=DryRunLog(config.log_filepath),
+            fees=NoFees(), borrow=NoBorrowRate(), orders=_orders(),
+            curve=EquityCurve(), log=DryRunLog(config.log_filepath),
         )
         await algo.tick()
         algos.append(IsolatedAlgo(algo))

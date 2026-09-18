@@ -456,7 +456,7 @@ class IndicatorFrame:
             # through fixed thresholds, so the only thing a weight on it could
             # do is push the score up or down — "trade smaller when it is wild"
             # is not expressible there. It is here for the mechanics that CAN
-            # use a scale: AtrTakeProfit reads it to place a target at a
+            # use a scale: AtrDistance reads it to place a target at a
             # distance this pair actually reaches.
             "atr_pct":        AverageTrueRange(
                 TrueRange(highs, lows, closes).series, closes,

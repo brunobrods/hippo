@@ -376,6 +376,33 @@ strategy:
   # profit side is not the instrument that fixes it, and a stop on the other
   # side remains untried.
   take_profit_atr_mult: 0.0
+  # The downside bound, in the same units: the position closes when it has moved
+  # this multiple of the ENTRY candle's atr_pct against itself. 0.0 is no stop,
+  # which is what every run ever recorded was scored under.
+  #
+  # It exists because there is otherwise no bound at all. A long's liquidation
+  # price is 0.0 — `IsolatedMargin` never liquidates one — so a position held for
+  # a median of 48 candles is closed only when the signal score says so. Worse,
+  # `unwind_at_entry_price` books a still-open loser at its own entry price, so
+  # the very worst positions are the ones least likely to appear in the win rate.
+  #
+  # A stop is therefore not just a risk control here; it CHANGES WHAT THE BOOK
+  # REPORTS. Expect the win rate to fall when it is on: hidden losers become
+  # booked ones. A falling win rate beside a rising yield is the knob working.
+  #
+  # Measured on the control's own 437 trades, as adverse excursion over entry
+  # ATR — a stop only pays if it catches losers more often than winners:
+  #
+  #     k     touched by all trades     touched by WINNERS
+  #     1              74.4%                   58.8%
+  #     2              44.9%                   25.6%
+  #     4              17.2%                   11.2%
+  #     8               7.3%                    6.0%
+  #
+  # Winners dip a median of 1.29 ATR before they pay, so anything near k=1 sits
+  # inside the pair's own candle noise. UNMEASURED end to end as of this commit:
+  # sweep it with sweep_stop_{000,2,4,8}_6h.yaml.
+  stop_loss_atr_mult: 0.0
   position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
   buy_threshold: 0.60       # signal_score above this opens a position
   sell_threshold: 0.40      # signal_score below this closes an open position

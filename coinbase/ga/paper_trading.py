@@ -64,6 +64,7 @@ from coinbase.ga.strategy_evaluator import (
 from coinbase.ga.strategy_output import DryRunLog, OutputConfigFile, ParentDirectory, StrategyJsonFile, UtcNow
 from coinbase.strategy import ClosedMarketRow, LiveMarketRow
 from coinbase.trading_strategy import (
+    AtrDistance,
     BasisPointFee,
     BorrowRate,
     ConfiguredBorrowRate,
@@ -71,12 +72,16 @@ from coinbase.trading_strategy import (
     Decision,
     Direction,
     FeeSchedule,
+    FixedDistance,
     Ledger,
     MakerTakerFee,
     NoBorrowRate,
     NoFees,
     Position,
+    RestingDistance,
+    StopLoss,
     Strategy,
+    TakeProfit,
 )
 from exchange.selection import ConfiguredExchange
 
@@ -171,6 +176,19 @@ class PaperState:
     # the last logon it annualizes a few hours of a book that has traded for
     # weeks, which is why it was floored to the plain return instead.
     opened_at:          float = 0.0
+    # How far the open position's resting orders sit from its entry, as
+    # fractions read on the candle it opened. On the book for the same reason
+    # everything else here is: the two legs of a paper round trip happen in
+    # DIFFERENT PROCESSES, and the entry candle — whose atr_pct priced them — is
+    # long gone by the time the exit fires. A process that recomputed them from
+    # the current candle would quietly move a resting order every tick.
+    #
+    # 0.0 means no order on that side, which is what a book written before this
+    # existed reads as. That is the honest reading rather than a convenient one:
+    # such a book's position was opened by a genome running without resting
+    # orders at all, and the entry ATR it would need is not recoverable.
+    take_profit_fraction: float = 0.0
+    stop_loss_fraction:   float = 0.0
 
 
 class PaperStateFile:
@@ -195,6 +213,8 @@ class PaperStateFile:
             equity_peak       = float(raw.get("equity_peak", 0.0)),
             max_drawdown      = float(raw.get("max_drawdown", 0.0)),
             opened_at         = float(raw.get("opened_at", 0.0)),
+            take_profit_fraction = float(raw.get("take_profit_fraction", 0.0)),
+            stop_loss_fraction   = float(raw.get("stop_loss_fraction", 0.0)),
         )
 
     # A book written before this field existed still knows one of its costs:
@@ -231,6 +251,8 @@ class PaperStateFile:
             "equity_peak":       state.equity_peak,
             "max_drawdown":      state.max_drawdown,
             "opened_at":         state.opened_at,
+            "take_profit_fraction": state.take_profit_fraction,
+            "stop_loss_fraction":   state.stop_loss_fraction,
             "updated_at":        UtcNow().iso(),
         }
         # Atomic: a crash mid-write must never leave a truncated book behind.
@@ -332,6 +354,26 @@ class TickOutcome:
     position_before: Optional[Position] = None
 
 
+# The two resting orders a trained genome carries, built from the config it was
+# SCORED under rather than config.yaml's. A genome papered without them exits on
+# signal alone, which is a different strategy from the one that was measured.
+class TrainedRestingOrders:
+    def __init__(self, config: StrategyConfig) -> None:
+        self._config = config
+
+    def take_profit(self) -> RestingDistance:
+        if self._config.take_profit_atr_mult > 0.0:
+            return AtrDistance(self._config.take_profit_atr_mult)
+        return FixedDistance(self._config.take_profit_pct)
+
+    # FixedDistance(0.0) when the stop is off, so a book whose genome asked for
+    # no stop never needs its frame to carry atr_pct.
+    def stop_loss(self) -> RestingDistance:
+        if self._config.stop_loss_atr_mult > 0.0:
+            return AtrDistance(self._config.stop_loss_atr_mult)
+        return FixedDistance(0.0)
+
+
 class PaperTick:
     def __init__(
         self,
@@ -341,6 +383,8 @@ class PaperTick:
         starting_balance: float,
         fees: FeeSchedule = NoFees(),
         borrow: BorrowRate = NoBorrowRate(),
+        take_profit: RestingDistance = FixedDistance(0.0),
+        stop_loss: RestingDistance = FixedDistance(0.0),
     ) -> None:
         self._rows             = rows
         self._strategy         = strategy
@@ -348,6 +392,10 @@ class PaperTick:
         self._starting_balance = starting_balance
         self._fees             = fees
         self._borrow           = borrow
+        # Both default to nothing, so a caller that passes neither ticks exactly
+        # the book it ticked before these existed.
+        self._take_profit      = take_profit
+        self._stop_loss        = stop_loss
 
     async def run(self) -> TickOutcome:
         state = (
@@ -365,12 +413,30 @@ class PaperTick:
             )
 
         ledger = Ledger(state.balance, state.position, self._fees, self._borrow)
-        # Same order as Backtest.run(): a position carried in is liquidation
-        # checked against this candle's range before a new decision is taken.
+        # Same order as Backtest.run(), and for the same reason: a candle that
+        # reaches two of these gives no way to know which came first, so the
+        # worst one is assumed to have. Liquidation, then the stop, then the
+        # target, and only then a decision on the close.
         ledger.liquidate(row["high"], row["low"], candle_start)
+        self._resting(
+            ledger, StopLoss, state.stop_loss_fraction, row, candle_start,
+        )
+        self._resting(
+            ledger, TakeProfit, state.take_profit_fraction, row, candle_start,
+        )
         before   = ledger.position()
         decision = self._strategy.decide(row, ledger.position(), ledger.balance())
+        flat     = ledger.position() is None
         ledger.apply(decision, row["close"], candle_start)
+        # Priced on the candle the position opened on, and then carried on the
+        # book until it closes — never re-read while a position is open.
+        opened   = flat and ledger.position() is not None
+        target_fraction = self._take_profit.fraction(row) if opened else (
+            state.take_profit_fraction if ledger.position() is not None else 0.0
+        )
+        stop_fraction   = self._stop_loss.fraction(row) if opened else (
+            state.stop_loss_fraction if ledger.position() is not None else 0.0
+        )
 
         # The Ledger charges as it opens and closes, so the balance is already
         # net; these are what it took this tick, for the report.
@@ -413,6 +479,8 @@ class PaperTick:
                 opened_at         = state.opened_at or (
                     float(candle_start) if state.last_candle_start == 0 else 0.0
                 ),
+                take_profit_fraction = target_fraction,
+                stop_loss_fraction   = stop_fraction,
             ),
             self._rows.pair(),
         )
@@ -422,6 +490,23 @@ class PaperTick:
             closed_trades=len(ledger.trades()), row=row, fee=fee, interest=interest,
             position_before=before,
         )
+
+    # One method for both orders: they differ only in which side of entry they
+    # rest on, which is the order object's own business.
+    @staticmethod
+    def _resting(
+        ledger: Ledger,
+        order_type: Any,
+        fraction: float,
+        row: dict[str, float],
+        candle_start: int,
+    ) -> None:
+        position = ledger.position()
+        if position is None or fraction <= 0.0:
+            return
+        order = order_type(position, fraction)
+        if order.reached_by(row["high"], row["low"]):
+            ledger.force_close(order.price(), candle_start)
 
     @staticmethod
     def _equity(state: PaperState, price: float) -> float:
@@ -516,12 +601,15 @@ async def _main() -> None:
         ))
         # Costs come from the strategy the genome was trained under, so a
         # paper book is charged what its own scoring assumed it would be.
+        orders  = TrainedRestingOrders(strategy_config)
         outcome = await PaperTick(
             rows, strategy,
             PaperStateFile(paper_config.state_filepath),
             strategy_config.starting_balance,
             ConfiguredFees(strategy_config.fee_bps).schedule(),
             ConfiguredBorrowRate(strategy_config.borrow_bps_per_hour).rate(),
+            orders.take_profit(),
+            orders.stop_loss(),
         ).run()
 
     ConsoleTickReport(

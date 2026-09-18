@@ -124,6 +124,10 @@ class TrainedStrategy:
                 # interchangeable: the multiple only means a price once it is
                 # read against the entry candle's atr_pct.
                 "take_profit_atr_mult":  self._config.take_profit_atr_mult,
+                # The downside bound, saved for the same reason: it decides when
+                # a position closes, so a genome papered without it is a
+                # different strategy from the one that was scored.
+                "stop_loss_atr_mult":    self._config.stop_loss_atr_mult,
                 # The exit model's columns decide a dual genome's SHAPE, so a
                 # genome rebuilt against a different exit_keys is a different
                 # model wearing the same weights. Saved for exactly the reason

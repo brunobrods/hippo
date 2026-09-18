@@ -61,6 +61,7 @@ from coinbase.ga.paper_trading import (
     PaperStateFile,
     PaperTick,
     TickOutcome,
+    TrainedRestingOrders,
     TrainedStrategyConfig,
 )
 from coinbase.ga.strategy_evaluator import (
@@ -282,6 +283,7 @@ class PaperAlgo:
         book: PaperBook,
         fees: FeeSchedule,
         borrow: BorrowRate,
+        orders: TrainedRestingOrders,
         curve: EquityCurve,
         log: DryRunLog,
     ) -> None:
@@ -291,6 +293,7 @@ class PaperAlgo:
         self._book     = book
         self._fees     = fees
         self._borrow   = borrow
+        self._orders   = orders
         self._curve    = curve
         self._log      = log
         self._outcome: Optional[TickOutcome] = None
@@ -304,6 +307,7 @@ class PaperAlgo:
         outcome = await PaperTick(
             self._rows, self._strategy, self._book,
             self._config.starting_balance, self._fees, self._borrow,
+            self._orders.take_profit(), self._orders.stop_loss(),
         ).run()
         self._outcome      = outcome
         self._last_tick_at = UtcNow().iso()
@@ -777,6 +781,9 @@ class PaperEngine:
             book     = self.books[entry.name],
             fees     = ConfiguredFees(self._config.fee_bps).schedule(),
             borrow   = ConfiguredBorrowRate(self._config.borrow_bps_per_hour).rate(),
+            # Each algo's own, from the config ITS genome was scored under —
+            # two books running side by side can carry different targets.
+            orders   = TrainedRestingOrders(trained.config()),
             curve    = self.curves[entry.name],
             log      = DryRunLog(entry.log_filepath),
         )

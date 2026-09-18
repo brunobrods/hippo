@@ -1,0 +1,99 @@
+# Does a downside bound pay?
+#
+# THIS FILE IS THE k = 4 ARM — fires on 17% of trades and 11% of winners.
+#
+# There is currently none. A long's liquidation price is 0.0, so a position is
+# closed only when the signal score says so, and `unwind_at_entry_price` then
+# books a still-open loser at its own ENTRY price — so the worst positions are
+# the ones least likely to appear in the win rate at all. Every give-back fix
+# measured so far has worked the profit side; this is the other one.
+#
+# ── Where the arms come from ──────────────────────────────────────────
+#
+# Measured on the 437 trades the control took across these twenty pairs, as the
+# adverse excursion before the exit divided by the entry candle's atr_pct.
+# 250 of those trades ended up winners, and what matters is the GAP between the
+# two columns — a stop only pays if it catches losers more often than winners:
+#
+#     k     touched by all trades     touched by WINNERS     gap
+#     1              74.4%                   58.8%          15.6
+#     2              44.9%                   25.6%          19.3
+#     4              17.2%                   11.2%           6.0
+#     8               7.3%                    6.0%           1.3
+#
+# Winners dip a median of 1.29 ATR before they pay, so k=1 is inside the noise
+# of the pair's own candle and cuts more than half of them. The gap is widest at
+# k=2 and closes as k rises: by k=8 the stop is nearly indiscriminate, firing on
+# 7.3% of trades to save 6.0% of winners from themselves.
+#
+# ── ONE ARM PER FILE ──────────────────────────────────────────────────
+#
+# SweepPlan is one-factor-at-a-time: each axis value is applied to the
+# UNMODIFIED base config and never combined with another axis's. Two axes would
+# give the multiples on config.yaml's own pair and the pairs at config.yaml's
+# own multiple, not their cross product. That mistake was made and run once
+# already, in the take-profit sweep.
+#
+# ── What to read, in order ────────────────────────────────────────────
+#
+# SEED SPREAD AND TRADE COUNT FIRST. An arm whose seeds return identical books
+# is measuring the stop, not a genome, and says nothing about a trained model.
+#
+# Then WIN RATE and the trade count together, because this knob moves them in
+# opposite directions by construction: a stop converts hidden losers — unwound
+# at entry price, invisible — into booked ones. A falling win rate with a rising
+# yield is the knob working, not failing.
+#
+# Then CAPTURED SHARE and yield. A stop cannot raise what a trade reaches; it
+# can only cut the left tail, so the honest question is whether the tail it cuts
+# costs more than the winners it interrupts.
+#
+#   python -m coinbase.ga.sweep coinbase/ga/sweep_stop_4_6h.yaml --workers 6
+#
+# 60 points: ~12 min across 6 workers. All windows cached.
+
+base_config: "coinbase/ga/config.yaml"
+
+fixed:
+  strategy.design: "linear"
+  # THE LINE UNDER TEST.
+  strategy.stop_loss_atr_mult: 4.0
+  # No target on the other side: the take-profit was measured across these same
+  # twenty pairs and did not pay, and bracketing both would confound the two.
+  strategy.take_profit_pct: 0.0
+  strategy.take_profit_atr_mult: 0.0
+
+  data.exchange: "binance"
+  data.granularity: "SIX_HOUR"
+  data.start_date: "2024-04-01"
+  data.end_date: "2026-02-28"
+
+  strategy.fee_bps: 10.0
+  strategy.borrow_bps_per_hour: 0.042
+  genetic_algorithm.allow_negative_weights: false
+
+seeds: [1, 2, 3]
+
+axes:
+  - path: "data.pair"
+    values:
+      - "AAVE-USDT"
+      - "ADA-USDT"
+      - "AVAX-USDT"
+      - "BICO-USDT"
+      - "DASH-USDT"
+      - "DEXE-USDT"
+      - "DOGE-USDT"
+      - "ETH-USDT"
+      - "FET-USDT"
+      - "LINK-USDT"
+      - "NEAR-USDT"
+      - "ONG-USDT"
+      - "PROM-USDT"
+      - "SOL-USDT"
+      - "SUI-USDT"
+      - "UNI-USDT"
+      - "WLD-USDT"
+      - "XLM-USDT"
+      - "XRP-USDT"
+      - "ZEC-USDT"

@@ -324,6 +324,40 @@ class TakeProfit:
         return low <= self.price()
 
 
+# The same order on the other side: it closes a position that has moved AGAINST
+# it by the given fraction. Three things make it a different animal from the
+# take-profit above, all of them unfavourable, and all of them deliberate.
+#
+#   It is not a maker order. A stop crosses the book to get out, so it pays the
+#   taker rate — which is what Ledger charges anyway.
+#
+#   Touching IS filling, near enough. The optimism that flatters a resting
+#   take-profit does not apply: a market falling through a stop fills it, and
+#   the honest worry is the opposite one — a gap through the level fills BELOW
+#   it, so the price used here is the best case rather than the upper bound.
+#
+#   It is checked before the take-profit, for the same reason liquidation is
+#   checked before both: a candle that reaches both gives no way to know which
+#   came first, and assuming the favourable one invents money.
+class StopLoss:
+    def __init__(self, position: Position, fraction: float) -> None:
+        self._position = position
+        self._fraction = fraction
+
+    def price(self) -> float:
+        entry = self._position.entry_price()
+        if self._position.direction() is Direction.LONG:
+            return entry * (1.0 - self._fraction)
+        return entry * (1.0 + self._fraction)
+
+    def reached_by(self, high: float, low: float) -> bool:
+        if self._fraction <= 0.0:
+            return False
+        if self._position.direction() is Direction.LONG:
+            return low <= self.price()
+        return high >= self.price()
+
+
 # ── How far away the resting exit sits ───────────────────────────────────
 # The distance above TakeProfit is given, decided ONCE on the candle the
 # position opens. A fixed fraction is one answer; a multiple of the pair's own
@@ -332,11 +366,11 @@ class TakeProfit:
 # depending on the pair, which is a volatility difference wearing a parameter's
 # clothes. A target set at k times atr_pct asks the same question of every
 # pair — "how many candles' worth of movement away?" — and one k can answer it.
-class TakeProfitTarget(Protocol):
+class RestingDistance(Protocol):
     def fraction(self, row: dict[str, float]) -> float: ...
 
 
-class FixedTakeProfit:
+class FixedDistance:
     def __init__(self, fraction: float) -> None:
         self._fraction = fraction
 
@@ -349,16 +383,16 @@ class FixedTakeProfit:
 # the position is open, which is a cancel-and-replace — a thing this backtest
 # has no model of, and one that would let a target retreat from a price the
 # market had already reached.
-class AtrTakeProfit:
+class AtrDistance:
     def __init__(self, multiple: float) -> None:
         self._multiple = multiple
 
     def fraction(self, row: dict[str, float]) -> float:
         if "atr_pct" not in row:
             raise ValueError(
-                "strategy.take_profit_atr_mult is set but the frame carries no "
-                "atr_pct column — IndicatorFrame supplies it; a frame built "
-                "elsewhere must too"
+                "a volatility-scaled distance was configured but the frame "
+                "carries no atr_pct column — IndicatorFrame supplies it; a frame "
+                "built elsewhere must too"
             )
         atr = float(row["atr_pct"])
         # NaN compares False against every threshold, so a NaN here would rest
@@ -533,7 +567,8 @@ class Backtest:
         unwind_at_entry_price: bool = True,
         fees: FeeSchedule = NoFees(),
         borrow: BorrowRate = NoBorrowRate(),
-        take_profit: TakeProfitTarget = FixedTakeProfit(0.0),
+        take_profit: RestingDistance = FixedDistance(0.0),
+        stop_loss: RestingDistance = FixedDistance(0.0),
     ) -> None:
         self._rows                  = rows
         self._strategy              = strategy
@@ -541,9 +576,10 @@ class Backtest:
         self._unwind_at_entry_price = unwind_at_entry_price
         self._fees                  = fees
         self._borrow                = borrow
-        # A fraction of 0.0 disables it, which is the behaviour every run so far
-        # was scored under — no resting exit, every fill at a close.
+        # A fraction of 0.0 disables either one, which is the behaviour every
+        # run so far was scored under — no resting exit, every fill at a close.
         self._take_profit           = take_profit
+        self._stop_loss             = stop_loss
 
     def run(self) -> BacktestResult:
         ledger = Ledger(self._starting_balance, None, self._fees, self._borrow)
@@ -555,6 +591,7 @@ class Backtest:
         # and kept off Position, which is the object a live or paper book
         # rebuilds from a state file and could not restore this from.
         target = 0.0
+        stop   = 0.0
 
         for row in records:
             price     = row["close"]
@@ -568,15 +605,20 @@ class Backtest:
             # order is the whole safety of it: a candle that reaches both gives
             # no way to know which came first, so the adverse one is assumed to
             # have. Reversing these two lines would invent money.
+            # Worst first, all the way down: liquidation, then the stop, then
+            # the target. A candle that reaches two of them gives no way to know
+            # which came first, so the adverse one is assumed to have.
             ledger.liquidate(high, low, timestamp)
+            self._stop(ledger, stop, high, low, timestamp)
             self._rest(ledger, target, high, low, timestamp)
             decision = self._strategy.decide(row, ledger.position(), ledger.balance())
             opened_from_flat = ledger.position() is None
             ledger.apply(decision, price, timestamp)
-            # Read on the entry candle, so the target reflects the volatility
+            # Read on the entry candle, so both orders reflect the volatility
             # the position was opened into and nothing later.
             if opened_from_flat and ledger.position() is not None:
                 target = self._take_profit.fraction(row)
+                stop   = self._stop_loss.fraction(row)
             equity_curve.append(ledger.equity(price))
 
         if records:
@@ -602,6 +644,18 @@ class Backtest:
         if position is None or target <= 0.0:
             return
         exit_order = TakeProfit(position, target)
+        if exit_order.reached_by(high, low):
+            ledger.force_close(exit_order.price(), timestamp)
+
+    # Fills at the stop's own price, which assumes the market traded through the
+    # level rather than gapping past it. A gap fills worse, so every number this
+    # produces is the BEST case for the stop — the opposite direction of error
+    # from the take-profit above, and the reason both are worth stating.
+    def _stop(self, ledger: Ledger, stop: float, high: float, low: float, timestamp: float) -> None:
+        position = ledger.position()
+        if position is None or stop <= 0.0:
+            return
+        exit_order = StopLoss(position, stop)
         if exit_order.reached_by(high, low):
             ledger.force_close(exit_order.price(), timestamp)
 
