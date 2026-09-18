@@ -1,3 +1,5 @@
+import inspect
+
 import pandas as pd
 import pytest
 
@@ -16,10 +18,10 @@ from coinbase.ga.strategy_evaluator import (
 )
 from coinbase.trading_strategy import (
     Action,
-    AtrTakeProfit,
+    AtrDistance,
     Backtest,
     Decision,
-    FixedTakeProfit,
+    FixedDistance,
     MarketRows,
 )
 
@@ -48,7 +50,7 @@ def test_the_target_rests_at_a_multiple_of_the_entry_candles_atr():
     # atr_pct 2% on the entry candle, multiple 3 -> a target 6% above 100.
     frame  = _frame([(100.0, 100.0, 100.0, 0.02), (100.0, 106.0, 100.0, 0.02)])
     result = Backtest(
-        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrTakeProfit(3.0),
+        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrDistance(3.0),
     ).run()
 
     assert result.trades()[0].profit() == pytest.approx(6.0)   # filled at 106, not the 100 close
@@ -57,7 +59,7 @@ def test_the_target_rests_at_a_multiple_of_the_entry_candles_atr():
 def test_a_candle_short_of_the_target_leaves_the_position_open():
     frame  = _frame([(100.0, 100.0, 100.0, 0.02), (100.0, 105.9, 100.0, 0.02)])
     result = Backtest(
-        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrTakeProfit(3.0),
+        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrDistance(3.0),
     ).run()
 
     # Only the end-of-window unwind closed it, at its own entry price.
@@ -76,7 +78,7 @@ def test_the_target_does_not_move_when_volatility_does():
         (100.0, 107.0, 100.0, 0.04),
     ])
     result = Backtest(
-        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrTakeProfit(3.0),
+        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrDistance(3.0),
     ).run()
 
     assert result.trades()[0].profit() == pytest.approx(6.0)
@@ -87,7 +89,7 @@ def test_the_target_does_not_move_when_volatility_does():
 def test_the_entry_candle_cannot_fill_the_order_it_placed():
     frame  = _frame([(100.0, 200.0, 100.0, 0.02), (100.0, 100.0, 100.0, 0.02)])
     result = Backtest(
-        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrTakeProfit(3.0),
+        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrDistance(3.0),
     ).run()
 
     assert result.trades()[0].profit() == pytest.approx(0.0)
@@ -96,7 +98,7 @@ def test_the_entry_candle_cannot_fill_the_order_it_placed():
 def test_a_zero_multiple_rests_no_order_at_all():
     frame  = _frame([(100.0, 100.0, 100.0, 0.02), (100.0, 500.0, 100.0, 0.02)])
     result = Backtest(
-        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrTakeProfit(0.0),
+        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrDistance(0.0),
     ).run()
 
     assert result.trades()[0].profit() == pytest.approx(0.0)
@@ -117,7 +119,7 @@ def test_a_second_position_gets_its_own_target():
         (100.0, 120.0, 100.0, 0.05),
     ])
     result = Backtest(
-        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrTakeProfit(3.0),
+        MarketRows(frame), _BuysOnceThenHolds(), 1000.0, take_profit=AtrDistance(3.0),
     ).run()
 
     # The third trade is the re-entry the window cut short, unwound at its own
@@ -128,18 +130,18 @@ def test_a_second_position_gets_its_own_target():
 
 def test_a_frame_without_atr_pct_raises_rather_than_resting_nothing():
     with pytest.raises(ValueError, match="atr_pct"):
-        AtrTakeProfit(3.0).fraction({"close": 100.0})
+        AtrDistance(3.0).fraction({"close": 100.0})
 
 
 # NaN compares False against every threshold, so it would rest an order that
 # can never fill — the same silence a missing column is raised for.
 def test_a_nan_atr_raises_rather_than_resting_nothing():
     with pytest.raises(ValueError, match="NaN"):
-        AtrTakeProfit(3.0).fraction({"atr_pct": float("nan")})
+        AtrDistance(3.0).fraction({"atr_pct": float("nan")})
 
 
 def test_a_fixed_target_ignores_the_row_entirely():
-    assert FixedTakeProfit(0.05).fraction({"atr_pct": 0.99}) == pytest.approx(0.05)
+    assert FixedDistance(0.05).fraction({"atr_pct": 0.99}) == pytest.approx(0.05)
 
 
 # ── The column ───────────────────────────────────────────────────────
@@ -264,16 +266,21 @@ def _scored_frame() -> pd.DataFrame:
 
 
 def _target_seen_by_backtest(monkeypatch, **overrides) -> object:
-    seen: list[object] = []
+    return _distances_seen_by_backtest(monkeypatch, **overrides)["take_profit"]
+
+
+# By NAME, not by position: Backtest now takes two distances, and an argument
+# added later would otherwise leave these tests quietly asserting about
+# whichever one happened to land last.
+def _distances_seen_by_backtest(monkeypatch, **overrides) -> dict[str, object]:
+    seen: list[dict[str, object]] = []
     real = strategy_evaluator.Backtest
 
     class RecordingBacktest(real):
         def __init__(self, *args: object, **kwargs: object) -> None:
-            # By shape, not by position: an argument added to Backtest later
-            # would otherwise leave this test quietly asserting about the wrong
-            # thing rather than failing.
-            targets = [a for a in (*args, *kwargs.values()) if hasattr(a, "fraction")]
-            seen.append(targets[-1])
+            bound = inspect.signature(real.__init__).bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            seen.append(dict(bound.arguments))
             super().__init__(*args, **kwargs)
 
     monkeypatch.setattr(strategy_evaluator, "Backtest", RecordingBacktest)
@@ -288,13 +295,13 @@ def _target_seen_by_backtest(monkeypatch, **overrides) -> object:
 
 def test_the_evaluator_hands_the_backtest_a_volatility_scaled_target(monkeypatch):
     target = _target_seen_by_backtest(monkeypatch, take_profit_atr_mult=3.0)
-    assert isinstance(target, AtrTakeProfit)
+    assert isinstance(target, AtrDistance)
     assert target.fraction({"atr_pct": 0.02}) == pytest.approx(0.06)
 
 
 def test_the_evaluator_still_hands_it_a_fixed_target_when_that_is_what_is_set(monkeypatch):
     target = _target_seen_by_backtest(monkeypatch, take_profit_pct=0.05)
-    assert isinstance(target, FixedTakeProfit)
+    assert isinstance(target, FixedDistance)
     assert target.fraction({}) == pytest.approx(0.05)
 
 

@@ -376,6 +376,73 @@ strategy:
   # profit side is not the instrument that fixes it, and a stop on the other
   # side remains untried.
   take_profit_atr_mult: 0.0
+  # The downside bound, in the same units: the position closes when it has moved
+  # this multiple of the ENTRY candle's atr_pct against itself. 0.0 is no stop,
+  # which is what every run ever recorded was scored under.
+  #
+  # It exists because there is otherwise no bound at all. A long's liquidation
+  # price is 0.0 — `IsolatedMargin` never liquidates one — so a position held for
+  # a median of 48 candles is closed only when the signal score says so. Worse,
+  # `unwind_at_entry_price` books a still-open loser at its own entry price, so
+  # the very worst positions are the ones least likely to appear in the win rate.
+  #
+  # A stop is therefore not just a risk control here; it CHANGES WHAT THE BOOK
+  # REPORTS. Expect the win rate to fall when it is on: hidden losers become
+  # booked ones. A falling win rate beside a rising yield is the knob working.
+  #
+  # Measured on the control's own 437 trades, as adverse excursion over entry
+  # ATR — a stop only pays if it catches losers more often than winners:
+  #
+  #     k     touched by all trades     touched by WINNERS
+  #     1              74.4%                   58.8%
+  #     2              44.9%                   25.6%
+  #     4              17.2%                   11.2%
+  #     8               7.3%                    6.0%
+  #
+  # Winners dip a median of 1.29 ATR before they pay, so anything near k=1 sits
+  # inside the pair's own candle noise.
+  #
+  # MEASURED, AND IT DOES NOT PAY EITHER. 240 runs, twenty pairs, three seeds,
+  # SIX_HOUR, costs charged:
+  #
+  #    k   trades/run  median hold  win rate  captured  p90 dip   yield  max_dd
+  #   0.0        7.9     48 candles    57.6%    +16.9%    21.9%  +16.1%   34.8%
+  #   2.0       12.1     17            30.6%     -5.4%    15.2%   -8.0%   27.6%
+  #   4.0       10.9     35            43.4%     +5.6%    19.4%   +4.3%   30.8%
+  #   8.0        9.6     45            48.1%     +5.6%    23.1%   +1.9%   33.0%
+  #
+  # Paired per pair against the control — captured share -35.3pp (t -3.75),
+  # -26.5pp (t -2.84) and -23.5pp (t -2.70), all three DIFFERENT; yield -24.0pp
+  # (t -3.75), -11.8pp (t -1.28) and -14.2pp (t -2.20).
+  #
+  # THE STOP DOES EXACTLY WHAT IT PROMISES AND IT STILL COSTS. The p90 adverse
+  # excursion falls from 21.9% to 15.2%, so the left tail really is bounded, and
+  # mean max_drawdown falls from 34.8% to 27.6% — but per pair that drawdown
+  # gain is indistinguishable from zero (t -1.57), while the yield loss is not.
+  #
+  # The win rate is the tell, and it moves as predicted: 57.6% to 30.6%. Those
+  # losses were always there — `unwind_at_entry_price` was booking still-open
+  # losers at their own entry price, so the book never showed them. The stop
+  # converts hidden losses into realized ones, and on this strategy the winners
+  # it interrupts on the way are worth more than the tails it cuts.
+  #
+  # So both sides of the exit are now measured across twenty pairs, and neither
+  # a target nor a stop pays. Do not sweep a fourth level of either.
+  #
+  # SETTING IT HERE REACHES THE LIVE BOOKS, quietly. TrainedStrategyConfig
+  # merges {**this section, **the genome's own hyperparameters}, so a key the
+  # genome does not carry is taken from here — and no genome trained before this
+  # knob existed carries it. divergences() will not warn, because it only
+  # reports keys present in BOTH. Every papered book would therefore open its
+  # next position with a stop nothing scored it with. Set it in a sweep file, or
+  # retrain, rather than here.
+  #
+  # A wide multiple can also ask for a stop no market can reach: 8 x atr_pct
+  # passes 100% on 90 of this universe's 57,624 six-hour candles, and a long
+  # cannot be stopped below zero. Those positions rest no stop and say so in the
+  # log — see PlacedStop, which deliberately does not raise, because aborting a
+  # 60-run sweep on one candle's volatility helps nobody.
+  stop_loss_atr_mult: 0.0
   position_size_pct: 0.60  # fraction of quote-currency balance risked per trade
   buy_threshold: 0.60       # signal_score above this opens a position
   sell_threshold: 0.40      # signal_score below this closes an open position

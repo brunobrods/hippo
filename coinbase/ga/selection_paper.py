@@ -217,6 +217,11 @@ class SelectionTick:
             row   = latest[held]
             price = row["close"]
             size  = ledger.position().size() if ledger.position() else 0.0
+            # KNOWN GAP: no resting orders here. PaperTick rests the two a
+            # genome carries; this loop rests neither, so a genome trained
+            # with a stop or a target is papered here without it. Closing it
+            # also needs the fractions persisted per position, as PaperState
+            # does — the entry candle is gone by the next tick.
             ledger.liquidate(row.get("high", price), row.get("low", price))
             if len(ledger.trades()) > before:
                 # The exchange closed it, not us — no exit fee, matching PaperTick.

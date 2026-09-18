@@ -1,10 +1,13 @@
 import functools
+import logging
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 # ── Decisions ────────────────────────────────────────────────────────────
@@ -324,6 +327,40 @@ class TakeProfit:
         return low <= self.price()
 
 
+# The same order on the other side: it closes a position that has moved AGAINST
+# it by the given fraction. Three things make it a different animal from the
+# take-profit above, all of them unfavourable, and all of them deliberate.
+#
+#   It is not a maker order. A stop crosses the book to get out, so it pays the
+#   taker rate — which is what Ledger charges anyway.
+#
+#   Touching IS filling, near enough. The optimism that flatters a resting
+#   take-profit does not apply: a market falling through a stop fills it, and
+#   the honest worry is the opposite one — a gap through the level fills BELOW
+#   it, so the price used here is the best case rather than the upper bound.
+#
+#   It is checked before the take-profit, for the same reason liquidation is
+#   checked before both: a candle that reaches both gives no way to know which
+#   came first, and assuming the favourable one invents money.
+class StopLoss:
+    def __init__(self, position: Position, fraction: float) -> None:
+        self._position = position
+        self._fraction = fraction
+
+    def price(self) -> float:
+        entry = self._position.entry_price()
+        if self._position.direction() is not Direction.LONG:
+            return entry * (1.0 + self._fraction)
+        return entry * (1.0 - self._fraction)
+
+    def reached_by(self, high: float, low: float) -> bool:
+        if self._fraction <= 0.0:
+            return False
+        if self._position.direction() is Direction.LONG:
+            return low <= self.price()
+        return high >= self.price()
+
+
 # ── How far away the resting exit sits ───────────────────────────────────
 # The distance above TakeProfit is given, decided ONCE on the candle the
 # position opens. A fixed fraction is one answer; a multiple of the pair's own
@@ -332,11 +369,11 @@ class TakeProfit:
 # depending on the pair, which is a volatility difference wearing a parameter's
 # clothes. A target set at k times atr_pct asks the same question of every
 # pair — "how many candles' worth of movement away?" — and one k can answer it.
-class TakeProfitTarget(Protocol):
+class RestingDistance(Protocol):
     def fraction(self, row: dict[str, float]) -> float: ...
 
 
-class FixedTakeProfit:
+class FixedDistance:
     def __init__(self, fraction: float) -> None:
         self._fraction = fraction
 
@@ -349,16 +386,16 @@ class FixedTakeProfit:
 # the position is open, which is a cancel-and-replace — a thing this backtest
 # has no model of, and one that would let a target retreat from a price the
 # market had already reached.
-class AtrTakeProfit:
+class AtrDistance:
     def __init__(self, multiple: float) -> None:
         self._multiple = multiple
 
     def fraction(self, row: dict[str, float]) -> float:
         if "atr_pct" not in row:
             raise ValueError(
-                "strategy.take_profit_atr_mult is set but the frame carries no "
-                "atr_pct column — IndicatorFrame supplies it; a frame built "
-                "elsewhere must too"
+                "a volatility-scaled distance was configured but the frame "
+                "carries no atr_pct column — IndicatorFrame supplies it; a frame "
+                "built elsewhere must too"
             )
         atr = float(row["atr_pct"])
         # NaN compares False against every threshold, so a NaN here would rest
@@ -371,6 +408,103 @@ class AtrTakeProfit:
                 "resting price exists — the frame has not dropped its warm-up rows"
             )
         return self._multiple * atr
+
+# What a position's stop distance actually comes to, which is not always what
+# was asked for: a long stopped a full 100% or more below entry rests at zero or
+# below, and no market reaches that. Reported as NO stop rather than as an
+# unfillable order, because the alternative — a price the config believes in and
+# the market can never touch — is the silence AtrDistance raises for on a NaN.
+#
+# Not raised, either, and that is the deliberate part. The condition is a
+# property of ONE candle's volatility rather than of the config: over this
+# universe's 57,624 six-hour candles, 90 of them put 8 x atr_pct past 1.0. A
+# raise would abort a 60-run sweep on the one candle where it crosses, and would
+# wedge a paper book that had already persisted such a fraction — every later
+# tick raising, with nothing able to clear it. The caller logs instead.
+class PlacedStop:
+    def __init__(self, position: Position, fraction: float) -> None:
+        self._position = position
+        self._fraction = fraction
+
+    def unreachable(self) -> bool:
+        return self._position.direction() is Direction.LONG and self._fraction >= 1.0
+
+    def fraction(self) -> float:
+        return 0.0 if self.unreachable() else self._fraction
+
+
+# ── Filling a resting order ──────────────────────────────────────────────
+
+class RestingOrder(Protocol):
+    def price(self) -> float: ...
+    def reached_by(self, high: float, low: float) -> bool: ...
+
+
+# Fills at the order's OWN price rather than the candle's close: the point of a
+# resting order is that it executed while the candle was still forming. One
+# object for both sides and both callers, because the backtest and the paper
+# tick filling these differently is precisely the drift that made a papered
+# genome a different strategy from the scored one.
+class RestingFill:
+    def __init__(
+        self,
+        ledger: "Ledger",
+        order_type: Callable[[Position, float], RestingOrder],
+        fraction: float,
+    ) -> None:
+        self._ledger     = ledger
+        self._order_type = order_type
+        self._fraction   = fraction
+
+    def fill(self, high: float, low: float, timestamp: float) -> None:
+        position = self._ledger.position()
+        if position is None or self._fraction <= 0.0:
+            return
+        order = self._order_type(position, self._fraction)
+        if order.reached_by(high, low):
+            self._ledger.force_close(order.price(), timestamp)
+
+
+# The two exits that can close a position AGAINST it, resolved in the order the
+# market would have reached them.
+#
+# Both sit on the same side of entry, and price is continuous: to reach the far
+# one the market must pass the near one. So they are ordered by distance from
+# entry rather than by whichever check the code happens to run first. Running
+# liquidation first unconditionally books a liquidation the stop would have
+# prevented — for a short with a 3-ATR stop and a candle that spikes through
+# both, the difference measured -923.81 against roughly -36.
+#
+# The take-profit is NOT part of this. It sits on the opposite side of entry, so
+# a candle reaching it and an adverse level gives no way to know which came
+# first — there the adverse one wins the tie, which is why callers resolve this
+# object before filling any target.
+class AdverseExits:
+    def __init__(self, ledger: "Ledger", stop_fraction: float) -> None:
+        self._ledger        = ledger
+        self._stop_fraction = stop_fraction
+
+    def resolve(self, high: float, low: float, timestamp: float) -> None:
+        if self._ledger.position() is None:
+            return
+        if self._stop_is_nearer():
+            self._stop().fill(high, low, timestamp)
+            self._ledger.liquidate(high, low, timestamp)
+            return
+        self._ledger.liquidate(high, low, timestamp)
+        self._stop().fill(high, low, timestamp)
+
+    def _stop(self) -> RestingFill:
+        return RestingFill(self._ledger, StopLoss, self._stop_fraction)
+
+    def _stop_is_nearer(self) -> bool:
+        position = self._ledger.position()
+        if position is None or self._stop_fraction <= 0.0:
+            return False
+        entry       = position.entry_price()
+        liquidation = IsolatedMargin(position, self._ledger.balance()).liquidation_price()
+        return abs(StopLoss(position, self._stop_fraction).price() - entry) <= abs(liquidation - entry)
+
 
 # ── Strategy contract ────────────────────────────────────────────────────
 
@@ -533,7 +667,8 @@ class Backtest:
         unwind_at_entry_price: bool = True,
         fees: FeeSchedule = NoFees(),
         borrow: BorrowRate = NoBorrowRate(),
-        take_profit: TakeProfitTarget = FixedTakeProfit(0.0),
+        take_profit: RestingDistance = FixedDistance(0.0),
+        stop_loss: RestingDistance = FixedDistance(0.0),
     ) -> None:
         self._rows                  = rows
         self._strategy              = strategy
@@ -541,9 +676,10 @@ class Backtest:
         self._unwind_at_entry_price = unwind_at_entry_price
         self._fees                  = fees
         self._borrow                = borrow
-        # A fraction of 0.0 disables it, which is the behaviour every run so far
-        # was scored under — no resting exit, every fill at a close.
+        # A fraction of 0.0 disables either one, which is the behaviour every
+        # run so far was scored under — no resting exit, every fill at a close.
         self._take_profit           = take_profit
+        self._stop_loss             = stop_loss
 
     def run(self) -> BacktestResult:
         ledger = Ledger(self._starting_balance, None, self._fees, self._borrow)
@@ -555,6 +691,7 @@ class Backtest:
         # and kept off Position, which is the object a live or paper book
         # rebuilds from a state file and could not restore this from.
         target = 0.0
+        stop   = 0.0
 
         for row in records:
             price     = row["close"]
@@ -564,19 +701,31 @@ class Backtest:
             # A position carried in from the previous candle lives through this
             # candle's range before any new decision is taken on its close.
             #
-            # Liquidation is checked FIRST and the resting exit second, and the
-            # order is the whole safety of it: a candle that reaches both gives
-            # no way to know which came first, so the adverse one is assumed to
-            # have. Reversing these two lines would invent money.
-            ledger.liquidate(high, low, timestamp)
-            self._rest(ledger, target, high, low, timestamp)
+            # Every forced exit here is charged the TAKER rate, because Ledger
+            # has one fee path. A resting take-profit is a maker fill and should
+            # pay the maker rate, so this overcharges it — the safe direction,
+            # and numerically identical on the measured Binance tier where the
+            # two rates are equal. A stop crosses the book, so taker is right
+            # for it.
+            # Both adverse exits first, in the order the market would have
+            # reached them, and only then the target on the opposite side —
+            # which is genuinely ambiguous against either, so it loses the tie.
+            AdverseExits(ledger, stop).resolve(high, low, timestamp)
+            RestingFill(ledger, TakeProfit, target).fill(high, low, timestamp)
             decision = self._strategy.decide(row, ledger.position(), ledger.balance())
             opened_from_flat = ledger.position() is None
             ledger.apply(decision, price, timestamp)
-            # Read on the entry candle, so the target reflects the volatility
+            # Read on the entry candle, so both orders reflect the volatility
             # the position was opened into and nothing later.
             if opened_from_flat and ledger.position() is not None:
                 target = self._take_profit.fraction(row)
+                placed = PlacedStop(ledger.position(), self._stop_loss.fraction(row))
+                if placed.unreachable():
+                    logger.warning(
+                        "stop of %.1f%% below entry is unreachable for a long — "
+                        "this position rests none", self._stop_loss.fraction(row) * 100.0,
+                    )
+                stop = placed.fraction()
             equity_curve.append(ledger.equity(price))
 
         if records:
@@ -589,21 +738,6 @@ class Backtest:
                 self._final_close_price(ledger, last["close"]), last.get("timestamp", 0.0),
             )
         return BacktestResult(ledger.trades(), equity_curve)
-
-    # Fills the resting exit at its OWN price, not the candle's close — the
-    # point of the order is that it executed while the candle was forming.
-    #
-    # It is charged the TAKER rate, because Ledger has one fee path. A post-only
-    # order is a maker fill and should pay the maker rate, so this overcharges
-    # — the safe direction, and numerically identical on the measured Binance
-    # tier where the two rates are equal. It is not identical on Coinbase.
-    def _rest(self, ledger: Ledger, target: float, high: float, low: float, timestamp: float) -> None:
-        position = ledger.position()
-        if position is None or target <= 0.0:
-            return
-        exit_order = TakeProfit(position, target)
-        if exit_order.reached_by(high, low):
-            ledger.force_close(exit_order.price(), timestamp)
 
     def _final_close_price(self, ledger: Ledger, market_price: float) -> float:
         position = ledger.position()

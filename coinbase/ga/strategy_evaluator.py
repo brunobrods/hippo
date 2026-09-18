@@ -9,17 +9,17 @@ import pandas as pd
 from coinbase.ga.ga_engine import Genome, GroupedL1Scaling, L1Scaling, WeightScaling
 from coinbase.trading_strategy import (
     Action,
-    AtrTakeProfit,
+    AtrDistance,
     Backtest,
     BacktestResult,
     ConfiguredBorrowRate,
     ConfiguredFees,
     Decision,
     Direction,
-    FixedTakeProfit,
+    FixedDistance,
     MarketRows,
     Position,
-    TakeProfitTarget,
+    RestingDistance,
     Trade,
 )
 
@@ -88,14 +88,25 @@ class StrategyConfig:
     # decides when a position closes, so a genome papered without it trades a
     # strategy nobody scored.
     #
-    # WHICH IS EXACTLY WHAT PAPER TRADING STILL DOES. paper_engine ticks
-    # Ledger directly — liquidate, decide, apply — with no resting order of
-    # either kind, so a genome trained with a target is papered without one and
-    # exits on closes alone. The gap predates this knob (take_profit_pct has
-    # it too, and nothing has ever been papered with a non-zero target) but a
-    # winning arm here would make it live. Saving the value is what lets the
-    # paper side honour it later; honouring it is not built.
+    # Paper trading now honours it: PaperTick places the same two resting orders
+    # in the same order Backtest does, and carries their distances on the book,
+    # because the tick that opens a position and the tick that closes it are
+    # different processes and the entry candle is gone by then.
     take_profit_atr_mult:  float = 0.0
+    # The downside bound, in the same units: the position closes when it has
+    # moved this multiple of the entry candle's atr_pct AGAINST itself.
+    #
+    # It exists because there is otherwise no downside bound at all. A long's
+    # liquidation price is 0.0 — it is never liquidated — so a position held for
+    # a median of 48 candles is closed only when the signal score says so, and
+    # `unwind_at_entry_price` then books a still-open loser at its own entry
+    # price, which hides it from the win rate entirely. Every give-back fix
+    # measured so far has worked the profit side; this is the other one.
+    #
+    # Priced in ATR for the reason take_profit_atr_mult is: a stop below the
+    # noise of a pair's own candle is hit by that noise, and one value of k
+    # sits at the same place in every pair's distribution.
+    stop_loss_atr_mult:    float = 0.0
     # Which columns the EXIT model of a dual genome scores. Ignored by linear.
     #
     # MUST NAME AT LEAST ONE COLUMN. Left empty, the exit group holds only
@@ -147,6 +158,7 @@ class StrategyConfigFile:
             design                = str(section.get("design", LINEAR_DESIGN)),
             take_profit_pct       = float(section.get("take_profit_pct", 0.0)),
             take_profit_atr_mult  = float(section.get("take_profit_atr_mult", 0.0)),
+            stop_loss_atr_mult    = float(section.get("stop_loss_atr_mult", 0.0)),
             exit_keys             = tuple(section.get("exit_keys") or ()),
             exit_pnl_scale        = float(section.get("exit_pnl_scale", 0.02)),
             exit_quantile         = float(section.get("exit_quantile", 0.10)),
@@ -211,6 +223,11 @@ class ValidatedStrategyConfig:
             found.append(
                 f"strategy.take_profit_atr_mult must not be negative, got "
                 f"{c.take_profit_atr_mult}"
+            )
+        if c.stop_loss_atr_mult < 0.0:
+            found.append(
+                f"strategy.stop_loss_atr_mult must not be negative, got "
+                f"{c.stop_loss_atr_mult}"
             )
         # One position, one resting order. Honouring both would mean two orders
         # on the same side at different prices, and silently preferring one
@@ -887,16 +904,25 @@ class StrategyEvaluator:
             ConfiguredFees(self._config.fee_bps).schedule(),
             ConfiguredBorrowRate(self._config.borrow_bps_per_hour).rate(),
             self._target(),
+            self._stop(),
         ).run()
 
     # Which resting order this run places. Validation has already ruled out
     # both being set, so the volatility-scaled one wins when it is present and
-    # a config that sets neither gets FixedTakeProfit(0.0) — no resting order,
+    # a config that sets neither gets FixedDistance(0.0) — no resting order,
     # every fill at a close, exactly as before either knob existed.
-    def _target(self) -> TakeProfitTarget:
+    def _target(self) -> RestingDistance:
         if self._config.take_profit_atr_mult > 0.0:
-            return AtrTakeProfit(self._config.take_profit_atr_mult)
-        return FixedTakeProfit(self._config.take_profit_pct)
+            return AtrDistance(self._config.take_profit_atr_mult)
+        return FixedDistance(self._config.take_profit_pct)
+
+    # FixedDistance(0.0) rather than AtrDistance(0.0) when the stop is off: the
+    # ATR one reads a column, and a run that configured no stop should not need
+    # a frame to carry one.
+    def _stop(self) -> RestingDistance:
+        if self._config.stop_loss_atr_mult > 0.0:
+            return AtrDistance(self._config.stop_loss_atr_mult)
+        return FixedDistance(0.0)
 
     # Net, so the GA pays for the trading it does: a genome that churns for a
     # thin edge now scores below one that waits for a wide one. With both rates

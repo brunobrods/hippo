@@ -61,6 +61,7 @@ from coinbase.ga.paper_trading import (
     PaperStateFile,
     PaperTick,
     TickOutcome,
+    TrainedRestingOrders,
     TrainedStrategyConfig,
 )
 from coinbase.ga.strategy_evaluator import (
@@ -282,6 +283,7 @@ class PaperAlgo:
         book: PaperBook,
         fees: FeeSchedule,
         borrow: BorrowRate,
+        orders: TrainedRestingOrders,
         curve: EquityCurve,
         log: DryRunLog,
     ) -> None:
@@ -291,6 +293,7 @@ class PaperAlgo:
         self._book     = book
         self._fees     = fees
         self._borrow   = borrow
+        self._orders   = orders
         self._curve    = curve
         self._log      = log
         self._outcome: Optional[TickOutcome] = None
@@ -304,6 +307,7 @@ class PaperAlgo:
         outcome = await PaperTick(
             self._rows, self._strategy, self._book,
             self._config.starting_balance, self._fees, self._borrow,
+            self._orders.take_profit(), self._orders.stop_loss(),
         ).run()
         self._outcome      = outcome
         self._last_tick_at = UtcNow().iso()
@@ -355,8 +359,17 @@ class PaperAlgo:
             opened_at         = state.opened_at,
         )
 
+    # A resting order closes the position before the strategy is consulted, so
+    # the decision on such a tick is HOLD. Reporting that alone put a HOLD in
+    # journal.tsv beside a jumped balance and no record of the exit at all —
+    # which matters now that a stop is a routine exit rather than, like a long's
+    # liquidation, one that never fires.
     def _last_action(self) -> str:
-        if self._outcome is None or self._outcome.decision is None:
+        if self._outcome is None:
+            return "-"
+        if self._outcome.closed_by:
+            return self._outcome.closed_by.upper()
+        if self._outcome.decision is None:
             return "-"
         return self._outcome.decision.action.value
 
@@ -777,6 +790,9 @@ class PaperEngine:
             book     = self.books[entry.name],
             fees     = ConfiguredFees(self._config.fee_bps).schedule(),
             borrow   = ConfiguredBorrowRate(self._config.borrow_bps_per_hour).rate(),
+            # Each algo's own, from the config ITS genome was scored under —
+            # two books running side by side can carry different targets.
+            orders   = TrainedRestingOrders(trained.config()),
             curve    = self.curves[entry.name],
             log      = DryRunLog(entry.log_filepath),
         )
